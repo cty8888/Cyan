@@ -1,7 +1,7 @@
 [project]
 name = "coding-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "一个不依赖 Agent 框架、从零实现的命令行编程智能体"
 readme = "README.md"
 authors = [
     { name = "cty", email = "231870165@smail.nju.edu.cn" }

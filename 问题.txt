@@ -1,0 +1,2 @@
+                self.session.record_usage(response.usage)
+                self.session.add(response.message)为啥不指定添加message的role

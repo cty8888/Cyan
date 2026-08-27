@@ -38,6 +38,10 @@ dist/
 
 # Agent generated workspace
 workspace/
+.demo/
+
+# Agent 运行时状态目录（会话、临时脚本）
+.coding_agent/
 
 # Temporary files
 *.tmp

@@ -1,0 +1,197 @@
+"""终端渲染与审批交互。
+
+用户看到的是 rich Console；同一条事件再写入 logging 文件，方便事后复盘。
+两者职责分开：Console 管观感，logging 管落盘。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.syntax import Syntax
+from rich.text import Text
+
+from ..config import Config
+from ..core.events import STOP_REASON_TEXT, StopReason
+from ..logutil import get_logger
+from ..security.approval import ApprovalDecision, ApprovalRequest
+from ..tools.base import ToolResult
+
+logger = get_logger("cli")
+
+_RISK_LABEL = {"write": "写入文件", "exec": "执行命令"}
+_DECISION_BY_KEY = {
+    "y": ApprovalDecision.ALLOW_ONCE,
+    "n": ApprovalDecision.DENY,
+    "a": ApprovalDecision.ALLOW_ALWAYS,
+}
+
+
+class Renderer:
+    def __init__(self, console: Console | None = None):
+        self.console = console or Console()
+
+    # ------------------------------------------------------------------ 通用
+    def banner(self, config: Config, tool_names: list[str]) -> None:
+        lines = [
+            Text.from_markup(f"[bold cyan]Coding Agent[/]  模型 [green]{config.model}[/]"),
+            Text.from_markup(f"工作目录  [dim]{config.workspace}[/]"),
+            Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
+            Text.from_markup(f"日志文件  [dim]{config.log_dir / 'agent.log'}[/]"),
+        ]
+        if config.yolo:
+            lines.append(Text.from_markup("[bold yellow]YOLO 模式已开启：写入与执行不再逐次确认[/]"))
+        lines.append(Text.from_markup("[dim]输入任务开始，/help 查看命令，Ctrl-C 中断当前任务[/]"))
+        self.console.print(Panel(Text("\n").join(lines), border_style="cyan", padding=(0, 1)))
+        logger.info("启动 模型=%s workspace=%s tools=%s", config.model, config.workspace, ", ".join(tool_names))
+
+    def notice(self, message: str, level: str = "info") -> None:
+        style = {"error": "bold red", "warning": "yellow", "info": "dim"}.get(level, "dim")
+        self.console.print(f"[{style}]{message}[/]")
+        getattr(logger, level if level in {"error", "warning", "info"} else "info")("%s", message)
+
+    def error(self, message: str) -> None:
+        self.console.print(f"[bold red]错误[/] {message}")
+        logger.error("%s", message)
+
+    def assistant(self, text: str) -> None:
+        self.console.print(Markdown(text))
+        self.console.print()
+        logger.info("助手：\n%s", text)
+
+    def thinking(self, iteration: int) -> None:
+        self.console.print(f"[dim]· 第 {iteration} 轮，思考中...[/]")
+        logger.info("第 %s 轮，思考中", iteration)
+
+    # ------------------------------------------------------------------ 工具
+    def tool_started(self, name: str, args: dict[str, Any]) -> None:
+        self.console.print(f"[bold blue]▸ {name}[/] [dim]{_format_args(name, args)}[/]")
+        logger.info("调用 %s  %s", name, _format_args(name, args))
+        logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
+
+    def tool_finished(self, name: str, result: ToolResult, duration: float) -> None:
+        text = result.content if result.ok else (result.error or "执行失败")
+        mark = "[green]✓[/]" if result.ok else "[red]✗[/]"
+        self.console.print(f"  {mark} {_first_line(text)} [dim]({duration:.1f}s)[/]")
+        logger.info("%s %s  %s  (%.1fs)", name, "成功" if result.ok else "失败", _first_line(text), duration)
+        if not result.ok:
+            logger.warning("%s 失败详情：%s", name, result.error)
+        logger.debug("%s 完整输出：\n%s", name, text)
+
+        if "exit_code" in result.metadata:
+            for line in _output_excerpt(text):
+                self.console.print(f"    [dim]{line}[/]")
+
+        diff = result.metadata.get("diff")
+        if diff and diff != "(无变化)":
+            self.console.print(Syntax(diff, "diff", theme="ansi_dark", background_color="default"))
+            logger.info("diff:\n%s", diff)
+        self.console.print()
+
+    # ------------------------------------------------------------------ 审批
+    def ask_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+        title = _RISK_LABEL.get(request.risk, request.risk)
+        body: list[Any] = [Text.from_markup(f"[bold]{request.summary}[/]")]
+
+        if request.detail:
+            body.append(Text())
+            body.append(_render_detail(request.detail, request.detail_format))
+        if request.reason:
+            body.append(Text())
+            body.append(Text.from_markup(f"[yellow]注意：{request.reason}[/]"))
+
+        self.console.print(
+            Panel(
+                _stack(body),
+                title=f"需要确认 · {title}",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+        logger.info("需要确认 · %s  %s", title, request.summary)
+        if request.detail:
+            logger.info("详情:\n%s", request.detail)
+
+        choices = ["y", "n"] if request.force else ["y", "n", "a"]
+        hint = "y=允许  n=拒绝" + ("" if request.force else "  a=本会话始终允许该工具")
+        self.console.print(f"[dim]{hint}[/]")
+
+        try:
+            answer = Prompt.ask("是否执行", choices=choices, default="n", console=self.console)
+        except (KeyboardInterrupt, EOFError):
+            self.console.print("\n[yellow]已取消[/]\n")
+            logger.warning("审批已取消")
+            return ApprovalDecision.DENY
+        self.console.print()
+        decision = _DECISION_BY_KEY.get(answer, ApprovalDecision.DENY)
+        logger.info("审批结果：%s", decision.value)
+        return decision
+
+    # ------------------------------------------------------------------ 收尾
+    def task_finished(self, reason: StopReason, stats: dict[str, Any]) -> None:
+        summary = (
+            f"{stats.get('llm_calls', 0)} 次模型调用 · "
+            f"{stats.get('tool_calls', 0)} 次工具调用 · "
+            f"{stats.get('total_tokens', 0)} tokens"
+        )
+        if reason is StopReason.COMPLETED:
+            self.console.print(f"[dim]{summary}[/]")
+            logger.info("%s", summary)
+        else:
+            self.console.print(f"[yellow]{STOP_REASON_TEXT[reason]}[/] [dim]（{summary}）[/]")
+            logger.warning("%s（%s）", STOP_REASON_TEXT[reason], summary)
+        self.console.print()
+
+
+def _stack(items: list[Any]) -> Any:
+    from rich.console import Group
+
+    return Group(*items)
+
+
+def _render_detail(detail: str, fmt: str) -> Any:
+    if fmt == "diff":
+        return Syntax(detail, "diff", theme="ansi_dark", background_color="default")
+    if fmt in {"shell", "bash"}:
+        return Syntax(detail, "bash", theme="ansi_dark", background_color="default", word_wrap=True)
+    if fmt == "text":
+        return Text(detail)
+    return Syntax(detail, fmt, theme="ansi_dark", background_color="default")
+
+
+def _format_args(tool_name: str, args: dict[str, Any]) -> str:
+    if tool_name == "run_command":
+        return _clip(str(args.get("command", "")), 100)
+    if "path" in args:
+        extra = ""
+        if tool_name == "list_dir":
+            extra = f" depth={args.get('depth', 2)}"
+        return f"{args['path']}{extra}"
+    if tool_name == "run_code":
+        return f"{args.get('language', 'python')} 代码片段"
+    return _clip(json.dumps(args, ensure_ascii=False), 100)
+
+
+def _first_line(text: str, limit: int = 120) -> str:
+    line = (text or "").strip().splitlines()
+    return _clip(line[0], limit) if line else ""
+
+
+def _output_excerpt(text: str, max_lines: int = 8) -> list[str]:
+    lines = [
+        line for line in (text or "").splitlines()[1:]
+        if line.strip() and line.strip() not in {"[stdout]", "[stderr]", "(无输出)"}
+    ]
+    excerpt = [_clip(line, 140) for line in lines[:max_lines]]
+    if len(lines) > max_lines:
+        excerpt.append(f"... 另有 {len(lines) - max_lines} 行输出")
+    return excerpt
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."

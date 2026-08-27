@@ -29,7 +29,6 @@ from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
 from ..security.policy import SecurityPolicy
 from ..tools.registry import build_default_registry
-from ..tools.runners import runtime_summary
 from .renderer import Renderer
 
 try:  # 让输入框支持上下键历史与行编辑
@@ -56,9 +55,7 @@ class App:
         self.renderer = Renderer(console)
         self.policy = SecurityPolicy(config.workspace, yolo=config.yolo)
         self.registry = build_default_registry()
-        self.session = Session(
-            system_prompt=build_system_prompt(config.workspace, runtime_summary())
-        )
+        self.session = Session(system_prompt=build_system_prompt(config.workspace))
         self.llm = DeepSeekClient(config, on_retry=self._on_llm_retry)
         self.agent = Agent(
             config=config,

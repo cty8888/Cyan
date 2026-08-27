@@ -31,7 +31,6 @@ from ..security.approval import ApprovalDecision
 from ..security.policy import SecurityPolicy
 from ..tools.base import RiskLevel, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
-from ..tools.runners import runtime_summary
 from .events import (
     AgentEvent,
     ApprovalRequired,
@@ -64,9 +63,7 @@ class Agent:
         self.llm = llm
         self.registry = registry
         self.policy = policy
-        self.session = session or Session(
-            system_prompt=build_system_prompt(config.workspace, runtime_summary())
-        )
+        self.session = session or Session(system_prompt=build_system_prompt(config.workspace))
         self.tool_ctx = ToolContext(
             workspace=config.workspace, policy=policy, config=config, session=self.session
         )

@@ -24,7 +24,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", help="API Key，默认读取环境变量 DEEPSEEK_API_KEY")
     parser.add_argument("--base-url", help="API 地址，默认 https://api.deepseek.com")
     parser.add_argument("--max-iterations", type=int, help="单个任务的最大轮次，默认 30")
-    parser.add_argument("--timeout", type=int, dest="command_timeout", help="命令执行超时秒数，默认 60")
     parser.add_argument(
         "--yolo",
         action="store_true",
@@ -58,7 +57,6 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.api_key,
             base_url=args.base_url,
             max_iterations=args.max_iterations,
-            command_timeout=args.command_timeout,
             yolo=args.yolo,
             log_level=args.log_level,
             verbose=args.verbose,

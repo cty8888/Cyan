@@ -43,6 +43,10 @@ class Session:
     # 调用如实给出了它请求的内容（没被预算截断）即可
     read_files: set[Path] = field(default_factory=set, repr=False)
 
+    # bash 工具的「当前目录」。每条命令都是独立新进程，没有持久 shell 可以延续 cd 的效果，
+    # 所以由会话记住上一次命令结束后的目录；None 表示还没偏离过工作目录根
+    bash_cwd: Path | None = None
+
     def add(self, message: Message) -> None:
         self.messages.append(message)
 
@@ -91,6 +95,7 @@ class Session:
         self.consecutive_tool_failures = 0
         self.reset_repeat_tracking()
         self.read_files.clear()
+        self.bash_cwd = None
 
     def stats(self) -> dict[str, Any]:
         return {

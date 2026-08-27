@@ -165,15 +165,13 @@ def _render_detail(detail: str, fmt: str) -> Any:
 
 
 def _format_args(tool_name: str, args: dict[str, Any]) -> str:
-    if tool_name == "run_command":
+    if tool_name == "bash":
         return _clip(str(args.get("command", "")), 100)
     if "path" in args:
         extra = ""
         if tool_name == "list_dir":
             extra = f" depth={args.get('depth', 2)}"
         return f"{args['path']}{extra}"
-    if tool_name == "run_code":
-        return f"{args.get('language', 'python')} 代码片段"
     return _clip(json.dumps(args, ensure_ascii=False), 100)
 
 
@@ -183,10 +181,10 @@ def _first_line(text: str, limit: int = 120) -> str:
 
 
 def _output_excerpt(text: str, max_lines: int = 8) -> list[str]:
-    lines = [
-        line for line in (text or "").splitlines()[1:]
-        if line.strip() and line.strip() not in {"[stdout]", "[stderr]", "(无输出)"}
-    ]
+    # 内容格式是「头部说明行 + 空行 + 实际输出」，头部行数不固定（退出码/目录/超时提示/cwd 提示），
+    # 所以按第一个空行切开，而不是硬编码跳过第一行
+    _, _, tail = (text or "").partition("\n\n")
+    lines = [line for line in tail.splitlines() if line.strip() and line.strip() != "(无输出)"]
     excerpt = [_clip(line, 140) for line in lines[:max_lines]]
     if len(lines) > max_lines:
         excerpt.append(f"... 另有 {len(lines) - max_lines} 行输出")

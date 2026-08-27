@@ -42,11 +42,11 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 | `read_file` | 只读 | 带行号读取，支持 offset/limit 分段 |
 | `write_file` | 写入 | 整文件写入，自动创建父目录 |
 | `edit_file` | 写入 | 精确字符串替换，要求匹配唯一 |
-| `run_command` | 执行 | 受控 shell，超时 + 输出截断 + 目录锁定，用于测试框架 / git / 构建 |
-| `run_code` | 执行 | 按语言分发执行，自动选对解释器并把工作目录加入 import 路径，当前支持 Python |
+| `bash` | 执行 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
 
-两个执行类工具的分工写进了工具描述，system prompt 里还会列出解释器的绝对路径，
-避免模型在 `run_command` 里写出环境中并不存在的 `python`。
+`bash` 每次调用都是独立新进程，不保留环境变量或别名，`export` 不会带到下一次调用；
+但工作目录会在调用之间延续——命令里 `cd` 到哪，下一次调用就从哪继续，越出工作目录会被自动拉回工作目录根。
+system prompt 里会给出本机 Python 解释器的绝对路径，避免模型在命令里写出环境中并不存在的 `python`。
 
 ## 安全模型
 
@@ -67,7 +67,7 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 cli/        REPL 与 rich 渲染，消费事件流、处理审批交互
 core/       Agent Loop、会话状态、事件定义、system prompt
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
-tools/      工具契约、注册表、文件系统与执行类工具、语言 runner
+tools/      工具契约、注册表、文件系统与 bash 执行工具
 security/   路径沙箱、命令黑名单、风险分级与审批协议
 config.py   三级配置覆盖（CLI 参数 > 环境变量 > 默认值）
 logutil.py  标准库 logging（默认只写文件）
@@ -85,19 +85,6 @@ Agent Loop 是一个 generator：向外 yield 事件，通过 `send()` 接收审
 
 新增工具：继承 `Tool`，填 `name`/`description`/`risk`/`parameters`，实现 `run()`，
 然后在 `tools/registry.py` 的 `build_default_registry()` 里注册一行。JSON Schema 会自动导出给模型。
-
-新增可执行语言：实现一个 `CodeRunner` 子类并 `register_runner()`，`run_code` 工具本身无需改动。
-
-```python
-from coding_agent.tools.runners import CodeRunner, register_runner
-
-class NodeRunner(CodeRunner):
-    language, display_name, extension = "javascript", "Node.js", ".js"
-    def build_command(self, script):
-        return ["node", str(script)]
-
-register_runner(NodeRunner())
-```
 
 ## 开发
 

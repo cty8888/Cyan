@@ -33,8 +33,7 @@ src/coding_agent/
     base.py              # Tool 抽象基类 + ToolResult + 参数校验
     registry.py          # 注册表：schema 导出 + 名称分发 + 执行封装
     filesystem.py        # list_dir / read_file / write_file / edit_file
-    execution.py         # run_command / run_code
-    runners/             # 语言执行器注册表，MVP 只注册 python
+    execution.py         # bash：唯一的 shell 执行入口
   security/
     policy.py            # 路径沙箱、命令黑名单、风险分级
     approval.py          # 审批交互协议（y / n / a / --yolo）
@@ -96,12 +95,14 @@ MVP 工具集：
 - `read_file`：带行号返回，支持 offset/limit，大文件截断并提示
 - `write_file`：整文件写入/新建
 - `edit_file`：精确字符串替换（old_string 必须唯一，否则报错让模型补上下文）—— 比整文件重写省 token，是 Claude Code 的关键设计
-- `run_command`：受控 shell，超时 + 输出截断 + 工作目录锁定。负责测试框架、git、构建这类 shell 操作
-- `run_code`：**通过 `runners/` 语言注册表分发**，MVP 只注册 `python`（`sys.executable` 执行），扩展新语言只需注册一个 Runner，满足「初期只支持 Python 但易扩展」
-
-两者职责重叠，靠三处约束让模型选对：工具描述互相指路；`Runner.environment()` 把工作目录塞进
-`PYTHONPATH`，让 `run_code` 的临时片段能 import 项目模块；`runtime_summary()` 把解释器绝对路径
-写进 system prompt，避免模型在 `run_command` 里假设存在 `python` 这个命令（很多环境只有 `python3`）。
+- `bash`：唯一的 shell 执行入口，测试、构建、git、脚本都走它。学习 Claude Code 的 Bash 工具设计：
+  - 接口只有 `command`（必填）与 `timeout_ms`（默认 120000）
+  - 每条命令都在独立新进程里跑，没有持久 shell；不保留环境变量或别名，`export` 不影响下一次调用
+  - 工作目录会在调用之间延续：给命令追加一段 trailer 脚本，执行结束后打印 `$PWD`，
+    解析出来后写回会话状态（`Session.bash_cwd`），下一次调用从那里继续；越出工作目录会被拉回工作目录根
+  - stdout/stderr 合并成一路输出，超过 `max_tool_output_chars`（默认 30000）从尾部截断并加 `...[truncated]`
+  - system prompt 里写明本机 `sys.executable` 的绝对路径，避免模型在命令里假设存在 `python` 这个命令（很多环境只有 `python3`）
+  - 先不做：后台任务、shell 别名加载、环境变量持久化、输出落盘、权限沙箱——等基础跑稳再加
 
 ## 5. 安全模型（分级审批）
 
@@ -128,7 +129,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] 搭建目录骨架、`config.py`（三级配置覆盖）、`errors.py` 异常体系
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
 - [x] tools 层：Tool 基类 + ToolResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
-- [x] execution 工具：`run_command`（超时/截断/目录锁定）+ `run_code` 语言 runner 注册表，注册 python runner
+- [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
 - [x] security 层：路径沙箱、命令黑名单、风险分级与审批协议（y/n/a + `--yolo`）
 - [x] `core/agent.py` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环

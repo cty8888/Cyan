@@ -23,7 +23,6 @@ _ENV_MAPPING = {
     "DEEPSEEK_BASE_URL": "base_url",
     "DEEPSEEK_MODEL": "model",
     "CODING_AGENT_MAX_ITERATIONS": "max_iterations",
-    "CODING_AGENT_COMMAND_TIMEOUT": "command_timeout",
     "CODING_AGENT_TEMPERATURE": "temperature",
     "CODING_AGENT_LOG_LEVEL": "log_level",
 }
@@ -49,8 +48,7 @@ class Config:
     max_repeated_calls: int = 3
 
     # 工具行为
-    command_timeout: int = 60
-    max_tool_output_chars: int = 20_000
+    max_tool_output_chars: int = 30_000
     max_file_read_chars: int = 60_000
     max_dir_entries: int = 400
 

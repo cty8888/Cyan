@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -27,7 +28,6 @@ from coding_agent.security.policy import SecurityPolicy
 from coding_agent.tools.base import ToolContext
 from coding_agent.tools.execution import _run_process
 from coding_agent.tools.registry import build_default_registry
-from coding_agent.tools.runners import runtime_summary
 
 failures: list[str] = []
 
@@ -165,24 +165,43 @@ def main() -> int:
         r = registry.execute("read_file", {"path": "pkg/mod.py", "offset": 999}, ctx)
         check("越界 offset 返回行数提示", r.ok and "共" in r.content and "没有内容" in r.content, r.content)
 
-        r = registry.execute("run_code", {"language": "python", "path": "sub/new.py"}, ctx)
-        check("run_code 执行文件", r.ok and "hi" in r.content, r.content)
+        # ------------------------------------------------------------- bash 工具
+        r = registry.execute("bash", {"command": "echo hello"}, ctx)
+        check("bash 正常执行", r.ok and "hello" in r.content, r.content)
 
-        r = registry.execute("run_code", {"language": "python", "code": "from pkg.mod import add\nprint(add(1,2))"}, ctx)
-        check("run_code 执行片段", r.ok and "3" in r.content, r.content)
-        check("run_code 清理临时文件", not list((tmp / ".coding_agent" / "tmp").glob("snippet_*")))
+        r = registry.execute("bash", {"command": "echo out; echo err >&2"}, ctx)
+        check("bash 合并 stdout/stderr", r.ok and "out" in r.content and "err" in r.content, r.content)
 
-        r = registry.execute("run_code", {"language": "python", "code": "raise SystemExit(3)"}, ctx)
-        check("run_code 非零退出码算失败", not r.ok and "退出码：3" in (r.error or ""), r.error or "")
+        r = registry.execute("bash", {"command": "exit 3"}, ctx)
+        check("bash 非零退出码算失败", not r.ok and "退出码：3" in (r.error or ""), r.error or "")
 
-        r = registry.execute("run_code", {"language": "rust", "code": "x"}, ctx)
-        check("run_code 拒绝未注册语言", not r.ok and "python" in (r.error or ""), r.error or "")
+        r = registry.execute("bash", {"command": "sleep 5", "timeout_ms": 200}, ctx)
+        check("bash 超时终止", not r.ok and "超时" in (r.error or ""), r.error or "")
 
-        r = registry.execute("run_command", {"command": "echo hello && pwd"}, ctx)
-        check("run_command 正常执行", r.ok and "hello" in r.content, r.content)
+        run_add = {"command": f'{sys.executable} -c "from pkg.mod import add; print(add(1, 2))"'}
+        r = registry.execute("bash", run_add, ctx)
+        check("bash 可以直接调用项目的 Python 解释器", r.ok and "3" in r.content, r.content)
 
-        r = registry.execute("run_command", {"command": "sleep 5", "timeout": 1}, ctx)
-        check("run_command 超时终止", not r.ok and "超时" in (r.error or ""), r.error or "")
+        # cwd 在两次调用之间延续：这次 cd 进 pkg，下一次不带 cwd 参数也该停在那
+        r = registry.execute("bash", {"command": "cd pkg && pwd"}, ctx)
+        check("bash cd 后目录信息正确", r.ok and str((tmp / "pkg").resolve()) in r.content, r.content)
+        r = registry.execute("bash", {"command": "pwd"}, ctx)
+        check("bash 下一次调用延续上一次的目录", r.ok and str((tmp / "pkg").resolve()) in r.content, r.content)
+
+        # 越出工作目录要被拉回来
+        r = registry.execute("bash", {"command": "cd / && pwd"}, ctx)
+        check("越出工作目录会被重置回根目录", r.ok and "已重置回工作目录根" in r.content, r.content)
+        r = registry.execute("bash", {"command": "pwd"}, ctx)
+        check("重置后下一次调用回到工作目录根", r.ok and str(tmp.resolve()) in r.content, r.content)
+
+        # 输出超过上限时按 spec 截断（尾部加 ...[truncated]，不是老版本的头尾各留一半）
+        tiny_out_config = Config(api_key="test", workspace=tmp, yolo=True, max_tool_output_chars=50)
+        tiny_out_ctx = ToolContext(
+            workspace=tmp, policy=policy, config=tiny_out_config, session=Session(system_prompt="")
+        )
+        big_echo = {"command": f'{sys.executable} -c "print(\'x\' * 500)"'}
+        r = registry.execute("bash", big_echo, tiny_out_ctx)
+        check("bash 输出超限时尾部截断", r.ok and r.content.rstrip().endswith("...[truncated]"), r.content)
 
         r = registry.execute("read_file", {"path": "nope.py"}, ctx)
         check("read_file 文件不存在返回失败", not r.ok, r.content)
@@ -225,7 +244,7 @@ def main() -> int:
             except BlockedCommandError as exc:
                 check(f"正常命令放行 {cmd!r}", False, str(exc))
 
-        r = registry.execute("run_command", {"command": "rm -rf /"}, ctx)
+        r = registry.execute("bash", {"command": "rm -rf /"}, ctx)
         check("黑名单命令在执行层也被拦截", not r.ok and "安全策略" in (r.error or ""), r.error or "")
 
         check("敏感文件识别 .env", policy.is_sensitive(tmp / ".env"))
@@ -244,9 +263,10 @@ def main() -> int:
             return Message.assistant(tool_calls=[ToolCall(id=cid, name=name, arguments=args_json)])
 
         # 正常闭环：调工具 -> 拿结果 -> 收尾
+        run_loop = json.dumps({"command": f"{sys.executable} loop.py"})
         llm = FakeLLM([
             call("write_file", '{"path": "loop.py", "content": "print(41+1)"}'),
-            call("run_code", '{"language": "python", "path": "loop.py"}', "c2"),
+            call("bash", run_loop, "c2"),
             Message.assistant("已创建并验证 loop.py，输出 42。"),
         ])
         agent = Agent(config, llm, registry, policy)
@@ -350,24 +370,22 @@ def main() -> int:
         s = Session(system_prompt="")
         iterating = []
         for _ in range(4):
-            iterating.append(s.record_call_fingerprint("run_command", {"command": "pytest"}))
+            iterating.append(s.record_call_fingerprint("bash", {"command": "pytest"}))
             s.record_call_fingerprint("edit_file", {"path": "x.py"})
             s.record_progress()
         check("有实质进展的重复不误判", max(iterating) == 1, str(iterating))
 
-        # 缺陷 3：run_command 此前能绕过敏感文件的强制确认
-        req_cmd = policy.build_approval(registry.get("run_command"), {"command": 'echo "K=1" > .env'})
-        check("run_command 写敏感文件强制确认", req_cmd.force, str(req_cmd))
-        req_git = policy.build_approval(registry.get("run_command"), {"command": "cat .git/config"})
-        check("run_command 读 .git 强制确认", req_git.force, str(req_git))
-        req_safe = policy.build_approval(registry.get("run_command"), {"command": "git status && pytest -q"})
+        # 缺陷 3：bash 此前（run_command 时代）能绕过敏感文件的强制确认
+        req_cmd = policy.build_approval(registry.get("bash"), {"command": 'echo "K=1" > .env'})
+        check("bash 写敏感文件强制确认", req_cmd.force, str(req_cmd))
+        req_git = policy.build_approval(registry.get("bash"), {"command": "cat .git/config"})
+        check("bash 读 .git 强制确认", req_git.force, str(req_git))
+        req_safe = policy.build_approval(registry.get("bash"), {"command": "git status && pytest -q"})
         check("普通命令不误判为敏感", not req_safe.force, str(req_safe))
 
-        # system prompt 要给出解释器绝对路径，否则模型会在 run_command 里瞎猜 python / python3
-        runtimes = runtime_summary()
-        prompt = build_system_prompt(tmp, runtimes)
-        check("运行时表包含 python", runtimes.get("python") == sys.executable, str(runtimes))
-        check("system prompt 写明解释器路径", sys.executable in prompt)
+        # system prompt 要给出 Python 解释器绝对路径，否则模型会在 bash 里瞎猜 python / python3
+        prompt = build_system_prompt(tmp)
+        check("system prompt 写明 Python 解释器路径", sys.executable in prompt)
 
         log_path = setup_logging(config.log_dir, level="INFO", to_stderr=False)
         get_logger("cli").info("smoke-marker-42")

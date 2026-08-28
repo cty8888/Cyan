@@ -24,9 +24,11 @@ from coding_agent.llm.parser import parse_tool_arguments
 from coding_agent.llm.types import LLMResponse, Message, ToolCall, Usage
 from coding_agent.logutil import get_logger, setup_logging
 from coding_agent.security.approval import ApprovalDecision
+from coding_agent.security.modes import ExecutionMode
+from coding_agent.security.permissions import PermissionManager
 from coding_agent.security.policy import SecurityPolicy
 from coding_agent.tools.base import ToolContext
-from coding_agent.tools.execution import _run_process
+from coding_agent.tools._process import run_process
 from coding_agent.tools.registry import build_default_registry
 
 failures: list[str] = []
@@ -53,13 +55,14 @@ class FakeLLM(LLMClient):
         return LLMResponse(message=item, usage=Usage(10, 5, 15))
 
 
-def make_env(tmp: Path, yolo: bool = True):
-    config = Config(api_key="test", workspace=tmp, yolo=yolo)
-    policy = SecurityPolicy(tmp, yolo=yolo)
+def make_env(tmp: Path):
+    config = Config(api_key="test", workspace=tmp)
+    policy = SecurityPolicy(tmp)
+    permissions = PermissionManager(policy)
     registry = build_default_registry()
     session = Session(system_prompt="")
     ctx = ToolContext(workspace=tmp, policy=policy, config=config, session=session)
-    return config, policy, registry, ctx
+    return config, policy, permissions, registry, ctx
 
 
 def drive(agent, task, decision=ApprovalDecision.ALLOW_ONCE):
@@ -78,10 +81,20 @@ def drive(agent, task, decision=ApprovalDecision.ALLOW_ONCE):
     return events, reason
 
 
+def eval_perm(permissions, tool, args, mode=ExecutionMode.AGENT, always_allowed=None):
+    outcome = permissions.evaluate(
+        tool,
+        args,
+        mode=mode,
+        always_allowed=always_allowed if always_allowed is not None else set(),
+    )
+    return outcome
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="ca_smoke_"))
     try:
-        config, policy, registry, ctx = make_env(tmp)
+        config, policy, permissions, registry, ctx = make_env(tmp)
 
         # ---------------------------------------------------------- 工具层
         (tmp / "pkg").mkdir()
@@ -109,7 +122,7 @@ def main() -> int:
         check("write_file 自动建父目录", r.ok and (tmp / "sub" / "new.py").is_file(), r.error or "")
 
         # ------------------------------------------------- Read/Write/Edit 前置读取语义
-        _, _, ro_registry, ro_ctx = make_env(tmp)
+        _, _, _, ro_registry, ro_ctx = make_env(tmp)
 
         (tmp / "guarded.py").write_text("x = 1\n", encoding="utf-8")
         r = ro_registry.execute(
@@ -137,7 +150,7 @@ def main() -> int:
 
         big = "\n".join(f"line {i}" for i in range(2000))
         (tmp / "big.txt").write_text(big, encoding="utf-8")
-        tiny_config = Config(api_key="test", workspace=tmp, yolo=True, max_file_read_chars=200)
+        tiny_config = Config(api_key="test", workspace=tmp, max_file_read_chars=200)
         tiny_ctx = ToolContext(
             workspace=tmp, policy=policy, config=tiny_config, session=Session(system_prompt="")
         )
@@ -195,7 +208,7 @@ def main() -> int:
         check("重置后下一次调用回到工作目录根", r.ok and str(tmp.resolve()) in r.content, r.content)
 
         # 输出超过上限时按 spec 截断（尾部加 ...[truncated]，不是老版本的头尾各留一半）
-        tiny_out_config = Config(api_key="test", workspace=tmp, yolo=True, max_tool_output_chars=50)
+        tiny_out_config = Config(api_key="test", workspace=tmp, max_tool_output_chars=50)
         tiny_out_ctx = ToolContext(
             workspace=tmp, policy=policy, config=tiny_out_config, session=Session(system_prompt="")
         )
@@ -248,8 +261,9 @@ def main() -> int:
         check("黑名单命令在执行层也被拦截", not r.ok and "安全策略" in (r.error or ""), r.error or "")
 
         check("敏感文件识别 .env", policy.is_sensitive(tmp / ".env"))
-        check("敏感文件识别 .git", policy.is_sensitive(tmp / ".git" / "config"))
+        check(".git 路径为受保护路径", policy.is_restricted(tmp / ".git" / "config"))
         check("普通文件非敏感", not policy.is_sensitive(tmp / "pkg" / "mod.py"))
+        check(".git 配置非敏感路径", not policy.is_sensitive(tmp / ".git" / "config"))
 
         # -------------------------------------------------------- 参数解析
         check("解析普通 JSON", parse_tool_arguments('{"path": "a.py"}') == {"path": "a.py"})
@@ -269,29 +283,29 @@ def main() -> int:
             call("bash", run_loop, "c2"),
             Message.assistant("已创建并验证 loop.py，输出 42。"),
         ])
-        agent = Agent(config, llm, registry, policy)
+        agent = Agent(config, llm, registry, policy, permissions)
         events, reason = drive(agent, "写个脚本")
         check("Agent 正常完成", reason is StopReason.COMPLETED, str(reason))
         check("Agent 执行了两次工具", sum(isinstance(e, ToolFinished) for e in events) == 2)
         check("产物文件已生成", (tmp / "loop.py").is_file())
 
         # 达到轮次上限
-        cfg_small = Config(api_key="t", workspace=tmp, yolo=True, max_iterations=3)
+        cfg_small = Config(api_key="t", workspace=tmp, max_iterations=3)
         # 每轮参数不同，避免先被重复调用检测拦下
         llm = FakeLLM([call("list_dir", '{"path": ".", "depth": %d}' % (i + 1), f"c{i}") for i in range(10)])
-        agent = Agent(cfg_small, llm, registry, policy)
+        agent = Agent(cfg_small, llm, registry, policy, permissions)
         _, reason = drive(agent, "循环")
         check("达到轮次上限会终止", reason is StopReason.MAX_ITERATIONS, str(reason))
 
         # 重复调用检测（相同工具+相同参数）
         llm = FakeLLM([call("read_file", '{"path": "nope.py"}', f"r{i}") for i in range(10)])
-        agent = Agent(config, llm, registry, policy)
+        agent = Agent(config, llm, registry, policy, permissions)
         _, reason = drive(agent, "重复")
         check("重复调用被打断", reason is StopReason.REPEATED_CALLS, str(reason))
 
         # 连续工具失败
         llm = FakeLLM([call("read_file", '{"path": "miss%d.py"}' % i, f"f{i}") for i in range(10)])
-        agent = Agent(config, llm, registry, policy)
+        agent = Agent(config, llm, registry, policy, permissions)
         _, reason = drive(agent, "连续失败")
         check("连续失败会终止", reason is StopReason.TOOL_FAILURES, str(reason))
 
@@ -300,39 +314,45 @@ def main() -> int:
             call("read_file", "{不是JSON"),
             Message.assistant("参数写错了，已放弃。"),
         ])
-        agent = Agent(config, llm, registry, policy)
+        agent = Agent(config, llm, registry, policy, permissions)
         _, reason = drive(agent, "坏参数")
         check("参数非法不会崩溃", reason is StopReason.COMPLETED, str(reason))
         tool_msgs = [m for m in agent.session.messages if m.role == "tool"]
         check("参数非法也回喂了 tool 消息", len(tool_msgs) == 1 and "不是合法 JSON" in (tool_msgs[0].content or ""))
 
-        # 审批：非 yolo 下写操作需确认，拒绝后不执行
-        cfg_ask = Config(api_key="t", workspace=tmp, yolo=False)
-        policy_ask = SecurityPolicy(tmp, yolo=False)
+        # 审批：Agent 模式下普通 exec 需确认，拒绝后不执行
         llm = FakeLLM([
-            call("write_file", '{"path": "denied.py", "content": "x"}'),
-            Message.assistant("好的，已放弃写入。"),
+            call("bash", '{"command": "touch denied_by_bash.txt"}'),
+            Message.assistant("好的，已放弃执行。"),
         ])
-        agent = Agent(cfg_ask, llm, registry, policy_ask)
-        events, reason = drive(agent, "写文件", decision=ApprovalDecision.DENY)
-        check("写操作触发审批", any(isinstance(e, ApprovalRequired) for e in events))
-        check("拒绝后文件未生成", not (tmp / "denied.py").exists())
+        agent = Agent(config, llm, registry, policy, permissions)
+        events, _ = drive(agent, "touch", decision=ApprovalDecision.DENY)
+        check("普通 exec 触发审批", any(isinstance(e, ApprovalRequired) for e in events))
+        check("拒绝后 bash 未执行", not (tmp / "denied_by_bash.txt").exists())
 
+        # 敏感 write 需确认，审批面板带 diff
+        llm = FakeLLM([
+            call("write_file", '{"path": ".env", "content": "K=1"}'),
+            Message.assistant("好的。"),
+        ])
+        agent = Agent(config, llm, registry, policy, permissions)
+        events, _ = drive(agent, "写 env", decision=ApprovalDecision.ALLOW_ONCE)
         approval = next(e.request for e in events if isinstance(e, ApprovalRequired))
-        check("审批面板带 diff", approval.detail_format == "diff" and "+x" in (approval.detail or ""))
+        check("敏感 write 触发审批", approval.force)
+        check("审批面板带 diff", approval.detail_format == "diff" and "+K=1" in (approval.detail or ""))
 
         # 只读工具不触发审批
         llm = FakeLLM([call("list_dir", '{"path": "."}'), Message.assistant("看完了")])
-        agent = Agent(cfg_ask, llm, registry, policy_ask)
+        agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "看目录")
         check("只读工具不审批", not any(isinstance(e, ApprovalRequired) for e in events))
 
-        # 敏感文件即使 yolo 也要确认
+        # 敏感文件强制逐次确认
         llm = FakeLLM([call("write_file", '{"path": ".env", "content": "K=1"}'), Message.assistant("好")])
-        agent = Agent(config, llm, registry, policy)
+        agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "改 env", decision=ApprovalDecision.DENY)
         requests = [e.request for e in events if isinstance(e, ApprovalRequired)]
-        check("敏感文件在 yolo 下仍强制确认", len(requests) == 1 and requests[0].force, str(requests))
+        check("敏感文件强制确认", len(requests) == 1 and requests[0].force, str(requests))
 
         # 上下文完整性：每个 tool_call 都有对应响应
         assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if m.role == "assistant")
@@ -349,7 +369,7 @@ def main() -> int:
 
         threading.Thread(target=interrupt_soon, daemon=True).start()
         try:
-            _run_process(f"sleep 60 # {marker}", tmp, timeout=30, shell=True)
+            run_process(f"sleep 60 # {marker}", tmp, timeout=30, shell=True)
             interrupted = False
         except KeyboardInterrupt:
             interrupted = True
@@ -375,15 +395,87 @@ def main() -> int:
             s.record_progress()
         check("有实质进展的重复不误判", max(iterating) == 1, str(iterating))
 
-        # 缺陷 3：bash 此前（run_command 时代）能绕过敏感文件的强制确认
-        req_cmd = policy.build_approval(registry.get("bash"), {"command": 'echo "K=1" > .env'})
-        check("bash 写敏感文件强制确认", req_cmd.force, str(req_cmd))
-        req_git = policy.build_approval(registry.get("bash"), {"command": "cat .git/config"})
-        check("bash 读 .git 强制确认", req_git.force, str(req_git))
-        req_safe = policy.build_approval(registry.get("bash"), {"command": "git status && pytest -q"})
-        check("普通命令不误判为敏感", not req_safe.force, str(req_safe))
+        # -------------------------------------------------------- 三层权限
+        write_tool = registry.get("write_file")
+        bash_tool = registry.get("bash")
+        read_tool = registry.get("read_file")
 
-        # system prompt 要给出 Python 解释器绝对路径，否则模型会在 bash 里瞎猜 python / python3
+        ask_write = eval_perm(permissions, write_tool, {"path": "ok.py", "content": "x"}, mode=ExecutionMode.ASK)
+        check("Ask 模式拒绝 write", ask_write.kind == "deny", ask_write.kind)
+
+        ask_read = eval_perm(permissions, read_tool, {"path": "a.py"}, mode=ExecutionMode.ASK)
+        check("Ask 模式允许 read", ask_read.kind == "allow", ask_read.kind)
+
+        agent_write = eval_perm(permissions, write_tool, {"path": "ok.py", "content": "x"})
+        check("Agent 模式非敏感 write 直接放行", agent_write.kind == "allow", agent_write.kind)
+
+        agent_env = eval_perm(permissions, write_tool, {"path": ".env", "content": "K=1"})
+        check("Agent 模式敏感 write 需审批", agent_env.kind == "need_approval" and agent_env.request.force)
+
+        git_write = eval_perm(permissions, write_tool, {"path": ".git/config", "content": "x"})
+        check("写 .git 配置被强硬限制", git_write.kind == "deny", git_write.kind)
+
+        agent_pytest = eval_perm(permissions, bash_tool, {"command": "pytest -q"})
+        check("Agent 模式普通 exec 需审批", agent_pytest.kind == "need_approval" and not agent_pytest.request.force)
+
+        yolo_pytest = eval_perm(permissions, bash_tool, {"command": "pytest -q"}, mode=ExecutionMode.YOLO)
+        check("YOLO 模式普通 exec 直接放行", yolo_pytest.kind == "allow", yolo_pytest.kind)
+
+        push_f = eval_perm(permissions, bash_tool, {"command": "git push -f origin main"})
+        check("git push -f 被强硬限制", push_f.kind == "deny", push_f.kind)
+
+        pip_install = eval_perm(
+            permissions, bash_tool, {"command": "pip install requests"}, mode=ExecutionMode.YOLO
+        )
+        check("pip install 敏感需审批", pip_install.kind == "need_approval" and pip_install.request.force)
+
+        rm_root = eval_perm(permissions, bash_tool, {"command": "rm -rf /"})
+        check("rm -rf / 黑名单拒绝", rm_root.kind == "deny", rm_root.kind)
+
+        reset_hard = eval_perm(permissions, bash_tool, {"command": "git reset --hard HEAD~1"})
+        check("git reset --hard 被强硬限制", reset_hard.kind == "deny", reset_hard.kind)
+
+        always_env = eval_perm(
+            permissions,
+            write_tool,
+            {"path": ".env", "content": "K=1"},
+            always_allowed={"write_file"},
+        )
+        check("始终允许不能跳过敏感 write", always_env.kind == "need_approval" and always_env.request.force)
+
+        whitelisted = eval_perm(
+            permissions,
+            bash_tool,
+            {"command": "pytest -q"},
+            always_allowed={"bash"},
+        )
+        check("白名单后 bash 普通命令放行", whitelisted.kind == "allow", whitelisted.kind)
+
+        req_cmd = eval_perm(permissions, bash_tool, {"command": 'echo "K=1" > .env'})
+        check("bash 写敏感文件强制确认", req_cmd.kind == "need_approval" and req_cmd.request.force, str(req_cmd))
+
+        req_git = eval_perm(permissions, bash_tool, {"command": "cat .git/config"})
+        check("bash 读 .git 为普通 exec 需审批", req_git.kind == "need_approval" and not req_git.request.force, str(req_git))
+
+        redirect_git = eval_perm(permissions, bash_tool, {"command": "echo x > .git/config"})
+        check("bash 写 .git 被强硬限制", redirect_git.kind == "deny", redirect_git.kind)
+
+        req_safe = eval_perm(permissions, bash_tool, {"command": "git status && pytest -q"})
+        check("普通命令不误判为敏感", req_safe.kind == "need_approval" and not req_safe.request.force, str(req_safe))
+
+        check(
+            "只读工具无需审批",
+            eval_perm(permissions, read_tool, {"path": "a.py"}).kind == "allow",
+        )
+
+        # Ask 模式 schema 过滤
+        agent_cfg = Config(api_key="test", workspace=tmp, execution_mode=ExecutionMode.ASK)
+        ask_agent = Agent(agent_cfg, FakeLLM([Message.assistant("ok")]), registry, policy, permissions)
+        ask_schemas = ask_agent._schemas_for_mode()
+        ask_names = {s["function"]["name"] for s in ask_schemas}
+        check("Ask 模式只暴露 read 工具", ask_names == {"list_dir", "read_file"}, str(ask_names))
+
+        # 缺陷 3：bash 此前能绕过敏感文件的强制确认
         prompt = build_system_prompt(tmp)
         check("system prompt 写明 Python 解释器路径", sys.executable in prompt)
 

@@ -26,7 +26,6 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 | `-p, --prompt` | 执行单个任务后退出 |
 | `-w, --workspace` | 工作目录，默认当前目录；Agent 只能访问该目录内的文件 |
 | `-m, --model` | 模型名称，默认 `deepseek-chat` |
-| `--yolo` | 跳过写入与执行的逐次确认 |
 | `--max-iterations` | 单任务最大轮次，默认 30 |
 | `--verbose` | 额外把日志打到 stderr（默认只写文件，不干扰 rich 界面） |
 
@@ -53,9 +52,9 @@ system prompt 里会给出本机 Python 解释器的绝对路径，避免模型�
 三道防线，从外到内依次生效：
 
 1. **沙箱**：所有路径 `resolve()` 后必须落在工作目录内，`..` 与符号链接逃逸都会被拒绝。
-2. **黑名单**：`rm -rf /`、`sudo`、`mkfs`、`curl | sh` 等致命命令直接拒绝，`--yolo` 也无法绕过。
+2. **黑名单**：`rm -rf /`、`sudo`、`mkfs`、`curl | sh` 等致命命令直接拒绝，任何授权都无法绕过。
 3. **分级审批**：只读操作自动放行；写入与执行需确认，可选 `y` 允许 / `n` 拒绝 / `a` 本会话始终允许。
-   `.env`、`.git/`、私钥等敏感文件的写入强制逐次确认，不受 `--yolo` 与「始终允许」影响。
+   `.env`、`.git/`、私钥等敏感文件的写入强制逐次确认，不受「始终允许」影响。
 
 写操作在确认前会展示完整 diff。
 
@@ -68,7 +67,7 @@ cli/        REPL 与 rich 渲染，消费事件流、处理审批交互
 core/       Agent Loop、会话状态、事件定义、system prompt
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
 tools/      工具契约、注册表、文件系统与 bash 执行工具
-security/   路径沙箱、命令黑名单、风险分级与审批协议
+security/   路径沙箱、命令黑名单、敏感资源识别、权限管理与审批协议
 config.py   三级配置覆盖（CLI 参数 > 环境变量 > 默认值）
 logutil.py  标准库 logging（默认只写文件）
 errors.py   异常体系

@@ -11,6 +11,7 @@ from rich.console import Console
 from .config import Config
 from .errors import AgentError, ConfigError
 from .logutil import get_logger, setup_logging
+from .security.modes import ExecutionMode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,12 +26,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", help="API 地址，默认 https://api.deepseek.com")
     parser.add_argument("--max-iterations", type=int, help="单个任务的最大轮次，默认 30")
     parser.add_argument(
-        "--yolo",
-        action="store_true",
-        default=None,
-        help="跳过写入与执行的逐次确认（敏感文件与危险命令仍会拦截）",
-    )
-    parser.add_argument(
         "--log-level",
         dest="log_level",
         default=None,
@@ -41,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="同时把日志打到 stderr（默认只写文件，避免和 rich 界面叠在一起）",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["ask", "agent", "yolo"],
+        help="执行模式：ask=只读 / agent=默认 / yolo=宽松，默认 agent",
     )
     return parser
 
@@ -57,9 +57,9 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.api_key,
             base_url=args.base_url,
             max_iterations=args.max_iterations,
-            yolo=args.yolo,
             log_level=args.log_level,
             verbose=args.verbose,
+            execution_mode=ExecutionMode.parse(args.mode) if args.mode else None,
         )
     except ConfigError as exc:
         console.print(f"[bold red]配置错误[/] {exc}")

@@ -1,10 +1,7 @@
-"""安全策略：路径沙箱、命令黑名单、风险分级。
+"""安全策略：路径沙箱与安全规则统一入口。
 
-三道防线：
-
-1. **沙箱**：所有文件路径 ``resolve()`` 后必须落在工作目录内，符号链接与 ``..`` 逃逸都会被拦下。
-2. **黑名单**：致命命令直接拒绝执行，``--yolo`` 和「本会话始终允许」都无法绕过。
-3. **分级审批**：只读操作自动放行，写入与执行需要用户确认；敏感文件强制逐次确认。
+只回答「这次操作是否触碰安全边界」；要不要问用户、用户同不同意，
+由 ``PermissionManager`` 处理。
 """
 
 from __future__ import annotations
@@ -14,38 +11,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..errors import BlockedCommandError, PathOutsideWorkspaceError
-from .approval import ApprovalRequest
+from . import security_rules as rules
 
-if TYPE_CHECKING:  # 仅用于类型标注，避免与 tools 包循环导入
+if TYPE_CHECKING:
     from ..tools.base import Tool
 
-# (正则, 说明)。命中即拒绝，任何模式下都不放行。
-_BLOCKED_COMMANDS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\brm\b[^|;&]*\s-[a-zA-Z]*[rf][a-zA-Z]*[^|;&]*\s+(/|~|/\*|\$HOME)(\s|$|/?\*?$)"), "递归删除根目录或用户主目录"),
-    (re.compile(r"\bmkfs(\.\w+)?\b"), "格式化文件系统"),
-    (re.compile(r"\bdd\b[^|;&]*\bof=/dev/"), "向块设备直接写入"),
-    (re.compile(r">\s*/dev/(sd|nvme|hd|disk)"), "覆写块设备"),
-    (re.compile(r"\b(shutdown|reboot|poweroff|halt)\b"), "关机或重启主机"),
-    (re.compile(r":\s*\(\s*\)\s*\{.*\|.*&.*\}\s*;?\s*:"), "fork 炸弹"),
-    (re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|k)?sh\b"), "下载并直接执行远程脚本"),
-    (re.compile(r"\bsudo\b"), "提权执行"),
-    (re.compile(r"\bchmod\b\s+(-R\s+)?777\s+/(\s|$)"), "对根目录放开全部权限"),
-    (re.compile(r"\bchown\b\s+-R\s+[^\s]+\s+/(\s|$)"), "递归修改根目录属主"),
-]
-
-# 命中即使在 --yolo 下也要逐次确认
-_SENSITIVE_NAMES = {".env", "id_rsa", "id_ed25519", "credentials", ".npmrc", ".netrc"}
-_SENSITIVE_SUFFIXES = {".pem", ".key", ".p12"}
-_SENSITIVE_DIRS = {".git", ".ssh", ".aws", ".config"}
-
-# 把 shell 命令拆成疑似路径的 token，用于检查命令是否触碰敏感文件
-_COMMAND_TOKEN_SEPARATOR = re.compile(r"""[\s;|&<>()'"`]+""")
+_WRITE_REDIRECT = re.compile(r"(?:>>?|\btee\b)\s*(\S+)")
 
 
 class SecurityPolicy:
-    def __init__(self, workspace: Path, yolo: bool = False):
+    def __init__(self, workspace: Path):
         self.workspace = Path(workspace).resolve()
-        self.yolo = yolo
 
     # ---------------------------------------------------------------- 路径
     def resolve_path(self, raw: str, *, must_exist: bool = False) -> Path:
@@ -57,7 +33,6 @@ class SecurityPolicy:
         if not candidate.is_absolute():
             candidate = self.workspace / candidate
 
-        # resolve 会展开符号链接，因此软链接逃逸同样能被下面的归属检查挡住
         resolved = candidate.resolve()
         if resolved != self.workspace and self.workspace not in resolved.parents:
             raise PathOutsideWorkspaceError(
@@ -69,76 +44,112 @@ class SecurityPolicy:
         return resolved
 
     def display(self, path: Path) -> str:
-        """转成相对工作目录的短路径，用于展示和回喂模型。"""
         try:
             return str(path.relative_to(self.workspace)) or "."
         except ValueError:
             return str(path)
 
     def is_sensitive(self, path: Path) -> bool:
-        name = path.name
-        if name in _SENSITIVE_NAMES or name.startswith(".env"):
-            return True
-        if path.suffix in _SENSITIVE_SUFFIXES:
-            return True
-        parts = set(path.parts)
-        return bool(parts & _SENSITIVE_DIRS)
+        return rules.is_sensitive_path(path)
+
+    def is_restricted(self, path: Path) -> bool:
+        return rules.is_restricted_path(path)
 
     # ---------------------------------------------------------------- 命令
     def check_command(self, command: str) -> None:
-        """命中黑名单则抛出 ``BlockedCommandError``。"""
-        normalized = " ".join(str(command).split())
-        for pattern, reason in _BLOCKED_COMMANDS:
-            if pattern.search(normalized):
-                raise BlockedCommandError(
-                    f"命令被安全策略拦截（{reason}）：{normalized}。"
-                    "该限制无法通过授权绕过，请改用更安全的做法。"
-                )
+        """命中黑名单则抛出 ``BlockedCommandError``（执行层兜底）。"""
+        reason = rules.match_command_rules(command, rules.BLOCKED_COMMANDS)
+        if reason:
+            normalized = rules.normalize_command(command)
+            raise BlockedCommandError(
+                f"命令被安全策略拦截（{reason}）：{normalized}。"
+                "该限制无法通过授权绕过，请改用更安全的做法。"
+            )
 
-    # ------------------------------------------------------------ 风险分级
-    def build_approval(self, tool: Tool, args: dict[str, Any]) -> ApprovalRequest | None:
-        """只读工具返回 None；其余生成待确认请求。"""
+    # -------------------------------------------------------- 统一 concern 入口
+    def blocked_concern(self, tool: Tool, args: dict[str, Any]) -> str | None:
+        """灾难性操作，write/exec 均检查。"""
         from ..tools.base import RiskLevel
 
         if tool.risk is RiskLevel.READ:
             return None
 
-        summary, detail, detail_format = tool.describe(args, self)
-        force, reason = self._force_confirm(tool, args)
-        return ApprovalRequest(
-            tool_name=tool.name,
-            risk=tool.risk.value,
-            summary=summary,
-            detail=detail,
-            detail_format=detail_format,
-            force=force,
-            reason=reason,
-        )
+        raw_path = args.get("path") or args.get("file")
+        if raw_path:
+            try:
+                self.resolve_path(str(raw_path))
+            except PathOutsideWorkspaceError as exc:
+                return str(exc)
 
-    def _force_confirm(self, tool: Tool, args: dict[str, Any]) -> tuple[bool, str | None]:
+        command = args.get("command")
+        if command:
+            return rules.match_command_rules(str(command), rules.BLOCKED_COMMANDS)
+        return None
+
+    def restricted_concern(self, tool: Tool, args: dict[str, Any]) -> str | None:
+        """强硬限制，write/exec 均检查，Agent/YOLO 直接拒绝。"""
+        from ..tools.base import RiskLevel
+
+        if tool.risk is RiskLevel.READ:
+            return None
+
         raw_path = args.get("path") or args.get("file")
         if raw_path:
             try:
                 resolved = self.resolve_path(str(raw_path))
             except PathOutsideWorkspaceError:
-                return True, "路径可疑"
-            if self.is_sensitive(resolved):
-                return True, f"{self.display(resolved)} 属于敏感文件，每次写入都需要确认"
+                return None
+            if self.is_restricted(resolved):
+                return f"{self.display(resolved)} 属于受保护路径，不允许修改"
 
-        # 光看 path 参数会漏掉 `echo x > .env` 这类绕过，命令文本也要扫一遍
         command = args.get("command")
         if command:
-            hit = self._sensitive_token(str(command))
+            cmd = str(command)
+            reason = rules.match_command_rules(cmd, rules.RESTRICTED_COMMANDS)
+            if reason:
+                return reason
+            hit = self._restricted_write_token(cmd)
             if hit:
-                return True, f"命令中出现敏感文件 {hit}，每次执行都需要确认"
-        return False, None
+                return f"命令试图写入受保护路径 {hit}，不允许执行"
+        return None
 
-    def _sensitive_token(self, command: str) -> str | None:
-        """返回命令里第一个指向敏感文件的 token，没有则返回 None。"""
-        for token in _COMMAND_TOKEN_SEPARATOR.split(command):
-            token = token.strip()
-            if not token or token.startswith("-"):
-                continue
-            if self.is_sensitive(Path(token)):
+    def sensitive_concern(self, tool: Tool, args: dict[str, Any]) -> str | None:
+        """需人工确认的操作，write/exec 均检查。"""
+        from ..tools.base import RiskLevel
+
+        if tool.risk is RiskLevel.READ:
+            return None
+
+        raw_path = args.get("path") or args.get("file")
+        if raw_path:
+            try:
+                resolved = self.resolve_path(str(raw_path))
+            except PathOutsideWorkspaceError:
+                return "路径可疑"
+            if self.is_sensitive(resolved):
+                return f"{self.display(resolved)} 属于敏感文件，每次操作都需要确认"
+
+        command = args.get("command")
+        if command:
+            cmd = str(command)
+            reason = rules.match_command_rules(cmd, rules.SENSITIVE_COMMANDS)
+            if reason:
+                return reason
+            hit = self._path_token_match(cmd, rules.is_sensitive_path)
+            if hit:
+                return f"命令中出现敏感文件 {hit}，每次执行都需要确认"
+        return None
+
+    def _restricted_write_token(self, command: str) -> str | None:
+        """仅当命令含重定向写入时才检查受保护路径。"""
+        for match in _WRITE_REDIRECT.finditer(command):
+            token = match.group(1).strip("'\"")
+            if rules.is_restricted_path(Path(token)):
+                return token
+        return None
+
+    def _path_token_match(self, command: str, predicate) -> str | None:
+        for token in rules.iter_command_tokens(command):
+            if predicate(Path(token)):
                 return token
         return None

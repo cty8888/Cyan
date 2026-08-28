@@ -73,8 +73,11 @@ class ToolRegistry:
 
 def build_default_registry() -> ToolRegistry:
     """注册 MVP 工具集。扩展新工具只需在这里加一行。"""
-    from .execution import BashTool
-    from .filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+    from .bash import BashTool
+    from .edit_file import EditFileTool
+    from .list_dir import ListDirTool
+    from .read_file import ReadFileTool
+    from .write_file import WriteFileTool
 
     registry = ToolRegistry()
     registry.register(ListDirTool())

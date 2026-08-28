@@ -1,6 +1,6 @@
 """审批协议。
 
-core 层只产出 ``ApprovalRequest`` 并等待一个 ``ApprovalDecision``，
+core 层只产出 ``ApprovalRequest`` / ``PermissionOutcome`` 并等待 ``ApprovalDecision``，
 具体怎么问用户由 CLI 层决定，因此内核不依赖任何输入输出设施。
 """
 
@@ -8,12 +8,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 
 class ApprovalDecision(Enum):
     ALLOW_ONCE = "once"
     ALLOW_ALWAYS = "always"
     DENY = "deny"
+
+
+class DenyReason(Enum):
+    MODE_BLOCKED = "mode"
+    POLICY_BLOCKED = "policy"
+    RESTRICTED = "restricted"
+    USER_DENIED = "user"
 
 
 @dataclass
@@ -23,9 +31,29 @@ class ApprovalRequest:
     tool_name: str
     risk: str
     summary: str
-    # 供人阅读的细节：命令全文、文件 diff 等
     detail: str | None = None
     detail_format: str = "text"
-    # 强制确认的操作（敏感文件、危险目录）不受 --yolo 和「本会话始终允许」影响
     force: bool = False
     reason: str | None = None
+
+
+@dataclass
+class PermissionOutcome:
+    """单次工具调用的权限判定结果。"""
+
+    kind: Literal["allow", "deny", "need_approval"]
+    deny_reason: DenyReason | None = None
+    deny_message: str | None = None
+    request: ApprovalRequest | None = None
+
+    @classmethod
+    def allow(cls) -> PermissionOutcome:
+        return cls(kind="allow")
+
+    @classmethod
+    def deny(cls, reason: DenyReason, message: str) -> PermissionOutcome:
+        return cls(kind="deny", deny_reason=reason, deny_message=message)
+
+    @classmethod
+    def need_approval(cls, request: ApprovalRequest) -> PermissionOutcome:
+        return cls(kind="need_approval", request=request)

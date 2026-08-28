@@ -27,6 +27,8 @@ from ..core.prompts import build_system_prompt
 from ..core.session import Session
 from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
+from ..security.modes import ExecutionMode, MODE_LABELS
+from ..security.permissions import PermissionManager
 from ..security.policy import SecurityPolicy
 from ..tools.registry import build_default_registry
 from .renderer import Renderer
@@ -41,6 +43,7 @@ logger = get_logger("cli")
 HELP_TEXT = """可用命令：
   /help          显示本帮助
   /tools         列出已注册的工具
+  /mode <模式>   切换执行模式：ask / agent / yolo
   /usage         显示本会话的 token 与调用统计
   /clear         清空对话历史，开始新会话
   /cwd           显示当前工作目录
@@ -53,7 +56,8 @@ class App:
     def __init__(self, config: Config, console: Console | None = None):
         self.config = config
         self.renderer = Renderer(console)
-        self.policy = SecurityPolicy(config.workspace, yolo=config.yolo)
+        self.policy = SecurityPolicy(config.workspace)
+        self.permissions = PermissionManager(self.policy)
         self.registry = build_default_registry()
         self.session = Session(system_prompt=build_system_prompt(config.workspace))
         self.llm = DeepSeekClient(config, on_retry=self._on_llm_retry)
@@ -62,6 +66,7 @@ class App:
             llm=self.llm,
             registry=self.registry,
             policy=self.policy,
+            permissions=self.permissions,
             session=self.session,
         )
 
@@ -175,6 +180,18 @@ class App:
         elif command == "/tools":
             for tool in self.registry:
                 console.print(f"  [bold]{tool.name}[/] [dim]({tool.risk.value})[/] — {tool.description}")
+        elif command == "/mode":
+            parts = raw.split()
+            if len(parts) != 2:
+                console.print("[yellow]用法：/mode ask|agent|yolo[/]")
+            else:
+                try:
+                    self.config.execution_mode = ExecutionMode.parse(parts[1])
+                    label = MODE_LABELS[self.config.execution_mode]
+                    console.print(f"[dim]已切换至 {label}[/]")
+                    logger.info("切换执行模式：%s", self.config.execution_mode.value)
+                except ValueError as exc:
+                    console.print(f"[yellow]{exc}[/]")
         elif command == "/usage":
             stats = self.session.stats()
             console.print(

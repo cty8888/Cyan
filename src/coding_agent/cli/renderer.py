@@ -20,6 +20,7 @@ from ..config import Config
 from ..core.events import STOP_REASON_TEXT, StopReason
 from ..logutil import get_logger
 from ..security.approval import ApprovalDecision, ApprovalRequest
+from ..security.modes import MODE_LABELS
 from ..tools.base import ToolResult
 
 logger = get_logger("cli")
@@ -40,12 +41,13 @@ class Renderer:
     def banner(self, config: Config, tool_names: list[str]) -> None:
         lines = [
             Text.from_markup(f"[bold cyan]Coding Agent[/]  模型 [green]{config.model}[/]"),
+            Text.from_markup(
+                f"执行模式  [green]{MODE_LABELS[config.execution_mode]}[/]"
+            ),
             Text.from_markup(f"工作目录  [dim]{config.workspace}[/]"),
             Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
             Text.from_markup(f"日志文件  [dim]{config.log_dir / 'agent.log'}[/]"),
         ]
-        if config.yolo:
-            lines.append(Text.from_markup("[bold yellow]YOLO 模式已开启：写入与执行不再逐次确认[/]"))
         lines.append(Text.from_markup("[dim]输入任务开始，/help 查看命令，Ctrl-C 中断当前任务[/]"))
         self.console.print(Panel(Text("\n").join(lines), border_style="cyan", padding=(0, 1)))
         logger.info("启动 模型=%s workspace=%s tools=%s", config.model, config.workspace, ", ".join(tool_names))

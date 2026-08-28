@@ -32,11 +32,19 @@ src/coding_agent/
   tools/
     base.py              # Tool 抽象基类 + ToolResult + 参数校验
     registry.py          # 注册表：schema 导出 + 名称分发 + 执行封装
-    filesystem.py        # list_dir / read_file / write_file / edit_file
-    execution.py         # bash：唯一的 shell 执行入口
+    _diff.py             # write_file / edit_file 共用的 diff 生成
+    _process.py          # bash 工具共用的子进程执行辅助
+    list_dir.py
+    read_file.py
+    write_file.py
+    edit_file.py
+    bash.py
   security/
-    policy.py            # 路径沙箱、命令黑名单、风险分级
-    approval.py          # 审批交互协议（y / n / a / --yolo）
+    policy.py            # 路径沙箱、blocked/restricted/sensitive 统一入口
+    security_rules.py    # Blocked / Restricted / Sensitive 路径与命令规则
+    modes.py             # ExecutionMode（ask / agent / yolo）
+    permissions.py       # PermissionManager.evaluate() → PermissionOutcome
+    approval.py          # 审批交互协议（y / n / a）
   context/
     manager.py           # 上下文装配 + token 预算 + 压缩触发
     compactor.py         # 历史摘要压缩
@@ -52,10 +60,10 @@ flowchart TD
     LLM --> Parse[parser 解析文本增量与 tool_calls]
     Parse --> HasTool{有 tool_calls?}
     HasTool -->|否| Done[输出最终回复, 本轮结束]
-    HasTool -->|是| Policy[SecurityPolicy 风险分级]
-    Policy --> Risk{需要审批?}
-    Risk -->|是| Approve[CLI 审批 y/n/a]
-    Risk -->|否| Exec[Registry 执行工具]
+    HasTool -->|是| Perm[PermissionManager 判断是否需要审批]
+    Perm --> NeedAsk{需要用户确认?}
+    NeedAsk -->|否| Exec[Registry 执行工具]
+    NeedAsk -->|是| Approve[CLI 审批 y/n/a]
     Approve -->|拒绝| Denied[生成 denied 结果回喂模型]
     Approve -->|同意| Exec
     Exec --> Result[ToolResult 转 tool 消息]
@@ -104,14 +112,31 @@ MVP 工具集：
   - system prompt 里写明本机 `sys.executable` 的绝对路径，避免模型在命令里假设存在 `python` 这个命令（很多环境只有 `python3`）
   - 先不做：后台任务、shell 别名加载、环境变量持久化、输出落盘、权限沙箱——等基础跑稳再加
 
-## 5. 安全模型（分级审批）
+## 5. 安全模型
 
-- 路径沙箱：所有路径 `Path.resolve()` 后校验必须位于 workspace root 内，阻断 `..` 与符号链接逃逸
-- 风险分级：`READ` 自动执行；`WRITE`/`EXEC` 需审批
-- 审批选项：`y` 本次允许 / `n` 拒绝并让模型换方案 / `a` 本会话内该工具始终允许；`--yolo` 全局跳过
-- 命令黑名单：`rm -rf /`、`mkfs`、`dd`、`shutdown`、`curl | sh` 等正则拦截，**不可用 `a` 或 `--yolo` 绕过**
-- 敏感文件（`.env`、`.git/`）写入强制二次确认
-- 写操作前生成 diff 预览，随审批提示一起展示
+三层权限决策链：
+
+1. **Layer 1 — Tool.risk**（工具固有能力）：READ / WRITE / EXEC
+2. **Layer 2 — ExecutionMode**（执行模式）：Ask（只读）/ Agent（默认）/ YOLO（宽松）
+3. **Layer 3 — PermissionManager**（单次判定）：ALLOW / DENY / NEED_APPROVAL
+
+安全规则分级（[`security_rules.py`](src/coding_agent/security/security_rules.py)，write 与 exec 统一）：
+
+| 级别 | 处置 |
+|------|------|
+| **Blocked 黑名单** | 永远 DENY（`sudo`、`rm -rf /` 等） |
+| **Restricted 强硬限制** | Agent/YOLO 直接 DENY，不出审批 UI（`git push -f`、写 `.git/` 等） |
+| **Sensitive 敏感** | NEED_APPROVAL + force（`.env`、`pip install` 等） |
+| **Normal 普通** | 由执行模式决定 |
+
+**Agent vs YOLO**（Normal 级别）：Agent 模式下普通 write 直接放行、普通 exec 需审批；YOLO 模式下普通 write/exec 均直接放行。Sensitive 两种模式均逐次确认，Restricted/Blocked 均直接拒绝。
+
+审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许该工具（仅非 force 操作）。用户拒绝后回喂模型换方案。
+
+组件职责：
+
+1. **SecurityPolicy**：路径沙箱 + `blocked/restricted/sensitive_concern(tool, args)` 统一入口
+2. **PermissionManager**：结合 ExecutionMode 与白名单，产出 `PermissionOutcome`
 
 ## 6. 上下文管理与 Memory
 
@@ -130,7 +155,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
 - [x] tools 层：Tool 基类 + ToolResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
 - [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
-- [x] security 层：路径沙箱、命令黑名单、风险分级与审批协议（y/n/a + `--yolo`）
+- [x] security 层：路径沙箱、命令黑名单、权限管理与审批协议（y/n/a）
 - [x] `core/agent.py` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环
 - [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线冒烟测试 `tests/smoke.py`

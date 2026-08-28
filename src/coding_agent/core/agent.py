@@ -1,22 +1,3 @@
-"""Agent Loop —— 整个系统的核心。
-
-``run()`` 是一个 generator：向外 yield 事件，通过 ``send()`` 接收审批决策。
-这样内核完全不碰输入输出，既方便替换前端，也方便在测试中驱动。
-
-调用方式：
-
-    gen = agent.run("把 foo.py 的 bug 修掉")
-    reply = None
-    while True:
-        try:
-            event = gen.send(reply)
-        except StopIteration:
-            break
-        reply = None
-        if isinstance(event, ApprovalRequired):
-            reply = ask_user(event.request)
-"""
-
 from __future__ import annotations
 
 import time
@@ -28,6 +9,8 @@ from ..llm.base import LLMClient
 from ..llm.parser import parse_tool_arguments
 from ..llm.types import Message, ToolCall
 from ..security.approval import ApprovalDecision
+from ..security.modes import ExecutionMode
+from ..security.permissions import PermissionManager
 from ..security.policy import SecurityPolicy
 from ..tools.base import RiskLevel, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
@@ -46,7 +29,6 @@ from .events import (
 from .prompts import build_system_prompt
 from .session import Session
 
-# generator 既 yield 事件，也接收审批决策
 AgentStream = Generator[AgentEvent, "ApprovalDecision | None", None]
 
 
@@ -57,18 +39,19 @@ class Agent:
         llm: LLMClient,
         registry: ToolRegistry,
         policy: SecurityPolicy,
+        permissions: PermissionManager,
         session: Session | None = None,
     ):
         self.config = config
         self.llm = llm
         self.registry = registry
         self.policy = policy
+        self.permissions = permissions
         self.session = session or Session(system_prompt=build_system_prompt(config.workspace))
         self.tool_ctx = ToolContext(
             workspace=config.workspace, policy=policy, config=config, session=self.session
         )
 
-    # ------------------------------------------------------------------ 主循环
     def run(self, task: str) -> AgentStream:
         self.session.add(Message.user(task))
         self.session.consecutive_tool_failures = 0
@@ -76,7 +59,7 @@ class Agent:
         yield TaskStarted(task=task)
 
         final_text = ""
-        schemas = self.registry.schemas()
+        schemas = self._schemas_for_mode()
 
         try:
             for iteration in range(1, self.config.max_iterations + 1):
@@ -119,13 +102,12 @@ class Agent:
             yield Notice(f"发生错误：{exc}", level="error")
             yield self._finish(StopReason.FATAL_ERROR, final_text)
 
-    # -------------------------------------------------------------- 工具调用批次
-    def _run_tool_calls(self, tool_calls: list[ToolCall]) -> Generator[AgentEvent, Any, StopReason | None]:
-        """执行一批工具调用。返回非 None 表示应当终止循环。
+    def _schemas_for_mode(self) -> list[dict[str, Any]]:
+        if self.config.execution_mode is ExecutionMode.ASK:
+            return [tool.to_schema() for tool in self.registry if tool.risk is RiskLevel.READ]
+        return self.registry.schemas()
 
-        每个 tool_call 都必须回一条 tool 消息，否则下一轮请求会因缺少响应而被服务端拒绝，
-        因此这里用 ``responded`` 兜底，中断时补齐占位响应。
-        """
+    def _run_tool_calls(self, tool_calls: list[ToolCall]) -> Generator[AgentEvent, Any, StopReason | None]:
         responded: set[str] = set()
         try:
             for call in tool_calls:
@@ -142,7 +124,6 @@ class Agent:
     def _run_single_call(
         self, call: ToolCall, responded: set[str]
     ) -> Generator[AgentEvent, Any, StopReason | None]:
-        # 1. 解析参数：失败也要回喂，让模型有机会自己改正
         try:
             args = parse_tool_arguments(call.arguments, call.name)
         except InvalidToolArgumentsError as exc:
@@ -159,7 +140,6 @@ class Agent:
             self.session.record_tool_outcome(ok=False)
             return self._check_failure_threshold()
 
-        # 2. 重复调用检测：模型卡在同一动作上时及时打断
         repeats = self.session.record_call_fingerprint(call.name, args)
         if repeats >= self.config.max_repeated_calls:
             self._respond(
@@ -177,20 +157,10 @@ class Agent:
 
         tool = self.registry.get(call.name)
 
-        # 3. 分级审批
-        decision = yield from self._request_approval(tool, args)
-        if decision is ApprovalDecision.DENY:
-            self._respond(
-                call,
-                responded,
-                ToolResult.failure("用户拒绝了此操作。请不要重试，改用其他方案或询问用户的意见。"),
-            )
-            yield Notice(f"已拒绝 {call.name}", level="warning")
+        allowed = yield from self._resolve_permission(tool, args, call, responded)
+        if not allowed:
             return None
-        if decision is ApprovalDecision.ALLOW_ALWAYS:
-            self.session.always_allowed.add(tool.name)
 
-        # 4. 执行
         yield ToolStarted(call_id=call.id, name=call.name, args=args)
         started = time.monotonic()
         result = self.registry.execute(call.name, args, self.tool_ctx)
@@ -198,31 +168,45 @@ class Agent:
 
         self._respond(call, responded, result)
         self.session.record_tool_outcome(ok=result.ok)
-        # 文件真的被改动了就算实质进展，重复调用窗口可以清零
         if result.ok and result.metadata.get("diff") not in (None, "(无变化)"):
             self.session.record_progress()
         yield ToolFinished(call_id=call.id, name=call.name, result=result, duration=duration)
 
         return self._check_failure_threshold()
 
-    # ------------------------------------------------------------------ 辅助
-    def _request_approval(self, tool: Any, args: dict[str, Any]) -> Generator[AgentEvent, Any, ApprovalDecision]:
-        """按策略决定是否需要询问用户。"""
-        if tool.risk is RiskLevel.READ:
-            return ApprovalDecision.ALLOW_ONCE
+    def _resolve_permission(
+        self,
+        tool: Any,
+        args: dict[str, Any],
+        call: ToolCall,
+        responded: set[str],
+    ) -> Generator[AgentEvent, Any, bool]:
+        outcome = self.permissions.evaluate(
+            tool,
+            args,
+            mode=self.config.execution_mode,
+            always_allowed=self.session.always_allowed,
+        )
 
-        request = self.policy.build_approval(tool, args)
-        if request is None:
-            return ApprovalDecision.ALLOW_ONCE
+        if outcome.kind == "allow":
+            return True
 
-        # 敏感操作（force）不受 --yolo 与「始终允许」影响
-        if not request.force:
-            if self.config.yolo or tool.name in self.session.always_allowed:
-                return ApprovalDecision.ALLOW_ONCE
+        if outcome.kind == "deny":
+            self._respond(call, responded, ToolResult.failure(outcome.deny_message or "操作被拒绝。"))
+            yield Notice(f"已拒绝 {tool.name}", level="warning")
+            return False
 
-        decision = yield ApprovalRequired(request=request)
-        # 外部没有回传决策时，按最保守的方式处理
-        return decision if isinstance(decision, ApprovalDecision) else ApprovalDecision.DENY
+        decision = yield ApprovalRequired(request=outcome.request)
+        decision = decision if isinstance(decision, ApprovalDecision) else ApprovalDecision.DENY
+        if not PermissionManager.apply_decision(decision, tool.name, self.session.always_allowed):
+            self._respond(
+                call,
+                responded,
+                ToolResult.failure(PermissionManager.user_denied_message()),
+            )
+            yield Notice(f"已拒绝 {tool.name}", level="warning")
+            return False
+        return True
 
     def _respond(self, call: ToolCall, responded: set[str], result: ToolResult) -> None:
         self.session.add(Message.tool(call.id, result.to_model_text()))

@@ -22,7 +22,10 @@ if TYPE_CHECKING:
 
 
 class RiskLevel(Enum):
-    """决定该工具是否需要用户审批。"""
+    """工具固有能力分类（read / write / exec）。
+
+    最终是否放行由执行模式与安全规则共同决定，READ 不等于一定免审批。
+    """
 
     READ = "read"
     WRITE = "write"

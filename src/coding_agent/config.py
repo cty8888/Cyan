@@ -13,6 +13,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from .errors import ConfigError
+from .security.modes import ExecutionMode
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
@@ -25,6 +26,7 @@ _ENV_MAPPING = {
     "CODING_AGENT_MAX_ITERATIONS": "max_iterations",
     "CODING_AGENT_TEMPERATURE": "temperature",
     "CODING_AGENT_LOG_LEVEL": "log_level",
+    "CODING_AGENT_MODE": "execution_mode",
 }
 
 
@@ -52,12 +54,10 @@ class Config:
     max_file_read_chars: int = 60_000
     max_dir_entries: int = 400
 
-    # 安全
-    yolo: bool = False
-
     # 日志：文件始终记录 DEBUG。verbose 才会再打到 stderr（避免和 rich 界面叠在一起）
     log_level: str = "INFO"
     verbose: bool = False
+    execution_mode: ExecutionMode = ExecutionMode.AGENT
 
     # 元数据目录（会话、临时文件），位于 workspace 之下
     state_dirname: str = ".coding_agent"
@@ -120,4 +120,9 @@ def _coerce(raw: str, target_type: Any, source: str) -> Any:
             return raw.strip().lower() in {"1", "true", "yes", "on"}
     except ValueError as exc:
         raise ConfigError(f"环境变量 {source} 的值 {raw!r} 无法转换为 {type_name}") from exc
+    if type_name == "ExecutionMode":
+        try:
+            return ExecutionMode.parse(raw)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     return raw

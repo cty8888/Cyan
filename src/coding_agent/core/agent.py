@@ -7,7 +7,7 @@ from ..config import Config
 from ..errors import AgentError, InvalidToolArgumentsError, LLMError
 from ..llm.base import LLMClient
 from ..llm.parser import parse_tool_arguments
-from ..llm.types import Message, ToolCallBlock
+from ..llm.types import ToolCallBlock, ToolMessage, UserMessage
 from ..security.approval import ApprovalDecision
 from ..security.modes import ExecutionMode
 from ..security.permissions import PermissionManager
@@ -56,7 +56,7 @@ class Agent:
         )
 
     def run(self, task: str) -> AgentStream:
-        self.session.add(Message.user(task))
+        self.session.add(UserMessage.of(task))
         self.session.consecutive_tool_failures = 0
         self.session.reset_repeat_tracking()
         yield TaskStarted(task=task)
@@ -121,7 +121,12 @@ class Agent:
         except KeyboardInterrupt:
             for call in tool_calls:
                 if call.id not in responded:
-                    self.session.add(Message.tool(call.id, "用户中断了任务，该工具调用未执行。"))
+                    self._respond_text(
+                        call,
+                        "用户中断了任务，该工具调用未执行。",
+                        ok=False,
+                        error="用户中断了任务，该工具调用未执行。",
+                    )
             raise
 
     def _run_single_call(
@@ -130,7 +135,7 @@ class Agent:
         try:
             args = parse_tool_arguments(call.arguments, call.name)
         except InvalidToolArgumentsError as exc:
-            self._respond(call, responded, ToolResult.failure(str(exc)))
+            self._respond(call, responded, ToolResult.failure(str(exc)), duration=0.0)
             self.session.record_tool_outcome(ok=False)
             yield Notice(f"{call.name} 参数解析失败：{exc}", level="warning")
             return self._check_failure_threshold()
@@ -169,7 +174,7 @@ class Agent:
         result = self.registry.execute(call.name, args, self.tool_ctx)
         duration = time.monotonic() - started
 
-        self._respond(call, responded, result)
+        self._respond(call, responded, result, duration=duration)
         self.session.record_tool_outcome(ok=result.ok)
         if result.ok and result.metadata.get("diff") not in (None, "(无变化)"):
             self.session.record_progress()
@@ -211,9 +216,36 @@ class Agent:
             return False
         return True
 
-    def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolResult) -> None:
-        self.session.add(Message.tool(call.id, result.to_model_text()))
+    def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolResult, *, duration: float = 0.0) -> None:
+        self._respond_text(
+            call,
+            result.to_model_text(),
+            ok=result.ok,
+            duration=duration,
+            error=result.error,
+        )
         responded.add(call.id)
+
+    def _respond_text(
+        self,
+        call: ToolCallBlock,
+        text: str,
+        ok: bool,
+        *,
+        error: str | None = None,
+        duration: float = 0.0,
+    ) -> None:
+        """把一次工具调用的结果写入 ``tool_history`` 事实记录，并回喂一条引用它的 ``ToolMessage``。"""
+        self.session.record_tool_execution(
+            call.id,
+            call.name,
+            call.arguments,
+            ok,
+            text,
+            error=error,
+            duration=duration,
+        )
+        self.session.add(ToolMessage.of(call.id))
 
     def _check_failure_threshold(self) -> StopReason | None:
         if self.session.consecutive_tool_failures >= self.config.max_consecutive_tool_failures:

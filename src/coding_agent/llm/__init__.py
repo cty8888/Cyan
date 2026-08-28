@@ -2,6 +2,7 @@ from .base import LLMClient
 from .deepseek import DeepSeekClient
 from .parser import parse_completion, parse_tool_arguments
 from .types import (
+    AssistantMessage,
     Block,
     BlockType,
     CodeBlock,
@@ -9,10 +10,13 @@ from .types import (
     LLMResponse,
     Message,
     Role,
+    SystemMessage,
     TextBlock,
     ToolCallBlock,
+    ToolMessage,
     ToolResultBlock,
     ToolResultStatus,
+    UserMessage,
     Usage,
 )
 
@@ -22,6 +26,10 @@ __all__ = [
     "LLMResponse",
     "Message",
     "Role",
+    "SystemMessage",
+    "UserMessage",
+    "AssistantMessage",
+    "ToolMessage",
     "Block",
     "BlockType",
     "TextBlock",

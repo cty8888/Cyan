@@ -22,10 +22,13 @@ src/coding_agent/
     renderer.py          # rich 渲染：Markdown、工具卡片、diff、审批提示
   core/
     agent.py             # Agent Loop（核心）
-    session.py           # 会话状态：消息历史、已授权工具、轮次统计
+    session.py           # 会话状态：消息历史、工具历史、已授权工具、轮次统计
+    tool_history.py      # ToolExecution / ToolHistory 事实记录
     events.py            # AgentEvent：TextDelta / ToolStart / ToolEnd / NeedApproval / Done / Error
+  context/
+    builder.py           # ContextBuilder：装配 wire 格式，决定工具结果展示策略
   llm/
-    types.py             # Role / Block（Text/ToolCall/ToolResult/File/Code）/ Message / LLMResponse
+    types.py             # Role / Block(...) / Message 继承体系(System/User/Assistant/Tool) / LLMResponse
     base.py              # LLMClient 抽象
     deepseek.py          # OpenAI 兼容实现（DeepSeek）
     parser.py            # 模型输出解析：流式 tool_call 分片拼接、参数 JSON 容错
@@ -82,18 +85,38 @@ flowchart TD
 - 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」重复调用
 - token 预算耗尽且压缩后仍超限
 
-### Message 的 Block 模型
+### Message 继承体系 + Block 内容模型 + ToolHistory 事实记录
 
-`Message` 不是一段字符串，而是 `role + blocks` —— 一组 `Block`（不可再拆分的内容单元）。不同来源、不同结构的信息各用各的 Block 类型，互不耦合：
+三个互相独立、各司其职的结构：`Block` 承载「消息里的信息」，`Message` 只是「role + 一组 blocks」的容器，`ToolHistory` 承载「Agent 执行工具的事实记录」——三者不互相继承，`ToolHistory` 也不属于 `Message`。
 
-- `TextBlock`：自然语言文本（用户输入 / assistant 回复 / 系统提示）
-- `ToolCallBlock`：模型发起的一次工具调用（`id` / `name` / `arguments`）
-- `ToolResultBlock`：一次工具调用的执行结果（`tool_call_id` / `content` / `status`）
-- `FileBlock`：对某个文件的引用（`path` / `start_line` / `end_line`），不携带文件内容本身
-- `CodeBlock`：独立代码片段（`language` / `code`）
-- `ImageBlock` 留作后续扩展，暂不实现
+```
+Message (ABC dataclass：role: ClassVar[Role] + blocks: list[Block])
+├── SystemMessage      # 只放一个 TextBlock
+├── UserMessage        # TextBlock，未来可以混入 FileBlock / CodeBlock
+├── AssistantMessage   # TextBlock + 若干 ToolCallBlock，覆写 to_api() 处理 tool_calls
+└── ToolMessage        # 只放一个 ToolResultBlock（只有 call id）
 
-`role` 用 `Role` 枚举（`system` / `user` / `assistant` / `tool`），`type` 用 `BlockType` 枚举，均不用裸字符串，避免任意值被注入。`Message.to_api()` 负责把 blocks 折叠成 OpenAI 兼容的 wire 格式（text 拼成 `content`，`ToolCallBlock` 转成 `tool_calls` 数组，tool 消息取 `ToolResultBlock.content`）——这一层转换只存在于 `llm/`，Agent Loop 和 Session 只认 Block，不关心具体后端协议。
+Block (ABC：type: ClassVar[BlockType])
+├── TextBlock        # 文本
+├── ToolCallBlock    # 一次工具调用（id / name / arguments）
+├── ToolResultBlock  # 对一次工具调用结果的引用，只有 tool_call_id
+├── FileBlock        # 文件引用（path / start_line / end_line），不携带文件内容
+└── CodeBlock        # 独立代码片段（language / code）
+
+core.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保存与查询）
+├── ToolResult      # content / summary / ref —— 只存数据，提供 has_summary / content_removed / render()
+├── ToolExecution   # id / tool_name / arguments / status / result / started_at / finished_at / duration / error
+└── ToolHistory     # dict[call_id, ToolExecution]，record() / get()
+
+context.builder.ContextBuilder（展示策略层，挂在 Session 上）
+└── build_messages()  # 反查 ToolHistory，按 render_mode 调用 result.render("summary"|"full")
+```
+
+关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起长期存在于 `tool_history` 里，不属于 Message——这是为 Phase 3 的上下文压缩铺路：压缩由 `CompressionManager` 负责（生成 `summary`、保存原文、`ref`、删除 `content`），完全不用碰 `Message` 历史。
+
+`ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存数据（`content` / `summary` / `ref`），提供 `has_summary`、`content_removed` 等基础状态视图，以及 `render(mode="summary"|"full")` 基础渲染——不参与压缩策略判断。`ContextBuilder.render_mode` 决定调用哪种渲染模式；调试或深入分析时可设为 `"full"`。
+
+`Session.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它同时访问 `messages` 和 `tool_history`，是唯一能把两者拼起来并决定展示策略的地方；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
 
 ## 4. 工具系统
 

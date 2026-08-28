@@ -21,7 +21,7 @@ from coding_agent.core.session import Session
 from coding_agent.errors import BlockedCommandError, PathOutsideWorkspaceError
 from coding_agent.llm.base import LLMClient
 from coding_agent.llm.parser import parse_tool_arguments
-from coding_agent.llm.types import LLMResponse, Message, Role, ToolCallBlock, Usage
+from coding_agent.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, ToolMessage, Usage
 from coding_agent.logutil import get_logger, setup_logging
 from coding_agent.security.approval import ApprovalDecision
 from coding_agent.security.modes import ExecutionMode
@@ -51,7 +51,7 @@ class FakeLLM(LLMClient):
 
     def chat(self, messages, tools=None):
         self.calls += 1
-        item = self.script.pop(0) if self.script else Message.assistant("done")
+        item = self.script.pop(0) if self.script else AssistantMessage.of("done")
         return LLMResponse(message=item, usage=Usage(10, 5, 15))
 
 
@@ -274,14 +274,14 @@ def main() -> int:
 
         # -------------------------------------------------------- Agent Loop
         def call(name, args_json, cid="c1"):
-            return Message.assistant(tool_calls=[ToolCallBlock(id=cid, name=name, arguments=args_json)])
+            return AssistantMessage.of(tool_calls=[ToolCallBlock(id=cid, name=name, arguments=args_json)])
 
         # 正常闭环：调工具 -> 拿结果 -> 收尾
         run_loop = json.dumps({"command": f"{sys.executable} loop.py"})
         llm = FakeLLM([
             call("write_file", '{"path": "loop.py", "content": "print(41+1)"}'),
             call("bash", run_loop, "c2"),
-            Message.assistant("已创建并验证 loop.py，输出 42。"),
+            AssistantMessage.of("已创建并验证 loop.py，输出 42。"),
         ])
         agent = Agent(config, llm, registry, policy, permissions)
         events, reason = drive(agent, "写个脚本")
@@ -312,19 +312,23 @@ def main() -> int:
         # 参数非法：模型有机会自我纠正
         llm = FakeLLM([
             call("read_file", "{不是JSON"),
-            Message.assistant("参数写错了，已放弃。"),
+            AssistantMessage.of("参数写错了，已放弃。"),
         ])
         agent = Agent(config, llm, registry, policy, permissions)
         _, reason = drive(agent, "坏参数")
         check("参数非法不会崩溃", reason is StopReason.COMPLETED, str(reason))
-        tool_msgs = [m for m in agent.session.messages if m.role is Role.TOOL]
-        result = tool_msgs[0].tool_result
-        check("参数非法也回喂了 tool 消息", len(tool_msgs) == 1 and result is not None and "不是合法 JSON" in result.content)
+        tool_msgs = [m for m in agent.session.messages if isinstance(m, ToolMessage)]
+        block = tool_msgs[0].tool_result
+        execution = agent.session.tool_history.get(block.tool_call_id) if block else None
+        check(
+            "参数非法也回喂了 tool 消息",
+            len(tool_msgs) == 1 and execution is not None and "不是合法 JSON" in (execution.result.content or ""),
+        )
 
         # 审批：Agent 模式下普通 exec 需确认，拒绝后不执行
         llm = FakeLLM([
             call("bash", '{"command": "touch denied_by_bash.txt"}'),
-            Message.assistant("好的，已放弃执行。"),
+            AssistantMessage.of("好的，已放弃执行。"),
         ])
         agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "touch", decision=ApprovalDecision.DENY)
@@ -334,7 +338,7 @@ def main() -> int:
         # 敏感 write 需确认，审批面板带 diff
         llm = FakeLLM([
             call("write_file", '{"path": ".env", "content": "K=1"}'),
-            Message.assistant("好的。"),
+            AssistantMessage.of("好的。"),
         ])
         agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "写 env", decision=ApprovalDecision.ALLOW_ONCE)
@@ -343,21 +347,21 @@ def main() -> int:
         check("审批面板带 diff", approval.detail_format == "diff" and "+K=1" in (approval.detail or ""))
 
         # 只读工具不触发审批
-        llm = FakeLLM([call("list_dir", '{"path": "."}'), Message.assistant("看完了")])
+        llm = FakeLLM([call("list_dir", '{"path": "."}'), AssistantMessage.of("看完了")])
         agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "看目录")
         check("只读工具不审批", not any(isinstance(e, ApprovalRequired) for e in events))
 
         # 敏感文件强制逐次确认
-        llm = FakeLLM([call("write_file", '{"path": ".env", "content": "K=1"}'), Message.assistant("好")])
+        llm = FakeLLM([call("write_file", '{"path": ".env", "content": "K=1"}'), AssistantMessage.of("好")])
         agent = Agent(config, llm, registry, policy, permissions)
         events, _ = drive(agent, "改 env", decision=ApprovalDecision.DENY)
         requests = [e.request for e in events if isinstance(e, ApprovalRequired)]
         check("敏感文件强制确认", len(requests) == 1 and requests[0].force, str(requests))
 
         # 上下文完整性：每个 tool_call 都有对应响应
-        assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if m.role is Role.ASSISTANT)
-        tool_replies = sum(1 for m in agent.session.messages if m.role is Role.TOOL)
+        assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if isinstance(m, AssistantMessage))
+        tool_replies = sum(1 for m in agent.session.messages if isinstance(m, ToolMessage))
         check("每个 tool_call 都有 tool 响应", assistant_calls == tool_replies, f"{assistant_calls} vs {tool_replies}")
 
         # ------------------------------------------------- 回归：三个已验证的缺陷
@@ -471,7 +475,7 @@ def main() -> int:
 
         # Ask 模式 schema 过滤
         agent_cfg = Config(api_key="test", workspace=tmp, execution_mode=ExecutionMode.ASK)
-        ask_agent = Agent(agent_cfg, FakeLLM([Message.assistant("ok")]), registry, policy, permissions)
+        ask_agent = Agent(agent_cfg, FakeLLM([AssistantMessage.of("ok")]), registry, policy, permissions)
         ask_schemas = ask_agent._schemas_for_mode()
         ask_names = {s["function"]["name"] for s in ask_schemas}
         check("Ask 模式只暴露 read 工具", ask_names == {"list_dir", "read_file"}, str(ask_names))

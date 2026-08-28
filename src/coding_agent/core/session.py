@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..llm.types import Message, Usage
+from ..context.builder import ContextBuilder
+from ..llm.types import Message, ToolResultStatus, Usage
+from .tool_history import ToolExecution, ToolHistory, ToolResult
 
 # 重复调用检测的观察窗口。只比较「上一次」调用会漏掉 A-B-A-B 这类交替循环，
 # 因此改为统计最近若干次调用里同一指纹出现了几次。
@@ -24,6 +27,12 @@ RECENT_CALL_WINDOW = 8
 class Session:
     system_prompt: str
     messages: list[Message] = field(default_factory=list)
+
+    # Agent 执行工具的事实记录，与 Message 历史彻底分开
+    tool_history: ToolHistory = field(default_factory=ToolHistory)
+
+    # 上下文装配：决定工具结果如何呈现给模型
+    context_builder: ContextBuilder = field(default_factory=ContextBuilder)
 
     # 用户在本会话中选择「始终允许」的工具
     always_allowed: set[str] = field(default_factory=set)
@@ -50,8 +59,41 @@ class Session:
     def add(self, message: Message) -> None:
         self.messages.append(message)
 
-    def messages_for_request(self) -> list[Message]:
-        return [Message.system(self.system_prompt), *self.messages]
+    def record_tool_execution(
+        self,
+        call_id: str,
+        tool_name: str,
+        arguments: str,
+        ok: bool,
+        content: str,
+        *,
+        error: str | None = None,
+        duration: float = 0.0,
+        started_at: float | None = None,
+        finished_at: float | None = None,
+    ) -> None:
+        """把一次工具执行的事实写入 ``tool_history``。"""
+        status = ToolResultStatus.OK if ok else ToolResultStatus.ERROR
+        if not ok and error is None:
+            error = content
+        now = time.time()
+        self.tool_history.record(
+            ToolExecution(
+                id=call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                status=status,
+                result=ToolResult(content=content),
+                started_at=started_at if started_at is not None else now,
+                finished_at=finished_at if finished_at is not None else now,
+                duration=duration,
+                error=error,
+            )
+        )
+
+    def messages_for_request(self) -> list[dict[str, Any]]:
+        """装配成 OpenAI 兼容的 wire 格式，展示策略由 ``context_builder`` 决定。"""
+        return self.context_builder.build_messages(self.system_prompt, self.messages, self.tool_history)
 
     def record_usage(self, usage: Usage) -> None:
         self.total_usage = self.total_usage + usage
@@ -89,6 +131,7 @@ class Session:
 
     def clear(self) -> None:
         self.messages.clear()
+        self.tool_history.clear()
         self.total_usage = Usage()
         self.llm_calls = 0
         self.tool_calls = 0

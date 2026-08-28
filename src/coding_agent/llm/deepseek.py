@@ -20,7 +20,7 @@ from ..errors import (
 from ..logutil import get_logger
 from .base import LLMClient
 from .parser import parse_completion
-from .types import LLMResponse, Message
+from .types import LLMResponse
 
 logger = get_logger("llm")
 
@@ -44,12 +44,12 @@ class DeepSeekClient(LLMClient):
 
     def chat(
         self,
-        messages: list[Message],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [m.to_api() for m in messages],
+            "messages": messages,
             "temperature": self._config.temperature,
         }
         if tools:

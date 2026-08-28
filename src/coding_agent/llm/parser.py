@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from ..errors import InvalidToolArgumentsError, LLMResponseError
-from .types import LLMResponse, Message, ToolCallBlock, Usage
+from .types import AssistantMessage, LLMResponse, ToolCallBlock, Usage
 
 _CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 _TRAILING_COMMA = re.compile(r",\s*([}\]])")
@@ -52,8 +52,8 @@ def parse_completion(raw: Any) -> LLMResponse:
     )
 
     return LLMResponse(
-        message=Message.assistant(
-            content=getattr(message, "content", None),
+        message=AssistantMessage.of(
+            text=getattr(message, "content", None),
             tool_calls=tool_calls,
         ),
         finish_reason=getattr(choice, "finish_reason", "stop") or "stop",

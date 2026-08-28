@@ -21,10 +21,12 @@ src/coding_agent/
     app.py               # REPL 主循环、斜杠命令、Ctrl-C 中断
     renderer.py          # rich 渲染：Markdown、工具卡片、diff、审批提示
   core/
-    agent.py             # Agent Loop（核心）
-    session.py           # 会话状态：消息历史、工具历史、已授权工具、轮次统计
+    agent.py             # Agent 入口，持有 Runtime 驱动 Loop
+    runtime.py           # Runtime：组合 LLMClient / ContextBuilder / ToolExecutor / PermissionManager
+    tool_executor.py     # ToolExecutor：实际执行工具
+    session/             # Session 数据层（metadata / messages / tool_history / state / workspace / permissions / usage / config）
     tool_history.py      # ToolExecution / ToolHistory 事实记录
-    events.py            # AgentEvent：TextDelta / ToolStart / ToolEnd / NeedApproval / Done / Error
+    events.py            # AgentEvent
   context/
     builder.py           # ContextBuilder：装配 wire 格式，决定工具结果展示策略
   llm/
@@ -108,15 +110,38 @@ core.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保
 ├── ToolExecution   # id / tool_name / arguments / status / result / started_at / finished_at / duration / error
 └── ToolHistory     # dict[call_id, ToolExecution]，record() / get()
 
-context.builder.ContextBuilder（展示策略层，挂在 Session 上）
+context.builder.ContextBuilder（展示策略层，由 Runtime 持有）
 └── build_messages()  # 反查 ToolHistory，按 render_mode 调用 result.render("summary"|"full")
 ```
+
+### Session 与 Runtime
+
+```
+Runtime（执行层，不保存长期状态）
+ ├── LLMClient
+ ├── ContextBuilder
+ ├── ToolExecutor
+ ├── PermissionManager
+ └── Session（数据层）
+
+Session
+ ├── metadata      # id / created_at / updated_at / title
+ ├── messages        # list[Message]
+ ├── tool_history    # ToolHistory
+ ├── state           # current_task / plan / current_step / variables / ...
+ ├── workspace       # root / cwd / opened_files / modified_files / environment
+ ├── permissions     # always_allowed / denied / rules
+ ├── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
+ └── config          # model / max_context_tokens / tool_result_mode / temperature / system_prompt
+```
+
+核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 
 关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起长期存在于 `tool_history` 里，不属于 Message——这是为 Phase 3 的上下文压缩铺路：压缩由 `CompressionManager` 负责（生成 `summary`、保存原文、`ref`、删除 `content`），完全不用碰 `Message` 历史。
 
 `ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存数据（`content` / `summary` / `ref`），提供 `has_summary`、`content_removed` 等基础状态视图，以及 `render(mode="summary"|"full")` 基础渲染——不参与压缩策略判断。`ContextBuilder.render_mode` 决定调用哪种渲染模式；调试或深入分析时可设为 `"full"`。
 
-`Session.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它同时访问 `messages` 和 `tool_history`，是唯一能把两者拼起来并决定展示策略的地方；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
+`Runtime.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它读取 Session 的 `messages` 和 `tool_history`，是唯一能把两者拼起来并决定展示策略的地方；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
 
 ## 4. 工具系统
 

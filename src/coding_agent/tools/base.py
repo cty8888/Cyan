@@ -37,6 +37,8 @@ class ToolResult:
     """工具执行结果。
 
     ``content`` 回喂模型；``metadata`` 仅供 CLI 渲染（如 diff），不进上下文。
+
+    TODO: 重命名以避免与 core.tool_history.ToolResult 混淆（如 ToolRunResult）。
     """
 
     ok: bool
@@ -60,7 +62,10 @@ class ToolResult:
 
 @dataclass
 class ToolContext:
-    """工具执行时可访问的运行环境。"""
+    """工具执行时可访问的运行环境。
+
+    TODO: 不要传入整个 Session，改为 workspace 视图 + 受控 mutator，避免工具层穿透数据边界。
+    """
 
     workspace: Path
     policy: SecurityPolicy

@@ -5,7 +5,6 @@ from typing import Any, Generator
 
 from ..config import Config
 from ..errors import AgentError, InvalidToolArgumentsError, LLMError
-from ..llm.base import LLMClient
 from ..llm.parser import parse_tool_arguments
 from ..llm.types import ToolCallBlock, ToolMessage, UserMessage
 from ..security.approval import ApprovalDecision
@@ -26,36 +25,59 @@ from .events import (
     ToolFinished,
     ToolStarted,
 )
-from .prompts import build_system_prompt
+from .runtime import Runtime
 from .session import Session
 
 AgentStream = Generator[AgentEvent, "ApprovalDecision | None", None]
 
 
 class Agent:
+    """Agent 入口：持有 Runtime 并驱动 Agent Loop。
+
+    TODO: Loop 下沉到 Runtime 后，去掉重复的 config/registry/policy/permissions 字段。
+    """
+
     def __init__(
         self,
         config: Config,
-        llm: LLMClient,
+        llm: Any,
         registry: ToolRegistry,
         policy: SecurityPolicy,
         permissions: PermissionManager,
         session: Session | None = None,
     ):
+        self.runtime = Runtime.create(
+            config=config,
+            llm=llm,
+            registry=registry,
+            policy=policy,
+            permissions=permissions,
+            session=session,
+        )
         self.config = config
-        self.llm = llm
         self.registry = registry
         self.policy = policy
         self.permissions = permissions
-        self.session = session or Session(system_prompt=build_system_prompt(config.workspace))
-        self.tool_ctx = ToolContext(
-            workspace=config.workspace,
-            policy=policy,
-            tool_config=config.tool,
+
+    @property
+    def session(self) -> Session:
+        return self.runtime.session
+
+    @property
+    def llm(self):
+        return self.runtime.llm
+
+    @property
+    def tool_ctx(self) -> ToolContext:
+        return ToolContext(
+            workspace=self.config.workspace,
+            policy=self.policy,
+            tool_config=self.config.tool,
             session=self.session,
         )
 
     def run(self, task: str) -> AgentStream:
+        self.session.state.current_task = task
         self.session.add(UserMessage.of(task))
         self.session.consecutive_tool_failures = 0
         self.session.reset_repeat_tracking()
@@ -69,7 +91,7 @@ class Agent:
                 yield Thinking(iteration=iteration)
 
                 try:
-                    response = self.llm.chat(self.session.messages_for_request(), tools=schemas)
+                    response = self.runtime.llm.chat(self.runtime.messages_for_request(), tools=schemas)
                 except LLMError as exc:
                     yield Notice(f"模型调用失败：{exc}", level="error")
                     yield self._finish(StopReason.FATAL_ERROR, final_text)
@@ -171,7 +193,7 @@ class Agent:
 
         yield ToolStarted(call_id=call.id, name=call.name, args=args)
         started = time.monotonic()
-        result = self.registry.execute(call.name, args, self.tool_ctx)
+        result = self.runtime.tool_executor.execute(call.name, args, self.tool_ctx)
         duration = time.monotonic() - started
 
         self._respond(call, responded, result, duration=duration)
@@ -189,7 +211,7 @@ class Agent:
         call: ToolCallBlock,
         responded: set[str],
     ) -> Generator[AgentEvent, Any, bool]:
-        outcome = self.permissions.evaluate(
+        outcome = self.runtime.permissions.evaluate(
             tool,
             args,
             mode=self.config.execution_mode,
@@ -235,7 +257,6 @@ class Agent:
         error: str | None = None,
         duration: float = 0.0,
     ) -> None:
-        """把一次工具调用的结果写入 ``tool_history`` 事实记录，并回喂一条引用它的 ``ToolMessage``。"""
         self.session.record_tool_execution(
             call.id,
             call.name,

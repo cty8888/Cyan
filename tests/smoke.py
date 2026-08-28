@@ -60,7 +60,7 @@ def make_env(tmp: Path):
     policy = SecurityPolicy(tmp)
     permissions = PermissionManager(policy)
     registry = build_default_registry()
-    session = Session(system_prompt="")
+    session = Session.create(workspace=tmp, system_prompt="")
     ctx = ToolContext(workspace=tmp, policy=policy, tool_config=config.tool, session=session)
     return config, policy, permissions, registry, ctx
 
@@ -152,7 +152,7 @@ def main() -> int:
         (tmp / "big.txt").write_text(big, encoding="utf-8")
         tiny_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_file_read_chars=200))
         tiny_ctx = ToolContext(
-            workspace=tmp, policy=policy, tool_config=tiny_config.tool, session=Session(system_prompt="")
+            workspace=tmp, policy=policy, tool_config=tiny_config.tool, session=Session.create(workspace=tmp, system_prompt="")
         )
         r = ro_registry.execute("read_file", {"path": "big.txt"}, tiny_ctx)
         check("超预算的整篇读取返回 PARTIAL 视图", r.ok and "[PARTIAL VIEW]" in r.content, r.content)
@@ -210,7 +210,7 @@ def main() -> int:
         # 输出超过上限时按 spec 截断（尾部加 ...[truncated]，不是老版本的头尾各留一半）
         tiny_out_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_tool_output_chars=50))
         tiny_out_ctx = ToolContext(
-            workspace=tmp, policy=policy, tool_config=tiny_out_config.tool, session=Session(system_prompt="")
+            workspace=tmp, policy=policy, tool_config=tiny_out_config.tool, session=Session.create(workspace=tmp, system_prompt="")
         )
         big_echo = {"command": f'{sys.executable} -c "print(\'x\' * 500)"'}
         r = registry.execute("bash", big_echo, tiny_out_ctx)
@@ -384,7 +384,7 @@ def main() -> int:
         subprocess.run(["pkill", "-f", marker], capture_output=True)
 
         # 缺陷 2：A-B-A-B 交替循环此前完全检测不到
-        s = Session(system_prompt="")
+        s = Session.create(workspace=tmp, system_prompt="")
         alternating = []
         for _ in range(3):
             alternating.append(s.record_call_fingerprint("read_file", {"path": "a.py"}))
@@ -392,7 +392,7 @@ def main() -> int:
         check("交替循环能被检测", max(alternating) >= 3, str(alternating))
 
         # 但「改文件 -> 重跑测试」的正常迭代不该被误判
-        s = Session(system_prompt="")
+        s = Session.create(workspace=tmp, system_prompt="")
         iterating = []
         for _ in range(4):
             iterating.append(s.record_call_fingerprint("bash", {"command": "pytest"}))

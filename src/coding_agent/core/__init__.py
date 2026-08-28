@@ -11,6 +11,7 @@ from .events import (
     ToolFinished,
     ToolStarted,
 )
+from .runtime import Runtime
 from .session import Session
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "ApprovalRequired",
     "AssistantMessage",
     "Notice",
+    "Runtime",
     "StopReason",
     "TaskFinished",
     "TaskStarted",

@@ -19,7 +19,10 @@ RenderMode = Literal["summary", "full"]
 
 @dataclass
 class ToolResult:
-    """一次工具调用的输出数据。"""
+    """一次工具调用的输出数据。
+
+    TODO: 重命名以避免与 tools.base.ToolResult 混淆（如 StoredToolOutput / ToolOutputRecord）。
+    """
 
     content: str | None = None
     summary: str | None = None

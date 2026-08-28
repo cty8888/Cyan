@@ -59,7 +59,11 @@ class App:
         self.policy = SecurityPolicy(config.workspace)
         self.permissions = PermissionManager(self.policy)
         self.registry = build_default_registry()
-        self.session = Session(system_prompt=build_system_prompt(config.workspace))
+        self.session = Session.create(
+            workspace=config.workspace,
+            system_prompt=build_system_prompt(config.workspace),
+            app_config=config,
+        )
         self.llm = DeepSeekClient(config, on_retry=self._on_llm_retry)
         self.agent = Agent(
             config=config,
@@ -187,6 +191,7 @@ class App:
             else:
                 try:
                     self.config.execution_mode = ExecutionMode.parse(parts[1])
+                    # TODO: 同步到 session.config，或由 Runtime 统一读取 Session.config
                     label = MODE_LABELS[self.config.execution_mode]
                     console.print(f"[dim]已切换至 {label}[/]")
                     logger.info("切换执行模式：%s", self.config.execution_mode.value)

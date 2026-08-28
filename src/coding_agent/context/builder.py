@@ -15,7 +15,11 @@ from ..llm.types import Message, SystemMessage, ToolMessage
 
 @dataclass
 class ContextBuilder:
-    """根据当前上下文需求，决定 Message / ToolHistory 如何呈现给模型。"""
+    """根据当前上下文需求，决定 Message / ToolHistory 如何呈现给模型。
+
+    TODO: 接入 CompressionManager——按 token 预算决定哪些 ToolExecution 压缩、render_mode 切换。
+    TODO: 读取 session.state / workspace 参与上下文裁剪（Phase 3）。
+    """
 
     render_mode: RenderMode = "summary"
 

@@ -1,4 +1,4 @@
-"""write_file 工具：整文件写入或新建。"""
+"""write_file —— 整文件写入或新建。"""
 
 from __future__ import annotations
 

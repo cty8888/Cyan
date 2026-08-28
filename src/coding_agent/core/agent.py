@@ -7,7 +7,7 @@ from ..config import Config
 from ..errors import AgentError, InvalidToolArgumentsError, LLMError
 from ..llm.base import LLMClient
 from ..llm.parser import parse_tool_arguments
-from ..llm.types import Message, ToolCall
+from ..llm.types import Message, ToolCallBlock
 from ..security.approval import ApprovalDecision
 from ..security.modes import ExecutionMode
 from ..security.permissions import PermissionManager
@@ -49,7 +49,10 @@ class Agent:
         self.permissions = permissions
         self.session = session or Session(system_prompt=build_system_prompt(config.workspace))
         self.tool_ctx = ToolContext(
-            workspace=config.workspace, policy=policy, config=config, session=self.session
+            workspace=config.workspace,
+            policy=policy,
+            tool_config=config.tool,
+            session=self.session,
         )
 
     def run(self, task: str) -> AgentStream:
@@ -75,7 +78,7 @@ class Agent:
                 self.session.record_usage(response.usage)
                 self.session.add(response.message)
 
-                text = (response.message.content or "").strip()
+                text = (response.message.text or "").strip()
                 if text:
                     final_text = text
                     yield AssistantMessage(text=text)
@@ -107,7 +110,7 @@ class Agent:
             return [tool.to_schema() for tool in self.registry if tool.risk is RiskLevel.READ]
         return self.registry.schemas()
 
-    def _run_tool_calls(self, tool_calls: list[ToolCall]) -> Generator[AgentEvent, Any, StopReason | None]:
+    def _run_tool_calls(self, tool_calls: list[ToolCallBlock]) -> Generator[AgentEvent, Any, StopReason | None]:
         responded: set[str] = set()
         try:
             for call in tool_calls:
@@ -122,7 +125,7 @@ class Agent:
             raise
 
     def _run_single_call(
-        self, call: ToolCall, responded: set[str]
+        self, call: ToolCallBlock, responded: set[str]
     ) -> Generator[AgentEvent, Any, StopReason | None]:
         try:
             args = parse_tool_arguments(call.arguments, call.name)
@@ -178,7 +181,7 @@ class Agent:
         self,
         tool: Any,
         args: dict[str, Any],
-        call: ToolCall,
+        call: ToolCallBlock,
         responded: set[str],
     ) -> Generator[AgentEvent, Any, bool]:
         outcome = self.permissions.evaluate(
@@ -208,7 +211,7 @@ class Agent:
             return False
         return True
 
-    def _respond(self, call: ToolCall, responded: set[str], result: ToolResult) -> None:
+    def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolResult) -> None:
         self.session.add(Message.tool(call.id, result.to_model_text()))
         responded.add(call.id)
 

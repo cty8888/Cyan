@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from coding_agent.config import Config
+from coding_agent.config import Config, ToolConfig
 from coding_agent.core.agent import Agent
 from coding_agent.core.events import ApprovalRequired, StopReason, TaskFinished, ToolFinished
 from coding_agent.core.prompts import build_system_prompt
@@ -21,7 +21,7 @@ from coding_agent.core.session import Session
 from coding_agent.errors import BlockedCommandError, PathOutsideWorkspaceError
 from coding_agent.llm.base import LLMClient
 from coding_agent.llm.parser import parse_tool_arguments
-from coding_agent.llm.types import LLMResponse, Message, ToolCall, Usage
+from coding_agent.llm.types import LLMResponse, Message, Role, ToolCallBlock, Usage
 from coding_agent.logutil import get_logger, setup_logging
 from coding_agent.security.approval import ApprovalDecision
 from coding_agent.security.modes import ExecutionMode
@@ -61,7 +61,7 @@ def make_env(tmp: Path):
     permissions = PermissionManager(policy)
     registry = build_default_registry()
     session = Session(system_prompt="")
-    ctx = ToolContext(workspace=tmp, policy=policy, config=config, session=session)
+    ctx = ToolContext(workspace=tmp, policy=policy, tool_config=config.tool, session=session)
     return config, policy, permissions, registry, ctx
 
 
@@ -150,9 +150,9 @@ def main() -> int:
 
         big = "\n".join(f"line {i}" for i in range(2000))
         (tmp / "big.txt").write_text(big, encoding="utf-8")
-        tiny_config = Config(api_key="test", workspace=tmp, max_file_read_chars=200)
+        tiny_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_file_read_chars=200))
         tiny_ctx = ToolContext(
-            workspace=tmp, policy=policy, config=tiny_config, session=Session(system_prompt="")
+            workspace=tmp, policy=policy, tool_config=tiny_config.tool, session=Session(system_prompt="")
         )
         r = ro_registry.execute("read_file", {"path": "big.txt"}, tiny_ctx)
         check("超预算的整篇读取返回 PARTIAL 视图", r.ok and "[PARTIAL VIEW]" in r.content, r.content)
@@ -208,9 +208,9 @@ def main() -> int:
         check("重置后下一次调用回到工作目录根", r.ok and str(tmp.resolve()) in r.content, r.content)
 
         # 输出超过上限时按 spec 截断（尾部加 ...[truncated]，不是老版本的头尾各留一半）
-        tiny_out_config = Config(api_key="test", workspace=tmp, max_tool_output_chars=50)
+        tiny_out_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_tool_output_chars=50))
         tiny_out_ctx = ToolContext(
-            workspace=tmp, policy=policy, config=tiny_out_config, session=Session(system_prompt="")
+            workspace=tmp, policy=policy, tool_config=tiny_out_config.tool, session=Session(system_prompt="")
         )
         big_echo = {"command": f'{sys.executable} -c "print(\'x\' * 500)"'}
         r = registry.execute("bash", big_echo, tiny_out_ctx)
@@ -274,7 +274,7 @@ def main() -> int:
 
         # -------------------------------------------------------- Agent Loop
         def call(name, args_json, cid="c1"):
-            return Message.assistant(tool_calls=[ToolCall(id=cid, name=name, arguments=args_json)])
+            return Message.assistant(tool_calls=[ToolCallBlock(id=cid, name=name, arguments=args_json)])
 
         # 正常闭环：调工具 -> 拿结果 -> 收尾
         run_loop = json.dumps({"command": f"{sys.executable} loop.py"})
@@ -317,8 +317,9 @@ def main() -> int:
         agent = Agent(config, llm, registry, policy, permissions)
         _, reason = drive(agent, "坏参数")
         check("参数非法不会崩溃", reason is StopReason.COMPLETED, str(reason))
-        tool_msgs = [m for m in agent.session.messages if m.role == "tool"]
-        check("参数非法也回喂了 tool 消息", len(tool_msgs) == 1 and "不是合法 JSON" in (tool_msgs[0].content or ""))
+        tool_msgs = [m for m in agent.session.messages if m.role is Role.TOOL]
+        result = tool_msgs[0].tool_result
+        check("参数非法也回喂了 tool 消息", len(tool_msgs) == 1 and result is not None and "不是合法 JSON" in result.content)
 
         # 审批：Agent 模式下普通 exec 需确认，拒绝后不执行
         llm = FakeLLM([
@@ -355,8 +356,8 @@ def main() -> int:
         check("敏感文件强制确认", len(requests) == 1 and requests[0].force, str(requests))
 
         # 上下文完整性：每个 tool_call 都有对应响应
-        assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if m.role == "assistant")
-        tool_replies = sum(1 for m in agent.session.messages if m.role == "tool")
+        assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if m.role is Role.ASSISTANT)
+        tool_replies = sum(1 for m in agent.session.messages if m.role is Role.TOOL)
         check("每个 tool_call 都有 tool 响应", assistant_calls == tool_replies, f"{assistant_calls} vs {tool_replies}")
 
         # ------------------------------------------------- 回归：三个已验证的缺陷

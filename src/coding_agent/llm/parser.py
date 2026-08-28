@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from ..errors import InvalidToolArgumentsError, LLMResponseError
-from .types import LLMResponse, Message, ToolCall, Usage
+from .types import LLMResponse, Message, ToolCallBlock, Usage
 
 _CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 _TRAILING_COMMA = re.compile(r",\s*([}\]])")
@@ -31,13 +31,13 @@ def parse_completion(raw: Any) -> LLMResponse:
     if message is None:
         raise LLMResponseError("模型响应缺少 message 字段")
 
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[ToolCallBlock] = []
     for index, item in enumerate(getattr(message, "tool_calls", None) or []):
         function = getattr(item, "function", None)
         if function is None:
             continue
         tool_calls.append(
-            ToolCall(
+            ToolCallBlock(
                 id=getattr(item, "id", None) or f"call_{index}",
                 name=getattr(function, "name", "") or "",
                 arguments=getattr(function, "arguments", "") or "",

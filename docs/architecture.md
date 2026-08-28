@@ -25,7 +25,7 @@ src/coding_agent/
     session.py           # 会话状态：消息历史、已授权工具、轮次统计
     events.py            # AgentEvent：TextDelta / ToolStart / ToolEnd / NeedApproval / Done / Error
   llm/
-    types.py             # Message / ToolCall / LLMResponse 内部数据结构
+    types.py             # Role / Block（Text/ToolCall/ToolResult/File/Code）/ Message / LLMResponse
     base.py              # LLMClient 抽象
     deepseek.py          # OpenAI 兼容实现（DeepSeek）
     parser.py            # 模型输出解析：流式 tool_call 分片拼接、参数 JSON 容错
@@ -81,6 +81,19 @@ flowchart TD
 - 用户 Ctrl-C 中断
 - 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」重复调用
 - token 预算耗尽且压缩后仍超限
+
+### Message 的 Block 模型
+
+`Message` 不是一段字符串，而是 `role + blocks` —— 一组 `Block`（不可再拆分的内容单元）。不同来源、不同结构的信息各用各的 Block 类型，互不耦合：
+
+- `TextBlock`：自然语言文本（用户输入 / assistant 回复 / 系统提示）
+- `ToolCallBlock`：模型发起的一次工具调用（`id` / `name` / `arguments`）
+- `ToolResultBlock`：一次工具调用的执行结果（`tool_call_id` / `content` / `status`）
+- `FileBlock`：对某个文件的引用（`path` / `start_line` / `end_line`），不携带文件内容本身
+- `CodeBlock`：独立代码片段（`language` / `code`）
+- `ImageBlock` 留作后续扩展，暂不实现
+
+`role` 用 `Role` 枚举（`system` / `user` / `assistant` / `tool`），`type` 用 `BlockType` 枚举，均不用裸字符串，避免任意值被注入。`Message.to_api()` 负责把 blocks 折叠成 OpenAI 兼容的 wire 格式（text 拼成 `content`，`ToolCallBlock` 转成 `tool_calls` 数组，tool 消息取 `ToolResultBlock.content`）——这一层转换只存在于 `llm/`，Agent Loop 和 Session 只认 Block，不关心具体后端协议。
 
 ## 4. 工具系统
 

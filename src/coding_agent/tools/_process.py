@@ -1,4 +1,4 @@
-"""子进程执行辅助：bash 工具与测试共用。"""
+"""子进程执行 —— bash 工具与测试共用。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from typing import Any
 
 @dataclass
 class ProcessOutput:
+    """子进程执行结果。"""
+
     exit_code: int
     stdout: str
     stderr: str
@@ -28,7 +30,7 @@ def run_process(
     env: dict[str, str] | None = None,
     merge_stderr: bool = False,
 ) -> ProcessOutput:
-    """启动子进程并在超时时连同其整个进程组一起结束。"""
+    """启动子进程；超时时连同进程组一起终止。"""
     started = time.monotonic()
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
@@ -41,7 +43,7 @@ def run_process(
         "env": {**os.environ, **env} if env else None,
     }
     if os.name == "posix":
-        # 独立进程组，超时后能连子孙进程一起清理，避免 shell 管道留下孤儿进程
+        # 独立进程组，超时时可连子孙进程一起清理
         popen_kwargs["start_new_session"] = True
 
     process = subprocess.Popen(argv, **popen_kwargs)
@@ -53,8 +55,7 @@ def run_process(
         terminate(process)
         stdout, stderr = process.communicate()
     except BaseException:
-        # 子进程在独立进程组里，收不到终端的 SIGINT。用户按 Ctrl-C 时若不显式清理，
-        # 它会脱离本进程继续运行成为孤儿。
+        # 子进程在独立进程组里，收不到终端 SIGINT；显式清理避免孤儿进程
         terminate(process)
         raise
 
@@ -68,6 +69,7 @@ def run_process(
 
 
 def terminate(process: subprocess.Popen) -> None:
+    """终止进程及其进程组，必要时强制 kill。"""
     try:
         if os.name == "posix":
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)

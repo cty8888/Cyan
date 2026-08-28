@@ -1,4 +1,4 @@
-"""write_file / edit_file 审批预览共用的 unified diff 生成。"""
+"""diff 生成 —— write_file / edit_file 审批预览共用。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import difflib
 
 
 def unified_diff(old: str, new: str, filename: str, context: int = 3) -> str:
+    """生成 unified diff；无变化或过长时返回占位/截断文本。"""
     diff = difflib.unified_diff(
         old.splitlines(keepends=True),
         new.splitlines(keepends=True),

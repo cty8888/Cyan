@@ -1,4 +1,7 @@
-"""bash 工具：唯一的 shell 执行入口。"""
+"""bash —— 项目内唯一的 shell 执行入口。
+
+每次调用启动独立进程；工作目录在会话内延续，环境变量不保留。
+"""
 
 from __future__ import annotations
 
@@ -9,8 +12,7 @@ from ..security.policy import SecurityPolicy
 from ._process import run_process
 from .base import RiskLevel, Tool, ToolContext, ToolResult
 
-# 每条命令结束后，用这一行把最终所在目录带出来，供下一次调用延续 cwd。
-# 用可读字符串而不是控制字符，方便调试；真实命令输出里几乎不可能撞到这个串。
+# 命令结束后打印此标记 + $PWD，供下一次调用延续 cwd
 _CWD_MARKER = "@@CODING_AGENT_CWD@@"
 
 
@@ -45,7 +47,7 @@ class BashTool(Tool):
 
         cwd = ctx.session.bash_cwd or ctx.workspace
         if not cwd.is_dir():
-            # 上一次记录的目录被删掉了之类的边缘情况，退回工作目录根
+            # 上次记录的目录已不存在，退回工作目录根
             cwd = ctx.workspace
             ctx.session.bash_cwd = None
 
@@ -57,7 +59,7 @@ class BashTool(Tool):
         visible, cwd_text = _extract_cwd(result.stdout)
         cwd_note = self._update_cwd(ctx, cwd_text)
 
-        output = _truncate_tail(visible.strip(), ctx.config.max_tool_output_chars) or "(无输出)"
+        output = _truncate_tail(visible.strip(), ctx.tool_config.max_tool_output_chars) or "(无输出)"
         display_cwd = ctx.policy.display(ctx.session.bash_cwd or ctx.workspace)
 
         lines = [f"退出码：{result.exit_code}", f"目录：{display_cwd}"]
@@ -74,6 +76,7 @@ class BashTool(Tool):
         return ToolResult.success(content, **metadata)
 
     def _update_cwd(self, ctx: ToolContext, cwd_text: str | None) -> str | None:
+        """解析命令结束后的目录，更新会话 cwd；越界时重置并返回提示。"""
         if not cwd_text:
             return None
         try:
@@ -88,19 +91,19 @@ class BashTool(Tool):
 
 
 def _truncate_tail(text: str, limit: int) -> str:
-    """只保留开头 limit 个字符，超出部分直接砍掉——比头尾各留一半更符合日志类输出的阅读习惯。"""
+    """保留开头 limit 个字符，超出部分截断。"""
     if len(text) <= limit:
         return text
     return text[:limit] + "...[truncated]"
 
 
 def _state_trailer() -> str:
-    """追加在用户命令之后的一段脚本：保留原始退出码，同时把命令结束后的 $PWD 打印出来。"""
+    """追加在用户命令之后：保留退出码，并打印命令结束时的 $PWD。"""
     return f'\n__ca_exit=$?\nprintf "\\n{_CWD_MARKER}%s\\n" "$PWD"\nexit "$__ca_exit"\n'
 
 
 def _extract_cwd(output: str) -> tuple[str, str | None]:
-    """从合并输出里摘掉末尾的 cwd 标记行，返回 (展示给模型的内容, 命令结束后的目录)。"""
+    """从合并输出中剥离 cwd 标记行，返回 (可见内容, 命令结束目录)。"""
     idx = output.rfind(_CWD_MARKER)
     if idx == -1:
         return output, None

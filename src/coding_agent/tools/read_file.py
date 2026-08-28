@@ -1,4 +1,4 @@
-"""read_file 工具：带行号读取文本文件。"""
+"""read_file —— 带行号读取文本文件，支持分段与预算截断。"""
 
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ class ReadFileTool(Tool):
         "required": ["path"],
     }
 
-    # 扩展口子：以后给图片 / PDF / Jupyter notebook 等特殊文件注册专门的读取逻辑，
-    # 按文件后缀分发，目前留空，一律走下面的纯文本读取路径。
+    # 按后缀注册特殊文件读取器；当前为空，一律走纯文本路径
     _SPECIAL_READERS: ClassVar[dict[str, Callable[[Path, ToolContext], ToolResult]]] = {}
 
     def _read_special(self, target: Path, ctx: ToolContext) -> ToolResult | None:
+        """按文件后缀查找特殊读取器；未注册则返回 None。"""
         handler = self._SPECIAL_READERS.get(target.suffix.lower())
         return handler(target, ctx) if handler else None
 
@@ -76,7 +76,7 @@ class ReadFileTool(Tool):
         explicit_limit = limit is not None
         requested_end = min(total, offset - 1 + max(1, int(limit))) if explicit_limit else total
 
-        budget = ctx.config.max_file_read_chars
+        budget = ctx.tool_config.max_file_read_chars
         body, shown_to = _render_lines(all_lines, offset, requested_end, budget)
         truncated_by_budget = shown_to < requested_end
 
@@ -86,8 +86,7 @@ class ReadFileTool(Tool):
                 "请调小 limit 分段读取。"
             )
 
-        # 自动模式下如实读到了请求范围的末尾（EOF），或显式区间成功返回，都算"满足了这次读取请求"，
-        # 后续 write_file/edit_file 可以据此认为模型已经看过这个文件
+        # 本次读取请求已完整满足时，标记为已读，供 write_file/edit_file 前置检查
         if not truncated_by_budget:
             ctx.session.mark_read(target)
 
@@ -104,10 +103,8 @@ class ReadFileTool(Tool):
 
 
 def _render_lines(lines: list[str], offset: int, end: int, budget: int) -> tuple[str, int]:
-    """把 [offset, end]（1-based，含端点）尽量整行渲染，受 budget 字符预算限制。
+    """渲染 [offset, end] 行（1-based，含端点），受字符预算限制。
 
-    至少保证拿到一行以避免零进展；单行本身超预算这种极端情况直接放行，
-    不额外报错（暂无 grep 类工具可以建议模型转而使用）。
     返回 (渲染结果, 实际展示到的行号)。
     """
     width = len(str(end))

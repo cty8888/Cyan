@@ -1,4 +1,4 @@
-"""list_dir 工具：树形列出目录内容。"""
+"""list_dir —— 树形列出目录内容。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 from ..errors import ToolError
 from .base import RiskLevel, Tool, ToolContext, ToolResult
 
-# 目录遍历时始终跳过的噪声目录
+# 遍历时跳过的噪声目录
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build", ".idea", ".vscode",
@@ -44,18 +44,18 @@ class ListDirTool(Tool):
 
         depth = max(1, min(int(depth), 6))
         lines: list[str] = [f"{ctx.policy.display(target)}/"]
-        truncated = _walk(target, depth, ctx.config.max_dir_entries, lines, prefix="  ")
+        truncated = _walk(target, depth, ctx.tool_config.max_dir_entries, lines, prefix="  ")
 
         if len(lines) == 1:
             lines.append("  (空目录)")
         if truncated:
-            lines.append(f"  ... 条目过多，已截断至 {ctx.config.max_dir_entries} 条")
+            lines.append(f"  ... 条目过多，已截断至 {ctx.tool_config.max_dir_entries} 条")
 
         return ToolResult.success("\n".join(lines), entry_count=len(lines) - 1)
 
 
 def _walk(directory: Path, depth: int, budget: int, lines: list[str], prefix: str) -> bool:
-    """深度优先写入树形结构。返回是否因为条目上限而截断。"""
+    """深度优先写入树形结构；条目超限时返回 True。"""
     if depth <= 0:
         return False
     try:
@@ -79,6 +79,7 @@ def _walk(directory: Path, depth: int, budget: int, lines: list[str], prefix: st
 
 
 def _human_size(path: Path) -> str:
+    """格式化为人类可读的文件大小。"""
     try:
         size = path.stat().st_size
     except OSError:

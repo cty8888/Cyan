@@ -1,4 +1,4 @@
-"""edit_file 工具：精确字符串替换。"""
+"""edit_file —— 精确字符串替换，修改已有文件的首选方式。"""
 
 from __future__ import annotations
 

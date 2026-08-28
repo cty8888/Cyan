@@ -1,7 +1,6 @@
-"""工具注册表：模型可见的 schema 由此导出，工具调用也由此分发。
+"""工具注册表 —— schema 导出与调用分发。
 
-这里是「错误不上抛」原则的落点——所有可预期异常都被转换成 ``ToolResult``，
-让模型看到失败原因并自行恢复，而不是让 Agent Loop 崩掉。
+可预期异常在此转换为 ``ToolResult``，避免中断 Agent Loop。
 """
 
 from __future__ import annotations
@@ -14,6 +13,8 @@ from .base import Tool, ToolContext, ToolResult
 
 
 class ToolRegistry:
+    """持有已注册工具，提供 schema 导出与统一执行入口。"""
+
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
@@ -39,7 +40,7 @@ class ToolRegistry:
         return [tool.to_schema() for tool in self._tools.values()]
 
     def execute(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """执行工具，任何失败都以 ``ToolResult`` 形式返回。"""
+        """执行工具；任何失败都以 ``ToolResult`` 返回。"""
         try:
             tool = self.get(name)
             normalized = tool.validate(args)
@@ -58,7 +59,7 @@ class ToolRegistry:
             return ToolResult.failure(f"系统调用失败：{exc}")
         except AgentError as exc:
             return ToolResult.failure(str(exc))
-        except Exception as exc:  # noqa: BLE001 - 工具内部 bug 也不应中断循环
+        except Exception as exc:  # noqa: BLE001 — 工具内部 bug 也不应中断循环
             return ToolResult.failure(
                 f"工具 {name} 执行时发生内部错误：{type(exc).__name__}: {exc}",
                 traceback=traceback.format_exc(limit=5),
@@ -72,7 +73,7 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
-    """注册 MVP 工具集。扩展新工具只需在这里加一行。"""
+    """注册默认工具集。新增工具在此追加一行即可。"""
     from .bash import BashTool
     from .edit_file import EditFileTool
     from .list_dir import ListDirTool

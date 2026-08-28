@@ -1,7 +1,7 @@
-"""工具统一契约。
+"""工具契约 —— Tool 基类、结果类型与参数校验。
 
-新增一个工具 = 继承 ``Tool`` + 填四个类属性 + 实现 ``run``，
-JSON Schema 由 ``to_schema()`` 自动导出给模型的 tool calling 接口。
+新增工具：继承 ``Tool``，填写 name / description / risk / parameters，实现 ``run``；
+JSON Schema 由 ``to_schema()`` 自动导出。
 """
 
 from __future__ import annotations
@@ -14,17 +14,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..errors import InvalidToolArgumentsError
+from ..config.tool import ToolConfig
 
 if TYPE_CHECKING:
-    from ..config import Config
     from ..core.session import Session
     from ..security.policy import SecurityPolicy
 
 
 class RiskLevel(Enum):
-    """工具固有能力分类（read / write / exec）。
+    """工具固有能力分级（read / write / exec）。
 
-    最终是否放行由执行模式与安全规则共同决定，READ 不等于一定免审批。
+    仅描述工具本身；最终是否放行由执行模式与安全规则共同决定。
     """
 
     READ = "read"
@@ -36,7 +36,7 @@ class RiskLevel(Enum):
 class ToolResult:
     """工具执行结果。
 
-    ``content`` 是回喂给模型的纯文本，``metadata`` 只给 CLI 渲染用（如 diff），不进上下文。
+    ``content`` 回喂模型；``metadata`` 仅供 CLI 渲染（如 diff），不进上下文。
     """
 
     ok: bool
@@ -60,15 +60,17 @@ class ToolResult:
 
 @dataclass
 class ToolContext:
-    """工具执行时能拿到的运行环境。"""
+    """工具执行时可访问的运行环境。"""
 
     workspace: Path
     policy: SecurityPolicy
-    config: Config
+    tool_config: ToolConfig
     session: Session
 
 
 class Tool(ABC):
+    """单个工具的抽象基类。"""
+
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     risk: ClassVar[RiskLevel] = RiskLevel.READ
@@ -90,17 +92,15 @@ class Tool(ABC):
         return validate_args(self.parameters, args, self.name)
 
     def describe(self, args: dict[str, Any], policy: SecurityPolicy) -> tuple[str, str | None, str]:
-        """生成审批面板要展示的 (摘要, 细节, 细节格式)。子类按需覆盖。"""
+        """生成审批面板内容：(摘要, 细节, 细节格式)。子类按需覆盖。"""
         return f"{self.name}({_compact_json(args)})", None, "text"
 
     @abstractmethod
     def run(self, ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        """执行工具。可预期的失败请抛 ``ToolError`` 子类或返回 ``ToolResult.failure``。"""
+        """执行工具。可预期失败应抛 ``ToolError`` 子类或返回 ``ToolResult.failure``。"""
 
 
-# --------------------------------------------------------------------------
-# 轻量 JSON Schema 校验：只覆盖工具定义会用到的子集，避免引入额外依赖
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------- JSON Schema 校验
 
 _TYPE_MAP: dict[str, tuple[type, ...]] = {
     "string": (str,),
@@ -113,6 +113,7 @@ _TYPE_MAP: dict[str, tuple[type, ...]] = {
 
 
 def validate_args(schema: dict[str, Any], args: dict[str, Any], tool_name: str = "") -> dict[str, Any]:
+    """按 JSON Schema 校验参数，填充默认值并返回规范化结果。"""
     if not isinstance(args, dict):
         raise InvalidToolArgumentsError(f"工具 {tool_name} 的参数必须是 JSON 对象")
 
@@ -141,13 +142,14 @@ def validate_args(schema: dict[str, Any], args: dict[str, Any], tool_name: str =
 
 
 def _check_type(key: str, value: Any, spec: dict[str, Any], tool_name: str) -> Any:
+    """校验单个参数的类型与 enum 约束。"""
     expected = spec.get("type")
     if expected in _TYPE_MAP:
-        # bool 是 int 的子类，这里要单独排除，避免 true 被当成整数通过
+        # bool 是 int 子类，需单独排除
         if expected in {"integer", "number"} and isinstance(value, bool):
             raise InvalidToolArgumentsError(f"工具 {tool_name} 的参数 {key} 应为 {expected}，收到 boolean")
         if not isinstance(value, _TYPE_MAP[expected]):
-            # 模型常把数字写成字符串，这里做一次宽松转换而不是直接报错
+            # 模型常把数字写成字符串，尝试宽松转换
             coerced = _coerce_scalar(value, expected)
             if coerced is None:
                 raise InvalidToolArgumentsError(
@@ -164,6 +166,7 @@ def _check_type(key: str, value: Any, spec: dict[str, Any], tool_name: str) -> A
 
 
 def _coerce_scalar(value: Any, expected: str) -> Any:
+    """尝试把字符串形式的标量转为目标类型。"""
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -182,5 +185,6 @@ def _coerce_scalar(value: Any, expected: str) -> Any:
 
 
 def _compact_json(args: dict[str, Any], limit: int = 120) -> str:
+    """序列化参数摘要，过长时截断。"""
     text = json.dumps(args, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + "..."

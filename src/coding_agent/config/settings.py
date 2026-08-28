@@ -1,4 +1,4 @@
-"""运行时配置。
+"""应用级运行时配置。
 
 优先级：命令行参数 > 环境变量 > 内置默认值。
 """
@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-from .errors import ConfigError
-from .security.modes import ExecutionMode
+from ..errors import ConfigError
+from ..security.modes import ExecutionMode
+from .tool import ToolConfig
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
@@ -41,25 +42,18 @@ class Config:
     model: str = DEFAULT_MODEL
     temperature: float = 0.0
     request_timeout: float = 180.0
-    # LLM 请求失败后的最大重试次数（仅对可重试错误生效）
     max_retries: int = 3
 
-    # Agent Loop 终止条件
     max_iterations: int = 30
     max_consecutive_tool_failures: int = 3
     max_repeated_calls: int = 3
 
-    # 工具行为
-    max_tool_output_chars: int = 30_000
-    max_file_read_chars: int = 60_000
-    max_dir_entries: int = 400
+    tool: ToolConfig = field(default_factory=ToolConfig)
 
-    # 日志：文件始终记录 DEBUG。verbose 才会再打到 stderr（避免和 rich 界面叠在一起）
     log_level: str = "INFO"
     verbose: bool = False
     execution_mode: ExecutionMode = ExecutionMode.AGENT
 
-    # 元数据目录（会话、临时文件），位于 workspace 之下
     state_dirname: str = ".coding_agent"
 
     def __post_init__(self) -> None:
@@ -81,10 +75,7 @@ class Config:
 
     @classmethod
     def load(cls, **overrides: Any) -> Config:
-        """按 默认值 < 环境变量 < overrides 的顺序装配配置。
-
-        ``overrides`` 中值为 None 的键会被忽略，方便直接把 argparse 的结果传进来。
-        """
+        """按 默认值 < 环境变量 < overrides 的顺序装配配置。"""
         load_dotenv()
 
         values: dict[str, Any] = {"workspace": Path.cwd()}
@@ -108,8 +99,6 @@ class Config:
 
 
 def _coerce(raw: str, target_type: Any, source: str) -> Any:
-    """把环境变量字符串转换成字段声明的类型。"""
-    # dataclass 在 ``from __future__ import annotations`` 下拿到的是字符串形式的类型名
     type_name = target_type if isinstance(target_type, str) else getattr(target_type, "__name__", "")
     try:
         if type_name == "int":

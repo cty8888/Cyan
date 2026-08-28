@@ -18,15 +18,15 @@ from coding_agent.core.agent import Agent
 from coding_agent.core.events import ApprovalRequired, StopReason, TaskFinished, ToolFinished
 from coding_agent.core.prompts import build_system_prompt
 from coding_agent.core.session import Session
-from coding_agent.errors import BlockedCommandError, PathOutsideWorkspaceError
+from coding_agent.errors import PathOutsideWorkspaceError
 from coding_agent.llm.base import LLMClient
 from coding_agent.llm.parser import parse_tool_arguments
 from coding_agent.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, ToolMessage, Usage
 from coding_agent.logutil import get_logger, setup_logging
 from coding_agent.security.approval import ApprovalDecision
-from coding_agent.security.modes import ExecutionMode
+from coding_agent.security.modes import PermissionMode
+from coding_agent.security.paths import resolve_path
 from coding_agent.security.permissions import PermissionManager
-from coding_agent.security.policy import SecurityPolicy
 from coding_agent.tools.base import ToolContext
 from coding_agent.tools._process import run_process
 from coding_agent.tools.registry import build_default_registry
@@ -57,12 +57,11 @@ class FakeLLM(LLMClient):
 
 def make_env(tmp: Path):
     config = Config(api_key="test", workspace=tmp)
-    policy = SecurityPolicy(tmp)
-    permissions = PermissionManager(policy)
+    permissions = PermissionManager(tmp)
     registry = build_default_registry()
     session = Session.create(workspace=tmp, system_prompt="")
-    ctx = ToolContext(workspace=tmp, policy=policy, tool_config=config.tool, session=session)
-    return config, policy, permissions, registry, ctx
+    ctx = ToolContext(workspace=tmp, tool_config=config.tool, session=session)
+    return config, permissions, registry, ctx
 
 
 def drive(agent, task, decision=ApprovalDecision.ALLOW_ONCE):
@@ -81,7 +80,7 @@ def drive(agent, task, decision=ApprovalDecision.ALLOW_ONCE):
     return events, reason
 
 
-def eval_perm(permissions, tool, args, mode=ExecutionMode.AGENT, always_allowed=None):
+def eval_perm(permissions, tool, args, mode=PermissionMode.DEFAULT, always_allowed=None):
     outcome = permissions.evaluate(
         tool,
         args,
@@ -94,7 +93,7 @@ def eval_perm(permissions, tool, args, mode=ExecutionMode.AGENT, always_allowed=
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="ca_smoke_"))
     try:
-        config, policy, permissions, registry, ctx = make_env(tmp)
+        config, permissions, registry, ctx = make_env(tmp)
 
         # ---------------------------------------------------------- 工具层
         (tmp / "pkg").mkdir()
@@ -122,7 +121,7 @@ def main() -> int:
         check("write_file 自动建父目录", r.ok and (tmp / "sub" / "new.py").is_file(), r.error or "")
 
         # ------------------------------------------------- Read/Write/Edit 前置读取语义
-        _, _, _, ro_registry, ro_ctx = make_env(tmp)
+        _, _, ro_registry, ro_ctx = make_env(tmp)
 
         (tmp / "guarded.py").write_text("x = 1\n", encoding="utf-8")
         r = ro_registry.execute(
@@ -152,7 +151,7 @@ def main() -> int:
         (tmp / "big.txt").write_text(big, encoding="utf-8")
         tiny_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_file_read_chars=200))
         tiny_ctx = ToolContext(
-            workspace=tmp, policy=policy, tool_config=tiny_config.tool, session=Session.create(workspace=tmp, system_prompt="")
+            workspace=tmp, tool_config=tiny_config.tool, session=Session.create(workspace=tmp, system_prompt="")
         )
         r = ro_registry.execute("read_file", {"path": "big.txt"}, tiny_ctx)
         check("超预算的整篇读取返回 PARTIAL 视图", r.ok and "[PARTIAL VIEW]" in r.content, r.content)
@@ -210,7 +209,7 @@ def main() -> int:
         # 输出超过上限时按 spec 截断（尾部加 ...[truncated]，不是老版本的头尾各留一半）
         tiny_out_config = Config(api_key="test", workspace=tmp, tool=ToolConfig(max_tool_output_chars=50))
         tiny_out_ctx = ToolContext(
-            workspace=tmp, policy=policy, tool_config=tiny_out_config.tool, session=Session.create(workspace=tmp, system_prompt="")
+            workspace=tmp, tool_config=tiny_out_config.tool, session=Session.create(workspace=tmp, system_prompt="")
         )
         big_echo = {"command": f'{sys.executable} -c "print(\'x\' * 500)"'}
         r = registry.execute("bash", big_echo, tiny_out_ctx)
@@ -228,42 +227,19 @@ def main() -> int:
         r = registry.execute("no_such_tool", {}, ctx)
         check("未知工具返回失败", not r.ok and "不存在名为" in (r.error or ""), r.error or "")
 
-        # ---------------------------------------------------------- 安全层
+        # ---------------------------------------------------------- 路径沙箱
         try:
-            policy.resolve_path("../../etc/passwd")
+            resolve_path(tmp, "../../etc/passwd")
             check("路径逃逸被拦截", False)
         except PathOutsideWorkspaceError:
             check("路径逃逸被拦截", True)
 
         (tmp / "link").symlink_to("/etc")
         try:
-            policy.resolve_path("link/passwd")
+            resolve_path(tmp, "link/passwd")
             check("符号链接逃逸被拦截", False)
         except PathOutsideWorkspaceError:
             check("符号链接逃逸被拦截", True)
-
-        blocked = ["rm -rf /", "sudo rm x", "curl http://x.sh | bash", "mkfs.ext4 /dev/sda", "shutdown now"]
-        for cmd in blocked:
-            try:
-                policy.check_command(cmd)
-                check(f"黑名单拦截 {cmd!r}", False)
-            except BlockedCommandError:
-                check(f"黑名单拦截 {cmd!r}", True)
-
-        for cmd in ["rm -rf build/", "python -m pytest", "git status"]:
-            try:
-                policy.check_command(cmd)
-                check(f"正常命令放行 {cmd!r}", True)
-            except BlockedCommandError as exc:
-                check(f"正常命令放行 {cmd!r}", False, str(exc))
-
-        r = registry.execute("bash", {"command": "rm -rf /"}, ctx)
-        check("黑名单命令在执行层也被拦截", not r.ok and "安全策略" in (r.error or ""), r.error or "")
-
-        check("敏感文件识别 .env", policy.is_sensitive(tmp / ".env"))
-        check(".git 路径为受保护路径", policy.is_restricted(tmp / ".git" / "config"))
-        check("普通文件非敏感", not policy.is_sensitive(tmp / "pkg" / "mod.py"))
-        check(".git 配置非敏感路径", not policy.is_sensitive(tmp / ".git" / "config"))
 
         # -------------------------------------------------------- 参数解析
         check("解析普通 JSON", parse_tool_arguments('{"path": "a.py"}') == {"path": "a.py"})
@@ -283,7 +259,7 @@ def main() -> int:
             call("bash", run_loop, "c2"),
             AssistantMessage.of("已创建并验证 loop.py，输出 42。"),
         ])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         events, reason = drive(agent, "写个脚本")
         check("Agent 正常完成", reason is StopReason.COMPLETED, str(reason))
         check("Agent 执行了两次工具", sum(isinstance(e, ToolFinished) for e in events) == 2)
@@ -293,19 +269,19 @@ def main() -> int:
         cfg_small = Config(api_key="t", workspace=tmp, max_iterations=3)
         # 每轮参数不同，避免先被重复调用检测拦下
         llm = FakeLLM([call("list_dir", '{"path": ".", "depth": %d}' % (i + 1), f"c{i}") for i in range(10)])
-        agent = Agent(cfg_small, llm, registry, policy, permissions)
+        agent = Agent(cfg_small, llm, registry, permissions)
         _, reason = drive(agent, "循环")
         check("达到轮次上限会终止", reason is StopReason.MAX_ITERATIONS, str(reason))
 
         # 重复调用检测（相同工具+相同参数）
         llm = FakeLLM([call("read_file", '{"path": "nope.py"}', f"r{i}") for i in range(10)])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         _, reason = drive(agent, "重复")
         check("重复调用被打断", reason is StopReason.REPEATED_CALLS, str(reason))
 
         # 连续工具失败
         llm = FakeLLM([call("read_file", '{"path": "miss%d.py"}' % i, f"f{i}") for i in range(10)])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         _, reason = drive(agent, "连续失败")
         check("连续失败会终止", reason is StopReason.TOOL_FAILURES, str(reason))
 
@@ -314,7 +290,7 @@ def main() -> int:
             call("read_file", "{不是JSON"),
             AssistantMessage.of("参数写错了，已放弃。"),
         ])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         _, reason = drive(agent, "坏参数")
         check("参数非法不会崩溃", reason is StopReason.COMPLETED, str(reason))
         tool_msgs = [m for m in agent.session.messages if isinstance(m, ToolMessage)]
@@ -330,34 +306,34 @@ def main() -> int:
             call("bash", '{"command": "touch denied_by_bash.txt"}'),
             AssistantMessage.of("好的，已放弃执行。"),
         ])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         events, _ = drive(agent, "touch", decision=ApprovalDecision.DENY)
         check("普通 exec 触发审批", any(isinstance(e, ApprovalRequired) for e in events))
         check("拒绝后 bash 未执行", not (tmp / "denied_by_bash.txt").exists())
 
-        # 敏感 write 需确认，审批面板带 diff
+        # write 需确认，审批面板带 diff
         llm = FakeLLM([
             call("write_file", '{"path": ".env", "content": "K=1"}'),
             AssistantMessage.of("好的。"),
         ])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         events, _ = drive(agent, "写 env", decision=ApprovalDecision.ALLOW_ONCE)
         approval = next(e.request for e in events if isinstance(e, ApprovalRequired))
-        check("敏感 write 触发审批", approval.force)
+        check("write 触发审批", approval is not None)
         check("审批面板带 diff", approval.detail_format == "diff" and "+K=1" in (approval.detail or ""))
 
         # 只读工具不触发审批
         llm = FakeLLM([call("list_dir", '{"path": "."}'), AssistantMessage.of("看完了")])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         events, _ = drive(agent, "看目录")
         check("只读工具不审批", not any(isinstance(e, ApprovalRequired) for e in events))
 
-        # 敏感文件强制逐次确认
+        # write 需用户确认
         llm = FakeLLM([call("write_file", '{"path": ".env", "content": "K=1"}'), AssistantMessage.of("好")])
-        agent = Agent(config, llm, registry, policy, permissions)
+        agent = Agent(config, llm, registry, permissions)
         events, _ = drive(agent, "改 env", decision=ApprovalDecision.DENY)
         requests = [e.request for e in events if isinstance(e, ApprovalRequired)]
-        check("敏感文件强制确认", len(requests) == 1 and requests[0].force, str(requests))
+        check("write 需确认", len(requests) == 1, str(requests))
 
         # 上下文完整性：每个 tool_call 都有对应响应
         assistant_calls = sum(len(m.tool_calls) for m in agent.session.messages if isinstance(m, AssistantMessage))
@@ -400,53 +376,55 @@ def main() -> int:
             s.record_progress()
         check("有实质进展的重复不误判", max(iterating) == 1, str(iterating))
 
-        # -------------------------------------------------------- 三层权限
+        # -------------------------------------------------------- Permission Mode
         write_tool = registry.get("write_file")
         bash_tool = registry.get("bash")
         read_tool = registry.get("read_file")
 
-        ask_write = eval_perm(permissions, write_tool, {"path": "ok.py", "content": "x"}, mode=ExecutionMode.ASK)
-        check("Ask 模式拒绝 write", ask_write.kind == "deny", ask_write.kind)
-
-        ask_read = eval_perm(permissions, read_tool, {"path": "a.py"}, mode=ExecutionMode.ASK)
-        check("Ask 模式允许 read", ask_read.kind == "allow", ask_read.kind)
-
-        agent_write = eval_perm(permissions, write_tool, {"path": "ok.py", "content": "x"})
-        check("Agent 模式非敏感 write 直接放行", agent_write.kind == "allow", agent_write.kind)
-
-        agent_env = eval_perm(permissions, write_tool, {"path": ".env", "content": "K=1"})
-        check("Agent 模式敏感 write 需审批", agent_env.kind == "need_approval" and agent_env.request.force)
-
-        git_write = eval_perm(permissions, write_tool, {"path": ".git/config", "content": "x"})
-        check("写 .git 配置被强硬限制", git_write.kind == "deny", git_write.kind)
-
-        agent_pytest = eval_perm(permissions, bash_tool, {"command": "pytest -q"})
-        check("Agent 模式普通 exec 需审批", agent_pytest.kind == "need_approval" and not agent_pytest.request.force)
-
-        yolo_pytest = eval_perm(permissions, bash_tool, {"command": "pytest -q"}, mode=ExecutionMode.YOLO)
-        check("YOLO 模式普通 exec 直接放行", yolo_pytest.kind == "allow", yolo_pytest.kind)
-
-        push_f = eval_perm(permissions, bash_tool, {"command": "git push -f origin main"})
-        check("git push -f 被强硬限制", push_f.kind == "deny", push_f.kind)
-
-        pip_install = eval_perm(
-            permissions, bash_tool, {"command": "pip install requests"}, mode=ExecutionMode.YOLO
+        plan_write = eval_perm(
+            permissions, write_tool, {"path": "ok.py", "content": "x"}, mode=PermissionMode.PLAN
         )
-        check("pip install 敏感需审批", pip_install.kind == "need_approval" and pip_install.request.force)
+        check("Plan 模式拒绝 write", plan_write.kind == "deny", plan_write.kind)
 
-        rm_root = eval_perm(permissions, bash_tool, {"command": "rm -rf /"})
-        check("rm -rf / 黑名单拒绝", rm_root.kind == "deny", rm_root.kind)
+        plan_read = eval_perm(permissions, read_tool, {"path": "a.py"}, mode=PermissionMode.PLAN)
+        check("Plan 模式允许 read", plan_read.kind == "allow", plan_read.kind)
 
-        reset_hard = eval_perm(permissions, bash_tool, {"command": "git reset --hard HEAD~1"})
-        check("git reset --hard 被强硬限制", reset_hard.kind == "deny", reset_hard.kind)
-
-        always_env = eval_perm(
-            permissions,
-            write_tool,
-            {"path": ".env", "content": "K=1"},
-            always_allowed={"write_file"},
+        plan_pytest = eval_perm(
+            permissions, bash_tool, {"command": "pytest -q"}, mode=PermissionMode.PLAN
         )
-        check("始终允许不能跳过敏感 write", always_env.kind == "need_approval" and always_env.request.force)
+        check("Plan 模式 exec 待实现只读判定", plan_pytest.kind == "deny", plan_pytest.kind)
+
+        plan_touch = eval_perm(
+            permissions, bash_tool, {"command": "touch x.txt"}, mode=PermissionMode.PLAN
+        )
+        check("Plan 模式拒绝非只读 exec", plan_touch.kind == "deny", plan_touch.kind)
+
+        default_write = eval_perm(permissions, write_tool, {"path": "ok.py", "content": "x"})
+        check("Default 模式 write 首次需审批", default_write.kind == "need_approval", default_write.kind)
+
+        default_env = eval_perm(permissions, write_tool, {"path": ".env", "content": "K=1"})
+        check("Default 模式 write 需审批", default_env.kind == "need_approval", default_env.kind)
+
+        default_pytest = eval_perm(permissions, bash_tool, {"command": "pytest -q"})
+        check("Default 模式 exec 首次需审批", default_pytest.kind == "need_approval", default_pytest.kind)
+
+        accept_write = eval_perm(
+            permissions, write_tool, {"path": "ok.py", "content": "x"}, mode=PermissionMode.ACCEPT_EDITS
+        )
+        check("AcceptEdits 模式 write 直接放行", accept_write.kind == "allow", accept_write.kind)
+
+        accept_pytest = eval_perm(
+            permissions, bash_tool, {"command": "pytest -q"}, mode=PermissionMode.ACCEPT_EDITS
+        )
+        check("AcceptEdits 模式 exec 首次需审批", accept_pytest.kind == "need_approval", accept_pytest.kind)
+
+        bypass_rm = eval_perm(permissions, bash_tool, {"command": "rm -rf /"}, mode=PermissionMode.BYPASS)
+        check("Bypass 直接放行", bypass_rm.kind == "allow", bypass_rm.kind)
+
+        bypass_write = eval_perm(
+            permissions, write_tool, {"path": ".git/config", "content": "x"}, mode=PermissionMode.BYPASS
+        )
+        check("Bypass write 直接放行", bypass_write.kind == "allow", bypass_write.kind)
 
         whitelisted = eval_perm(
             permissions,
@@ -456,29 +434,32 @@ def main() -> int:
         )
         check("白名单后 bash 普通命令放行", whitelisted.kind == "allow", whitelisted.kind)
 
-        req_cmd = eval_perm(permissions, bash_tool, {"command": 'echo "K=1" > .env'})
-        check("bash 写敏感文件强制确认", req_cmd.kind == "need_approval" and req_cmd.request.force, str(req_cmd))
+        whitelisted_write = eval_perm(
+            permissions,
+            write_tool,
+            {"path": "ok.py", "content": "x"},
+            always_allowed={"write_file"},
+        )
+        check("白名单后 write 直接放行", whitelisted_write.kind == "allow", whitelisted_write.kind)
 
         req_git = eval_perm(permissions, bash_tool, {"command": "cat .git/config"})
-        check("bash 读 .git 为普通 exec 需审批", req_git.kind == "need_approval" and not req_git.request.force, str(req_git))
-
-        redirect_git = eval_perm(permissions, bash_tool, {"command": "echo x > .git/config"})
-        check("bash 写 .git 被强硬限制", redirect_git.kind == "deny", redirect_git.kind)
+        check("bash exec 首次需审批", req_git.kind == "need_approval", req_git.kind)
 
         req_safe = eval_perm(permissions, bash_tool, {"command": "git status && pytest -q"})
-        check("普通命令不误判为敏感", req_safe.kind == "need_approval" and not req_safe.request.force, str(req_safe))
+        check("普通 exec 需审批", req_safe.kind == "need_approval", req_safe.kind)
 
         check(
             "只读工具无需审批",
             eval_perm(permissions, read_tool, {"path": "a.py"}).kind == "allow",
         )
 
-        # Ask 模式 schema 过滤
-        agent_cfg = Config(api_key="test", workspace=tmp, execution_mode=ExecutionMode.ASK)
-        ask_agent = Agent(agent_cfg, FakeLLM([AssistantMessage.of("ok")]), registry, policy, permissions)
-        ask_schemas = ask_agent._schemas_for_mode()
-        ask_names = {s["function"]["name"] for s in ask_schemas}
-        check("Ask 模式只暴露 read 工具", ask_names == {"list_dir", "read_file"}, str(ask_names))
+        # Plan 模式 schema 过滤
+        plan_cfg = Config(api_key="test", workspace=tmp, permission_mode=PermissionMode.PLAN)
+        plan_session = Session.create(workspace=tmp, system_prompt="", permission_mode=PermissionMode.PLAN)
+        plan_agent = Agent(plan_cfg, FakeLLM([AssistantMessage.of("ok")]), registry, permissions, session=plan_session)
+        plan_schemas = plan_agent._schemas_for_mode()
+        plan_names = {s["function"]["name"] for s in plan_schemas}
+        check("Plan 模式暴露 read + bash", plan_names == {"list_dir", "read_file", "bash"}, str(plan_names))
 
         # 缺陷 3：bash 此前能绕过敏感文件的强制确认
         prompt = build_system_prompt(tmp)

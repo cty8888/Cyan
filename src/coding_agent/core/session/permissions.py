@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+
+from ...security.modes import PermissionMode
 
 
 @dataclass
 class SessionPermissions:
+    permission_mode: PermissionMode = PermissionMode.DEFAULT
     always_allowed: set[str] = field(default_factory=set)
-    # TODO: denied / rules 接入 PermissionManager 持久化拒绝与用户自定义规则
-    denied: set[str] = field(default_factory=set)
-    rules: dict[str, Any] = field(default_factory=dict)

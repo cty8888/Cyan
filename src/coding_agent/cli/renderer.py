@@ -19,13 +19,24 @@ from rich.text import Text
 from ..config import Config
 from ..core.events import STOP_REASON_TEXT, StopReason
 from ..logutil import get_logger
+from ..constants.security.mode_labels import MODE_LABELS
 from ..security.approval import ApprovalDecision, ApprovalRequest
-from ..security.modes import MODE_LABELS
 from ..tools.base import ToolResult
 
 logger = get_logger("cli")
 
-_RISK_LABEL = {"write": "写入文件", "exec": "执行命令"}
+_CAPABILITY_LABEL = {
+    "read": "只读",
+    "write": "写入",
+    "exec": "执行",
+}
+_RISK_LABEL = {
+    "minimal": "极低风险",
+    "low": "低风险",
+    "medium": "中风险",
+    "high": "高风险",
+    "critical": "极高风险",
+}
 _DECISION_BY_KEY = {
     "y": ApprovalDecision.ALLOW_ONCE,
     "n": ApprovalDecision.DENY,
@@ -42,7 +53,7 @@ class Renderer:
         lines = [
             Text.from_markup(f"[bold cyan]Coding Agent[/]  模型 [green]{config.model}[/]"),
             Text.from_markup(
-                f"执行模式  [green]{MODE_LABELS[config.execution_mode]}[/]"
+                f"权限模式  [green]{MODE_LABELS[config.permission_mode]}[/]"
             ),
             Text.from_markup(f"工作目录  [dim]{config.workspace}[/]"),
             Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
@@ -97,7 +108,9 @@ class Renderer:
 
     # ------------------------------------------------------------------ 审批
     def ask_approval(self, request: ApprovalRequest) -> ApprovalDecision:
-        title = _RISK_LABEL.get(request.risk, request.risk)
+        capability = _CAPABILITY_LABEL.get(request.capability, request.capability)
+        risk = _RISK_LABEL.get(request.risk, request.risk)
+        title = f"需要确认 · {capability} · {risk}"
         body: list[Any] = [Text.from_markup(f"[bold]{request.summary}[/]")]
 
         if request.detail:
@@ -110,7 +123,7 @@ class Renderer:
         self.console.print(
             Panel(
                 _stack(body),
-                title=f"需要确认 · {title}",
+                title=f"需要确认 · {capability} · {risk}",
                 border_style="yellow",
                 padding=(0, 1),
             )

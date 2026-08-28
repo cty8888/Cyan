@@ -1,6 +1,6 @@
 """工具契约 —— Tool 基类、结果类型与参数校验。
 
-新增工具：继承 ``Tool``，填写 name / description / risk / parameters，实现 ``run``；
+新增工具：继承 ``Tool``，填写 name / description / capability / risk / parameters，实现 ``run``；
 JSON Schema 由 ``to_schema()`` 自动导出。
 """
 
@@ -18,18 +18,30 @@ from ..config.tool import ToolConfig
 
 if TYPE_CHECKING:
     from ..core.session import Session
-    from ..security.policy import SecurityPolicy
 
 
-class RiskLevel(Enum):
-    """工具固有能力分级（read / write / exec）。
+class ToolCapability(Enum):
+    """工具操作类型（read / write / exec）。
 
-    仅描述工具本身；最终是否放行由执行模式与安全规则共同决定。
+    描述工具能做什么，供权限系统按能力分支（Ask 模式过滤、路径/命令规则等）。
     """
 
     READ = "read"
     WRITE = "write"
     EXEC = "exec"
+
+
+class RiskLevel(Enum):
+    """工具固有风险分级（minimal → critical，共 5 级）。
+
+    描述同类能力下的危险程度；最终是否放行由执行模式与安全规则共同决定。
+    """
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
 
 
 @dataclass
@@ -68,7 +80,6 @@ class ToolContext:
     """
 
     workspace: Path
-    policy: SecurityPolicy
     tool_config: ToolConfig
     session: Session
 
@@ -78,7 +89,8 @@ class Tool(ABC):
 
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
-    risk: ClassVar[RiskLevel] = RiskLevel.READ
+    capability: ClassVar[ToolCapability] = ToolCapability.READ
+    risk: ClassVar[RiskLevel] = RiskLevel.MINIMAL
     parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
 
     def to_schema(self) -> dict[str, Any]:
@@ -96,7 +108,7 @@ class Tool(ABC):
         """校验并填充默认值，返回规范化后的参数。"""
         return validate_args(self.parameters, args, self.name)
 
-    def describe(self, args: dict[str, Any], policy: SecurityPolicy) -> tuple[str, str | None, str]:
+    def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
         """生成审批面板内容：(摘要, 细节, 细节格式)。子类按需覆盖。"""
         return f"{self.name}({_compact_json(args)})", None, "text"
 

@@ -1,7 +1,7 @@
 """会话状态：Agent 的过去与当前，纯数据层。
 
 Session 保存 metadata / messages / tool_history / state / workspace /
-permissions / usage / config，不参与执行逻辑；循环驱动由 ``Runtime`` 负责。
+permissions / usage / config / context，不参与执行逻辑；循环驱动由 ``Runtime`` 负责。
 
 TODO: Session 理想形态是纯数据；record_* / add 等写入方法后续可下沉到 Runtime 或 Repository。
 """
@@ -11,14 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ...llm.types import Message, ToolResultStatus, Usage
+from ...llm.types import Message, SystemMessage, ToolResultStatus, Usage
 from ..tool_history import ToolExecution, ToolHistory, ToolResult
 from .config import SessionConfig
+from ...context.config import ContextConfig
+from ...security.modes import PermissionMode
 from .metadata import SessionMetadata
 from .permissions import SessionPermissions
 from .state import SessionState
@@ -36,32 +37,25 @@ class Session:
     permissions: SessionPermissions = field(default_factory=SessionPermissions)
     usage: SessionUsage = field(default_factory=SessionUsage)
     config: SessionConfig = field(default_factory=SessionConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
 
     @classmethod
     def create(
         cls,
         *,
         workspace: Path,
-        system_prompt: str,
-        app_config: Any | None = None,
+        system_prompt: str = "",
         title: str | None = None,
+        permission_mode: PermissionMode = PermissionMode.DEFAULT,
     ) -> Session:
-        now = time.time()
-        session_config = (
-            SessionConfig.from_app_config(app_config, system_prompt)
-            if app_config is not None
-            else SessionConfig(system_prompt=system_prompt)
+        session = cls(
+            metadata=SessionMetadata.create(title=title),
+            workspace=SessionWorkspace.for_root(workspace),
+            permissions=SessionPermissions(permission_mode=permission_mode),
         )
-        return cls(
-            metadata=SessionMetadata(
-                id=str(uuid.uuid4()),
-                created_at=now,
-                updated_at=now,
-                title=title,
-            ),
-            workspace=SessionWorkspace(root=workspace.resolve()),
-            config=session_config,
-        )
+        if system_prompt:
+            session.add(SystemMessage.of(system_prompt))
+        return session
 
     def touch(self) -> None:
         self.metadata.updated_at = time.time()
@@ -175,9 +169,16 @@ class Session:
     # ------------------------------------------------------------------ lifecycle
 
     def clear(self) -> None:
-        """清空对话与运行时状态，保留 metadata / permissions / config。"""
+        """清空对话与运行时状态，保留 metadata / permissions / 首条 SystemMessage。"""
         # TODO: /clear「新会话」语义——是否应重置 metadata.id / created_at？
+        system_message = (
+            self.messages[0]
+            if self.messages and isinstance(self.messages[0], SystemMessage)
+            else None
+        )
         self.messages.clear()
+        if system_message is not None:
+            self.messages.append(system_message)
         self.tool_history.clear()
         self.state = SessionState()
         self.workspace.cwd = None

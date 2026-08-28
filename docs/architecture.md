@@ -132,8 +132,12 @@ Session
  ├── workspace       # root / cwd / opened_files / modified_files / environment
  ├── permissions     # always_allowed / denied / rules
  ├── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
- └── config          # model / max_context_tokens / tool_result_mode / temperature / system_prompt
+ ├── config          # 会话级配置占位（SessionConfig）
+ ├── context         # tool_result_mode / max_context_tokens（ContextConfig）
+ └── messages[0]    # SystemMessage（系统提示词，不在 config 里）
 ```
+
+模型参数（`model` / `temperature`）留在应用级 ``Config``，不属于 Session。
 
 核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 

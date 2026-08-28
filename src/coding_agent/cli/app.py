@@ -27,9 +27,9 @@ from ..core.prompts import build_system_prompt
 from ..core.session import Session
 from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
-from ..security.modes import ExecutionMode, MODE_LABELS
+from ..constants.security.mode_labels import MODE_LABELS
+from ..security.modes import PermissionMode
 from ..security.permissions import PermissionManager
-from ..security.policy import SecurityPolicy
 from ..tools.registry import build_default_registry
 from .renderer import Renderer
 
@@ -43,7 +43,7 @@ logger = get_logger("cli")
 HELP_TEXT = """可用命令：
   /help          显示本帮助
   /tools         列出已注册的工具
-  /mode <模式>   切换执行模式：ask / agent / yolo
+  /mode <模式>   切换权限模式：plan / default / accept_edits / bypass
   /usage         显示本会话的 token 与调用统计
   /clear         清空对话历史，开始新会话
   /cwd           显示当前工作目录
@@ -56,20 +56,18 @@ class App:
     def __init__(self, config: Config, console: Console | None = None):
         self.config = config
         self.renderer = Renderer(console)
-        self.policy = SecurityPolicy(config.workspace)
-        self.permissions = PermissionManager(self.policy)
+        self.permissions = PermissionManager(config.workspace)
         self.registry = build_default_registry()
         self.session = Session.create(
             workspace=config.workspace,
             system_prompt=build_system_prompt(config.workspace),
-            app_config=config,
+            permission_mode=config.permission_mode,
         )
         self.llm = DeepSeekClient(config, on_retry=self._on_llm_retry)
         self.agent = Agent(
             config=config,
             llm=self.llm,
             registry=self.registry,
-            policy=self.policy,
             permissions=self.permissions,
             session=self.session,
         )
@@ -183,18 +181,22 @@ class App:
             console.print(HELP_TEXT)
         elif command == "/tools":
             for tool in self.registry:
-                console.print(f"  [bold]{tool.name}[/] [dim]({tool.risk.value})[/] — {tool.description}")
+                console.print(
+                    f"  [bold]{tool.name}[/] "
+                    f"[dim]({tool.capability.value}/{tool.risk.value})[/] — {tool.description}"
+                )
         elif command == "/mode":
             parts = raw.split()
             if len(parts) != 2:
-                console.print("[yellow]用法：/mode ask|agent|yolo[/]")
+                console.print("[yellow]用法：/mode plan|default|accept_edits|bypass[/]")
             else:
                 try:
-                    self.config.execution_mode = ExecutionMode.parse(parts[1])
-                    # TODO: 同步到 session.config，或由 Runtime 统一读取 Session.config
-                    label = MODE_LABELS[self.config.execution_mode]
+                    mode = PermissionMode.parse(parts[1])
+                    self.config.permission_mode = mode
+                    self.session.permissions.permission_mode = mode
+                    label = MODE_LABELS[mode]
                     console.print(f"[dim]已切换至 {label}[/]")
-                    logger.info("切换执行模式：%s", self.config.execution_mode.value)
+                    logger.info("切换权限模式：%s", mode.value)
                 except ValueError as exc:
                     console.print(f"[yellow]{exc}[/]")
         elif command == "/usage":

@@ -1,80 +1,67 @@
-"""权限管理：结合执行模式与安全规则，判定 ALLOW / DENY / NEED_APPROVAL。
-
-``SecurityPolicy`` 负责「触碰哪条安全边界」；
-``PermissionManager`` 负责「最终要不要问用户」。
-"""
+"""权限管理：结合 Permission 模式判定 ALLOW / DENY / NEED_APPROVAL。"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..tools.base import RiskLevel
+from ..constants.security.messages import (
+    NO_PERMISSION_RULE_MSG,
+    PLAN_EXEC_MSG,
+    PLAN_WRITE_MSG,
+    USER_DENIED_MSG,
+)
+from ..tools.base import ToolCapability
 from .approval import ApprovalRequest, DenyReason, PermissionOutcome
-from .modes import ExecutionMode
-from .policy import SecurityPolicy
+from .utils import is_readonly_command
+from .modes import PermissionMode
 
 if TYPE_CHECKING:
     from ..tools.base import Tool
 
-_MODE_BLOCKED_MSG = (
-    "当前处于 Ask 模式，不允许修改文件或执行命令。"
-    "请向用户说明所需操作，或建议切换到 Agent 模式。"
-)
-_USER_DENIED_MSG = "用户拒绝了此操作。请不要重试，改用其他方案或询问用户的意见。"
-
 
 class PermissionManager:
-    def __init__(self, policy: SecurityPolicy):
-        self.policy = policy
+    def __init__(self, workspace: Path):
+        self.workspace = Path(workspace).resolve()
 
     def evaluate(
         self,
         tool: Tool,
         args: dict[str, Any],
         *,
-        mode: ExecutionMode,
+        mode: PermissionMode,
         always_allowed: set[str],
     ) -> PermissionOutcome:
-        """判定本次工具调用的处置结果。"""
-        blocked = self.policy.blocked_concern(tool, args)
-        if blocked:
-            detail = args.get("command") or args.get("path") or ""
-            message = (
-                f"操作被安全策略拦截（{blocked}）"
-                f"{('：' + str(detail)) if detail else ''}。"
-                "该限制无法通过授权绕过，请改用更安全的做法。"
-            )
-            return PermissionOutcome.deny(DenyReason.POLICY_BLOCKED, message)
+        """判定本次工具调用的权限结果。"""
 
-        if mode is ExecutionMode.ASK and tool.risk is not RiskLevel.READ:
-            return PermissionOutcome.deny(DenyReason.MODE_BLOCKED, _MODE_BLOCKED_MSG)
-
-        restricted = self.policy.restricted_concern(tool, args)
-        if restricted:
-            detail = args.get("command") or args.get("path") or ""
-            message = (
-                f"操作被强硬限制策略拦截（{restricted}）"
-                f"{('：' + str(detail)) if detail else ''}。"
-                "该操作不允许执行，即使用户授权也无法绕过。请改用更安全的替代方案。"
-            )
-            return PermissionOutcome.deny(DenyReason.RESTRICTED, message)
-
-        sensitive = self.policy.sensitive_concern(tool, args)
-        if sensitive:
-            return self._need_approval(tool, args, force=True, reason=sensitive)
-
-        if tool.risk is RiskLevel.READ:
+        if mode is PermissionMode.BYPASS:
             return PermissionOutcome.allow()
 
-        if tool.risk is RiskLevel.WRITE:
+        if tool.capability is ToolCapability.READ:
             return PermissionOutcome.allow()
 
-        # EXEC normal
-        if mode is ExecutionMode.YOLO:
+        if mode is PermissionMode.PLAN:
+            if tool.capability is ToolCapability.WRITE:
+                return PermissionOutcome.deny(DenyReason.MODE_BLOCKED,PLAN_WRITE_MSG,)
+            if tool.capability is ToolCapability.EXEC:
+                command = str(args.get("command") or "")
+                if is_readonly_command(command):
+                    return PermissionOutcome.allow()
+                return PermissionOutcome.deny(DenyReason.MODE_BLOCKED,PLAN_EXEC_MSG,)
+
+        if mode is PermissionMode.ACCEPT_EDITS and tool.capability is ToolCapability.WRITE:
             return PermissionOutcome.allow()
+
         if tool.name in always_allowed:
             return PermissionOutcome.allow()
-        return self._need_approval(tool, args, force=False, reason=None)
+
+        if tool.capability in {
+            ToolCapability.WRITE,
+            ToolCapability.EXEC,
+        }:
+            return self._need_approval(tool,args,force=False,reason=None,)
+
+        return PermissionOutcome.deny(DenyReason.UNKNOWN, NO_PERMISSION_RULE_MSG)
 
     def _need_approval(
         self,
@@ -84,9 +71,10 @@ class PermissionManager:
         force: bool,
         reason: str | None,
     ) -> PermissionOutcome:
-        summary, detail, detail_format = tool.describe(args, self.policy)
+        summary, detail, detail_format = tool.describe(args, self.workspace)
         request = ApprovalRequest(
             tool_name=tool.name,
+            capability=tool.capability.value,
             risk=tool.risk.value,
             summary=summary,
             detail=detail,
@@ -110,4 +98,4 @@ class PermissionManager:
 
     @staticmethod
     def user_denied_message() -> str:
-        return _USER_DENIED_MSG
+        return USER_DENIED_MSG

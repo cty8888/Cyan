@@ -8,9 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..security.policy import SecurityPolicy
+from ..security.paths import display
 from ._process import run_process
-from .base import RiskLevel, Tool, ToolContext, ToolResult
+from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
 
 # 命令结束后打印此标记 + $PWD，供下一次调用延续 cwd
 _CWD_MARKER = "@@CODING_AGENT_CWD@@"
@@ -25,7 +25,8 @@ class BashTool(Tool):
         "越出工作目录会被重置回工作目录根。不会保留环境变量或 shell 别名，"
         "命令里的 export 不会影响下一次调用。"
     )
-    risk = RiskLevel.EXEC
+    capability = ToolCapability.EXEC
+    risk = RiskLevel.HIGH
     parameters = {
         "type": "object",
         "properties": {
@@ -39,12 +40,10 @@ class BashTool(Tool):
         "required": ["command"],
     }
 
-    def describe(self, args: dict[str, Any], policy: SecurityPolicy) -> tuple[str, str | None, str]:
+    def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
         return "执行命令", str(args.get("command", "")), "shell"
 
     def run(self, ctx: ToolContext, command: str, timeout_ms: int = 120_000) -> ToolResult:
-        ctx.policy.check_command(command)
-
         cwd = ctx.session.bash_cwd or ctx.workspace
         if not cwd.is_dir():
             # 上次记录的目录已不存在，退回工作目录根
@@ -60,7 +59,7 @@ class BashTool(Tool):
         cwd_note = self._update_cwd(ctx, cwd_text)
 
         output = _truncate_tail(visible.strip(), ctx.tool_config.max_tool_output_chars) or "(无输出)"
-        display_cwd = ctx.policy.display(ctx.session.bash_cwd or ctx.workspace)
+        display_cwd = display(ctx.workspace, ctx.session.bash_cwd or ctx.workspace)
 
         lines = [f"退出码：{result.exit_code}", f"目录：{display_cwd}"]
         if result.timed_out:
@@ -87,7 +86,10 @@ class BashTool(Tool):
             ctx.session.bash_cwd = new_cwd
             return None
         ctx.session.bash_cwd = None
-        return f"注意：命令结束后所在目录越出了工作区，已重置回工作目录根 {ctx.policy.display(ctx.workspace)}"
+        return (
+            f"注意：命令结束后所在目录越出了工作区，已重置回工作目录根 "
+            f"{display(ctx.workspace, ctx.workspace)}"
+        )
 
 
 def _truncate_tail(text: str, limit: int) -> str:

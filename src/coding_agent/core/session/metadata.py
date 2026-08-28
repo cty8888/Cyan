@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+import uuid
+from dataclasses import dataclass, field
+
+
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _now() -> float:
+    return time.time()
 
 
 @dataclass
 class SessionMetadata:
-    # TODO: 任务开始时自动填充 title（取自首条 user 消息或 current_task）
-    id: str = ""
-    created_at: float = 0.0
-    updated_at: float = 0.0
+    id: str = field(default_factory=_new_session_id)
+    created_at: float = field(default_factory=_now)
+    updated_at: float = field(default_factory=_now)
     title: str | None = None
+
+    @classmethod
+    def create(cls, title: str | None = None) -> SessionMetadata:
+        """创建一组新的会话元信息。"""
+        return cls(title=title)

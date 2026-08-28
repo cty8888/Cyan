@@ -13,7 +13,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from ..errors import ConfigError
-from ..security.modes import ExecutionMode
+from ..security.modes import PermissionMode
 from .tool import ToolConfig
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -27,7 +27,7 @@ _ENV_MAPPING = {
     "CODING_AGENT_MAX_ITERATIONS": "max_iterations",
     "CODING_AGENT_TEMPERATURE": "temperature",
     "CODING_AGENT_LOG_LEVEL": "log_level",
-    "CODING_AGENT_MODE": "execution_mode",
+    "CODING_AGENT_MODE": "permission_mode",
 }
 
 
@@ -52,7 +52,7 @@ class Config:
 
     log_level: str = "INFO"
     verbose: bool = False
-    execution_mode: ExecutionMode = ExecutionMode.AGENT
+    permission_mode: PermissionMode = PermissionMode.DEFAULT
 
     state_dirname: str = ".coding_agent"
 
@@ -109,9 +109,9 @@ def _coerce(raw: str, target_type: Any, source: str) -> Any:
             return raw.strip().lower() in {"1", "true", "yes", "on"}
     except ValueError as exc:
         raise ConfigError(f"环境变量 {source} 的值 {raw!r} 无法转换为 {type_name}") from exc
-    if type_name == "ExecutionMode":
+    if type_name == "PermissionMode":
         try:
-            return ExecutionMode.parse(raw)
+            return PermissionMode.parse(raw)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
     return raw

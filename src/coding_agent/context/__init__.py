@@ -1,3 +1,6 @@
-from .builder import ContextBuilder
+"""上下文层：装配 Message / ToolHistory 为模型 wire 格式。"""
 
-__all__ = ["ContextBuilder"]
+from .builder import ContextBuilder
+from .config import ContextConfig
+
+__all__ = ["ContextBuilder", "ContextConfig"]

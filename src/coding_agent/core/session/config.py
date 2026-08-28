@@ -1,32 +1,16 @@
 """Session 级配置快照。
 
-TODO: 统一配置来源——明确 Session.config 与会话外 Config 的分工；
-      运行中变更（如 /mode、tool_result_mode）应写回 Session.config 并由 Runtime 同步。
+只保留与会话本身相关的配置；模型参数（model / temperature）留在应用级 ``Config``，
+上下文参数放在 ``ContextConfig``，系统提示词作为 ``messages`` 第一条 ``SystemMessage`` 保存。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from ..tool_history import RenderMode
-
-if TYPE_CHECKING:
-    from ...config import Config
 
 
-@dataclass
+@dataclass(frozen=True)
 class SessionConfig:
-    model: str = ""
-    max_context_tokens: int = 128_000
-    tool_result_mode: RenderMode = "summary"
-    temperature: float = 0.0
-    system_prompt: str = ""
+    """占位，预留给未来会话级配置项。"""
 
-    @classmethod
-    def from_app_config(cls, config: Config, system_prompt: str) -> SessionConfig:
-        return cls(
-            model=config.model,
-            temperature=config.temperature,
-            system_prompt=system_prompt,
-        )
+    pass

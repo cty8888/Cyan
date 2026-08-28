@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Callable, ClassVar
 
 from ..errors import ToolError
-from .base import RiskLevel, Tool, ToolContext, ToolResult
+from ..security.paths import display, resolve_path
+from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
 
 
 class ReadFileTool(Tool):
@@ -17,7 +18,8 @@ class ReadFileTool(Tool):
         "不传 limit 时尝试整篇读取；文件超过单次读取上限会返回 [PARTIAL VIEW] 提示，"
         "按提示传 offset 续读，或显式传 limit 分段读取。"
     )
-    risk = RiskLevel.READ
+    capability = ToolCapability.READ
+    risk = RiskLevel.LOW
     parameters = {
         "type": "object",
         "properties": {
@@ -47,9 +49,9 @@ class ReadFileTool(Tool):
         return handler(target, ctx) if handler else None
 
     def run(self, ctx: ToolContext, path: str, offset: int = 1, limit: int | None = None) -> ToolResult:
-        target = ctx.policy.resolve_path(path, must_exist=True)
+        target = resolve_path(ctx.workspace, path, must_exist=True)
         if target.is_dir():
-            raise ToolError(f"{ctx.policy.display(target)} 是目录，请使用 list_dir")
+            raise ToolError(f"{display(ctx.workspace, target)} 是目录，请使用 list_dir")
 
         special = self._read_special(target, ctx)
         if special is not None:
@@ -57,7 +59,7 @@ class ReadFileTool(Tool):
 
         raw = target.read_bytes()
         if b"\x00" in raw[:8192]:
-            raise ToolError(f"{ctx.policy.display(target)} 看起来是二进制文件，无法以文本读取")
+            raise ToolError(f"{display(ctx.workspace, target)} 看起来是二进制文件，无法以文本读取")
 
         text = raw.decode("utf-8", errors="replace")
         all_lines = text.splitlines()
@@ -65,12 +67,12 @@ class ReadFileTool(Tool):
 
         if total == 0:
             ctx.session.mark_read(target)
-            return ToolResult.success(f"{ctx.policy.display(target)} 文件存在，但内容为空。")
+            return ToolResult.success(f"{display(ctx.workspace, target)} 文件存在，但内容为空。")
 
         offset = max(1, int(offset))
         if offset > total:
             return ToolResult.success(
-                f"{ctx.policy.display(target)} 共 {total} 行，第 {offset} 行起没有内容。"
+                f"{display(ctx.workspace, target)} 共 {total} 行，第 {offset} 行起没有内容。"
             )
 
         explicit_limit = limit is not None
@@ -90,7 +92,7 @@ class ReadFileTool(Tool):
         if not truncated_by_budget:
             ctx.session.mark_read(target)
 
-        header = f"{ctx.policy.display(target)}（共 {total} 行，当前展示 {offset}-{shown_to} 行）"
+        header = f"{display(ctx.workspace, target)}（共 {total} 行，当前展示 {offset}-{shown_to} 行）"
         if truncated_by_budget:
             header += (
                 f"\n[PARTIAL VIEW] 受单次读取上限限制，未能展示到第 {requested_end} 行，"

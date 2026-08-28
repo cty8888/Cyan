@@ -1,16 +1,12 @@
-"""上下文装配：把 Message 历史与 ToolHistory 组合成发给模型的 wire 格式。
-
-展示策略（例如工具结果用摘要还是全文）属于上下文层职责，不应下沉到
-``ToolHistory`` 或 ``Message`` 内部。
-"""
+"""上下文装配：把 Message 历史与 ToolHistory 组合成发给模型的 wire 格式。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
+from .config import ContextConfig
 from ..core.tool_history import RenderMode, ToolExecution, ToolHistory
-from ..llm.types import Message, SystemMessage, ToolMessage
+from ..llm.types import Message, ToolMessage
 
 
 @dataclass
@@ -23,20 +19,21 @@ class ContextBuilder:
 
     render_mode: RenderMode = "summary"
 
+    @classmethod
+    def from_config(cls, config: ContextConfig) -> ContextBuilder:
+        return cls(render_mode=config.tool_result_mode)
+
     def render_tool_result(self, execution: ToolExecution | None) -> str:
-        """选择并渲染某次工具调用的输出文本。"""
         if execution is None or execution.result is None:
             return ""
         return execution.result.render(mode=self.render_mode)
 
     def build_messages(
         self,
-        system_prompt: str,
         messages: list[Message],
         tool_history: ToolHistory,
     ) -> list[dict]:
-        """装配 OpenAI 兼容的消息列表。"""
-        payloads: list[dict] = [SystemMessage.of(system_prompt).to_api()]
+        payloads: list[dict] = []
         for message in messages:
             if isinstance(message, ToolMessage):
                 block = message.tool_result

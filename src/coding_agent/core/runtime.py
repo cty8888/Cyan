@@ -8,7 +8,6 @@ from ..config import Config
 from ..context.builder import ContextBuilder
 from ..llm.base import LLMClient
 from ..security.permissions import PermissionManager
-from ..security.policy import SecurityPolicy
 from ..tools.registry import ToolRegistry
 from .prompts import build_system_prompt
 from .session import Session
@@ -28,7 +27,6 @@ class Runtime:
     llm: LLMClient
     context_builder: ContextBuilder
     tool_executor: ToolExecutor
-    policy: SecurityPolicy
     permissions: PermissionManager
 
     @classmethod
@@ -37,7 +35,6 @@ class Runtime:
         config: Config,
         llm: LLMClient,
         registry: ToolRegistry,
-        policy: SecurityPolicy,
         permissions: PermissionManager,
         session: Session | None = None,
     ) -> Runtime:
@@ -45,26 +42,24 @@ class Runtime:
         session = session or Session.create(
             workspace=config.workspace,
             system_prompt=system_prompt,
-            app_config=config,
+            permission_mode=config.permission_mode,
         )
-        context_builder = ContextBuilder(render_mode=session.config.tool_result_mode)
+        context_builder = ContextBuilder.from_config(session.context)
         return cls(
             session=session,
             config=config,
             llm=llm,
             context_builder=context_builder,
             tool_executor=ToolExecutor(registry),
-            policy=policy,
             permissions=permissions,
         )
 
     def messages_for_request(self) -> list[dict]:
         return self.context_builder.build_messages(
-            self.session.config.system_prompt,
             self.session.messages,
             self.session.tool_history,
         )
 
     def sync_context_builder(self) -> None:
-        """Session 配置变更后同步 ContextBuilder。"""
-        self.context_builder.render_mode = self.session.config.tool_result_mode
+        """Session 上下文配置变更后同步 ContextBuilder。"""
+        self.context_builder.render_mode = self.session.context.tool_result_mode

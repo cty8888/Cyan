@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..errors import ToolError
-from .base import RiskLevel, Tool, ToolContext, ToolResult
+from ..security.paths import display, resolve_path
+from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
 
 # 遍历时跳过的噪声目录
 _SKIP_DIRS = {
@@ -20,7 +21,8 @@ class ListDirTool(Tool):
         "列出目录内容，以树形结构返回。用于了解项目结构。"
         "会自动跳过 .git、node_modules、__pycache__ 等噪声目录。"
     )
-    risk = RiskLevel.READ
+    capability = ToolCapability.READ
+    risk = RiskLevel.MINIMAL
     parameters = {
         "type": "object",
         "properties": {
@@ -38,12 +40,12 @@ class ListDirTool(Tool):
     }
 
     def run(self, ctx: ToolContext, path: str = ".", depth: int = 2) -> ToolResult:
-        target = ctx.policy.resolve_path(path, must_exist=True)
+        target = resolve_path(ctx.workspace, path, must_exist=True)
         if not target.is_dir():
-            raise ToolError(f"{ctx.policy.display(target)} 不是目录，如需读取文件请使用 read_file")
+            raise ToolError(f"{display(ctx.workspace, target)} 不是目录，如需读取文件请使用 read_file")
 
         depth = max(1, min(int(depth), 6))
-        lines: list[str] = [f"{ctx.policy.display(target)}/"]
+        lines: list[str] = [f"{display(ctx.workspace, target)}/"]
         truncated = _walk(target, depth, ctx.tool_config.max_dir_entries, lines, prefix="  ")
 
         if len(lines) == 1:

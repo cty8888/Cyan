@@ -8,10 +8,9 @@ from ..errors import AgentError, InvalidToolArgumentsError, LLMError
 from ..llm.parser import parse_tool_arguments
 from ..llm.types import ToolCallBlock, ToolMessage, UserMessage
 from ..security.approval import ApprovalDecision
-from ..security.modes import ExecutionMode
+from ..security.modes import PermissionMode
 from ..security.permissions import PermissionManager
-from ..security.policy import SecurityPolicy
-from ..tools.base import RiskLevel, ToolContext, ToolResult
+from ..tools.base import ToolCapability, ToolContext, ToolResult
 from ..tools.registry import ToolRegistry
 from .events import (
     AgentEvent,
@@ -42,7 +41,6 @@ class Agent:
         config: Config,
         llm: Any,
         registry: ToolRegistry,
-        policy: SecurityPolicy,
         permissions: PermissionManager,
         session: Session | None = None,
     ):
@@ -50,13 +48,11 @@ class Agent:
             config=config,
             llm=llm,
             registry=registry,
-            policy=policy,
             permissions=permissions,
             session=session,
         )
         self.config = config
         self.registry = registry
-        self.policy = policy
         self.permissions = permissions
 
     @property
@@ -71,7 +67,6 @@ class Agent:
     def tool_ctx(self) -> ToolContext:
         return ToolContext(
             workspace=self.config.workspace,
-            policy=self.policy,
             tool_config=self.config.tool,
             session=self.session,
         )
@@ -128,8 +123,12 @@ class Agent:
             yield self._finish(StopReason.FATAL_ERROR, final_text)
 
     def _schemas_for_mode(self) -> list[dict[str, Any]]:
-        if self.config.execution_mode is ExecutionMode.ASK:
-            return [tool.to_schema() for tool in self.registry if tool.risk is RiskLevel.READ]
+        if self.session.permissions.permission_mode is PermissionMode.PLAN:
+            return [
+                tool.to_schema()
+                for tool in self.registry
+                if tool.capability is ToolCapability.READ or tool.name == "bash"
+            ]
         return self.registry.schemas()
 
     def _run_tool_calls(self, tool_calls: list[ToolCallBlock]) -> Generator[AgentEvent, Any, StopReason | None]:
@@ -214,7 +213,7 @@ class Agent:
         outcome = self.runtime.permissions.evaluate(
             tool,
             args,
-            mode=self.config.execution_mode,
+            mode=self.session.permissions.permission_mode,
             always_allowed=self.session.always_allowed,
         )
 

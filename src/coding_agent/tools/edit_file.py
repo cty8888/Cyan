@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..errors import InvalidToolArgumentsError, ToolError
-from ..security.policy import SecurityPolicy
+from ..security.paths import display, resolve_path
 from ._diff import unified_diff
-from .base import RiskLevel, Tool, ToolContext, ToolResult
+from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
 
 
 class EditFileTool(Tool):
@@ -18,7 +19,8 @@ class EditFileTool(Tool):
         "且在文件中唯一——如果不唯一，请多带几行上下文使其唯一，或设置 replace_all=true。"
         "编辑前必须先用 read_file 读过该文件，否则会被拒绝。"
     )
-    risk = RiskLevel.WRITE
+    capability = ToolCapability.WRITE
+    risk = RiskLevel.MEDIUM
     parameters = {
         "type": "object",
         "properties": {
@@ -34,10 +36,10 @@ class EditFileTool(Tool):
         "required": ["path", "old_string", "new_string"],
     }
 
-    def describe(self, args: dict[str, Any], policy: SecurityPolicy) -> tuple[str, str | None, str]:
+    def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
         raw_path = str(args.get("path", ""))
         try:
-            target = policy.resolve_path(raw_path)
+            target = resolve_path(workspace, raw_path)
             original = target.read_text(encoding="utf-8")
         except Exception:
             return f"编辑 {raw_path}", None, "text"
@@ -46,8 +48,8 @@ class EditFileTool(Tool):
         new_string = str(args.get("new_string", ""))
         count = -1 if args.get("replace_all") else 1
         updated = original.replace(old_string, new_string, count)
-        diff = unified_diff(original, updated, policy.display(target))
-        return f"编辑文件 {policy.display(target)}", diff, "diff"
+        diff = unified_diff(original, updated, display(workspace, target))
+        return f"编辑文件 {display(workspace, target)}", diff, "diff"
 
     def run(
         self,
@@ -57,11 +59,13 @@ class EditFileTool(Tool):
         new_string: str,
         replace_all: bool = False,
     ) -> ToolResult:
-        target = ctx.policy.resolve_path(path, must_exist=True)
+        target = resolve_path(ctx.workspace, path, must_exist=True)
         if not target.is_file():
-            raise ToolError(f"{ctx.policy.display(target)} 不是文件")
+            raise ToolError(f"{display(ctx.workspace, target)} 不是文件")
         if not ctx.session.has_read(target):
-            raise ToolError(f"编辑 {ctx.policy.display(target)} 之前必须先用 read_file 读取它的当前内容。")
+            raise ToolError(
+                f"编辑 {display(ctx.workspace, target)} 之前必须先用 read_file 读取它的当前内容。"
+            )
         if old_string == new_string:
             raise InvalidToolArgumentsError("old_string 与 new_string 相同，无需编辑")
 
@@ -70,12 +74,12 @@ class EditFileTool(Tool):
 
         if occurrences == 0:
             raise ToolError(
-                f"在 {ctx.policy.display(target)} 中找不到 old_string。"
+                f"在 {display(ctx.workspace, target)} 中找不到 old_string。"
                 "请先用 read_file 确认原文（注意缩进、空格和换行必须逐字符一致）。"
             )
         if occurrences > 1 and not replace_all:
             raise ToolError(
-                f"old_string 在 {ctx.policy.display(target)} 中出现了 {occurrences} 次，不唯一。"
+                f"old_string 在 {display(ctx.workspace, target)} 中出现了 {occurrences} 次，不唯一。"
                 "请补充上下文让它唯一，或设置 replace_all=true 替换全部。"
             )
 
@@ -84,6 +88,6 @@ class EditFileTool(Tool):
         ctx.session.mark_read(target)
 
         return ToolResult.success(
-            f"已修改 {ctx.policy.display(target)}（替换 {occurrences if replace_all else 1} 处）",
-            diff=unified_diff(original, updated, ctx.policy.display(target)),
+            f"已修改 {display(ctx.workspace, target)}（替换 {occurrences if replace_all else 1} 处）",
+            diff=unified_diff(original, updated, display(ctx.workspace, target)),
         )

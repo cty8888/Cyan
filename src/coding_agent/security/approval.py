@@ -21,6 +21,7 @@ class DenyReason(Enum):
     MODE_BLOCKED = "mode"
     POLICY_BLOCKED = "policy"
     RESTRICTED = "restricted"
+    UNKNOWN = "unknown"
     USER_DENIED = "user"
 
 
@@ -29,6 +30,7 @@ class ApprovalRequest:
     """一次待确认的高风险操作。"""
 
     tool_name: str
+    capability: str
     risk: str
     summary: str
     detail: str | None = None

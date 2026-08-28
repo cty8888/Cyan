@@ -8,42 +8,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..security.paths import display
-from ._process import run_process
-from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
-
-# 命令结束后打印此标记 + $PWD，供下一次调用延续 cwd
-_CWD_MARKER = "@@CODING_AGENT_CWD@@"
+from ...constants.tools.defs.bash import BASH_CWD_MARKER, BASH_DESCRIPTION, BASH_NAME, BASH_PARAMETERS
+from ...security.paths import display
+from .._process import run_process
+from ..base import RiskLevel, Tool, ToolCapability, ToolContext, ToolRunResult
 
 
 class BashTool(Tool):
-    name = "bash"
-    description = (
-        "在项目工作目录下执行 shell 命令（测试、构建、git、脚本等）。"
-        "每条命令都在独立的新进程里运行；工作目录会在调用之间延续——"
-        "命令里执行了 cd 并且最终停在工作目录内，下一次调用会从那个目录继续，"
-        "越出工作目录会被重置回工作目录根。不会保留环境变量或 shell 别名，"
-        "命令里的 export 不会影响下一次调用。"
-    )
+    name = BASH_NAME
+    description = BASH_DESCRIPTION
     capability = ToolCapability.EXEC
     risk = RiskLevel.HIGH
-    parameters = {
-        "type": "object",
-        "properties": {
-            "command": {"type": "string", "description": "要执行的 shell 命令"},
-            "timeout_ms": {
-                "type": "integer",
-                "description": "超时毫秒数，默认 120000（120 秒）。",
-                "default": 120_000,
-            },
-        },
-        "required": ["command"],
-    }
+    parameters = BASH_PARAMETERS
 
     def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
         return "执行命令", str(args.get("command", "")), "shell"
 
-    def run(self, ctx: ToolContext, command: str, timeout_ms: int = 120_000) -> ToolResult:
+    def run(self, ctx: ToolContext, command: str, timeout_ms: int = 120_000) -> ToolRunResult:
         cwd = ctx.session.bash_cwd or ctx.workspace
         if not cwd.is_dir():
             # 上次记录的目录已不存在，退回工作目录根
@@ -71,8 +52,8 @@ class BashTool(Tool):
 
         metadata = {"exit_code": result.exit_code, "cwd": display_cwd}
         if result.timed_out or result.exit_code != 0:
-            return ToolResult(ok=False, error=content, metadata=metadata)
-        return ToolResult.success(content, **metadata)
+            return ToolRunResult(ok=False, error=content, metadata=metadata)
+        return ToolRunResult.success(content, **metadata)
 
     def _update_cwd(self, ctx: ToolContext, cwd_text: str | None) -> str | None:
         """解析命令结束后的目录，更新会话 cwd；越界时重置并返回提示。"""
@@ -101,15 +82,15 @@ def _truncate_tail(text: str, limit: int) -> str:
 
 def _state_trailer() -> str:
     """追加在用户命令之后：保留退出码，并打印命令结束时的 $PWD。"""
-    return f'\n__ca_exit=$?\nprintf "\\n{_CWD_MARKER}%s\\n" "$PWD"\nexit "$__ca_exit"\n'
+    return f'\n__ca_exit=$?\nprintf "\\n{BASH_CWD_MARKER}%s\\n" "$PWD"\nexit "$__ca_exit"\n'
 
 
 def _extract_cwd(output: str) -> tuple[str, str | None]:
     """从合并输出中剥离 cwd 标记行，返回 (可见内容, 命令结束目录)。"""
-    idx = output.rfind(_CWD_MARKER)
+    idx = output.rfind(BASH_CWD_MARKER)
     if idx == -1:
         return output, None
     visible = output[:idx]
-    remainder = output[idx + len(_CWD_MARKER) :]
+    remainder = output[idx + len(BASH_CWD_MARKER) :]
     cwd_line = remainder.splitlines()[0] if remainder.splitlines() else ""
     return visible, cwd_line.strip() or None

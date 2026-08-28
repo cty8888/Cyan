@@ -5,29 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..errors import ToolError
-from ..security.paths import display, resolve_path
-from ._diff import unified_diff
-from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
+from ...constants.tools.defs.write_file import WRITE_FILE_DESCRIPTION, WRITE_FILE_NAME, WRITE_FILE_PARAMETERS
+from ...errors import ToolError
+from ...security.paths import display, resolve_path
+from .._diff import unified_diff
+from ..base import RiskLevel, Tool, ToolCapability, ToolContext, ToolRunResult
 
 
 class WriteFileTool(Tool):
-    name = "write_file"
-    description = (
-        "把内容整体写入文件，文件不存在则创建（父目录会自动创建）。"
-        "修改已有文件的局部内容时应优先使用 edit_file，只有新建文件或整体重写时才用本工具。"
-        "覆写已存在的文件之前必须先用 read_file 读过它，否则会被拒绝。"
-    )
+    name = WRITE_FILE_NAME
+    description = WRITE_FILE_DESCRIPTION
     capability = ToolCapability.WRITE
     risk = RiskLevel.MEDIUM
-    parameters = {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "文件路径，相对于工作目录"},
-            "content": {"type": "string", "description": "写入的完整内容"},
-        },
-        "required": ["path", "content"],
-    }
+    parameters = WRITE_FILE_PARAMETERS
 
     def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
         raw_path = str(args.get("path", ""))
@@ -42,7 +32,7 @@ class WriteFileTool(Tool):
         diff = unified_diff(old_content, new_content, display(workspace, target))
         return f"{action}文件 {display(workspace, target)}", diff, "diff"
 
-    def run(self, ctx: ToolContext, path: str, content: str) -> ToolResult:
+    def run(self, ctx: ToolContext, path: str, content: str) -> ToolRunResult:
         target = resolve_path(ctx.workspace, path)
         existed = target.is_file()
         if existed and not ctx.session.has_read(target):
@@ -58,7 +48,7 @@ class WriteFileTool(Tool):
 
         line_count = len(content.splitlines())
         action = "覆写" if existed else "创建"
-        return ToolResult.success(
+        return ToolRunResult.success(
             f"已{action} {display(ctx.workspace, target)}（{line_count} 行）",
             diff=unified_diff(old_content, content, display(ctx.workspace, target)),
         )

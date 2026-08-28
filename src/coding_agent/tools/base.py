@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from ..constants.tools.describe import COMPACT_JSON_LIMIT
+from ..constants.tools.schema_types import JSON_SCHEMA_TYPE_MAP
 from ..errors import InvalidToolArgumentsError
 from ..config.tool import ToolConfig
 
@@ -22,8 +24,6 @@ if TYPE_CHECKING:
 
 class ToolCapability(Enum):
     """工具操作类型（read / write / exec）。
-
-    描述工具能做什么，供权限系统按能力分支（Ask 模式过滤、路径/命令规则等）。
     """
 
     READ = "read"
@@ -32,10 +32,7 @@ class ToolCapability(Enum):
 
 
 class RiskLevel(Enum):
-    """工具固有风险分级（minimal → critical，共 5 级）。
-
-    描述同类能力下的危险程度；最终是否放行由执行模式与安全规则共同决定。
-    """
+    """TODO risklevel尚未参与权限系统"""
 
     MINIMAL = "minimal"
     LOW = "low"
@@ -45,12 +42,10 @@ class RiskLevel(Enum):
 
 
 @dataclass
-class ToolResult:
-    """工具执行结果。
+class ToolRunResult:
+    """工具单次执行结果.
 
-    ``content`` 回喂模型；``metadata`` 仅供 CLI 渲染（如 diff），不进上下文。
-
-    TODO: 重命名以避免与 core.tool_history.ToolResult 混淆（如 ToolRunResult）。
+    ``content`` 回喂模型; ``metadata`` 仅供 CLI 渲染 (如 diff), 不进上下文.
     """
 
     ok: bool
@@ -59,11 +54,11 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def success(cls, content: str, **metadata: Any) -> ToolResult:
+    def success(cls, content: str, **metadata: Any) -> ToolRunResult:
         return cls(ok=True, content=content, metadata=metadata)
 
     @classmethod
-    def failure(cls, error: str, **metadata: Any) -> ToolResult:
+    def failure(cls, error: str, **metadata: Any) -> ToolRunResult:
         return cls(ok=False, error=error, metadata=metadata)
 
     def to_model_text(self) -> str:
@@ -113,20 +108,11 @@ class Tool(ABC):
         return f"{self.name}({_compact_json(args)})", None, "text"
 
     @abstractmethod
-    def run(self, ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        """执行工具。可预期失败应抛 ``ToolError`` 子类或返回 ``ToolResult.failure``。"""
+    def run(self, ctx: ToolContext, **kwargs: Any) -> ToolRunResult:
+        """执行工具. 可预期失败应抛 ``ToolError`` 子类或返回 ``ToolRunResult.failure``."""
 
 
 # ---------------------------------------------------------------- JSON Schema 校验
-
-_TYPE_MAP: dict[str, tuple[type, ...]] = {
-    "string": (str,),
-    "integer": (int,),
-    "number": (int, float),
-    "boolean": (bool,),
-    "array": (list,),
-    "object": (dict,),
-}
 
 
 def validate_args(schema: dict[str, Any], args: dict[str, Any], tool_name: str = "") -> dict[str, Any]:
@@ -161,11 +147,11 @@ def validate_args(schema: dict[str, Any], args: dict[str, Any], tool_name: str =
 def _check_type(key: str, value: Any, spec: dict[str, Any], tool_name: str) -> Any:
     """校验单个参数的类型与 enum 约束。"""
     expected = spec.get("type")
-    if expected in _TYPE_MAP:
+    if expected in JSON_SCHEMA_TYPE_MAP:
         # bool 是 int 子类，需单独排除
         if expected in {"integer", "number"} and isinstance(value, bool):
             raise InvalidToolArgumentsError(f"工具 {tool_name} 的参数 {key} 应为 {expected}，收到 boolean")
-        if not isinstance(value, _TYPE_MAP[expected]):
+        if not isinstance(value, JSON_SCHEMA_TYPE_MAP[expected]):
             # 模型常把数字写成字符串，尝试宽松转换
             coerced = _coerce_scalar(value, expected)
             if coerced is None:
@@ -201,7 +187,7 @@ def _coerce_scalar(value: Any, expected: str) -> Any:
     return None
 
 
-def _compact_json(args: dict[str, Any], limit: int = 120) -> str:
+def _compact_json(args: dict[str, Any], limit: int = COMPACT_JSON_LIMIT) -> str:
     """序列化参数摘要，过长时截断。"""
     text = json.dumps(args, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + "..."

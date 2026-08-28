@@ -191,14 +191,14 @@ class App:
                 console.print("[yellow]用法：/mode plan|default|accept_edits|bypass[/]")
             else:
                 try:
-                    mode = PermissionMode.parse(parts[1])
+                    mode = PermissionMode(parts[1])
                     self.config.permission_mode = mode
                     self.session.permissions.permission_mode = mode
                     label = MODE_LABELS[mode]
                     console.print(f"[dim]已切换至 {label}[/]")
                     logger.info("切换权限模式：%s", mode.value)
-                except ValueError as exc:
-                    console.print(f"[yellow]{exc}[/]")
+                except ValueError:
+                    console.print("[yellow]无效权限模式, 可选: plan / default / accept_edits / bypass[/]")
         elif command == "/usage":
             stats = self.session.stats()
             console.print(

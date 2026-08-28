@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Any
 
 from ..security.approval import ApprovalRequest
-from ..tools.base import ToolResult
+from ..tools.base import ToolRunResult
 
 
 class StopReason(Enum):
@@ -73,7 +73,7 @@ class ToolStarted(AgentEvent):
 class ToolFinished(AgentEvent):
     call_id: str
     name: str
-    result: ToolResult
+    result: ToolRunResult
     duration: float
 
 

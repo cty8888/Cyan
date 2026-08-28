@@ -1,6 +1,6 @@
 """工具层公共导出。"""
 
-from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
+from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolRunResult
 from .registry import ToolRegistry, build_default_registry
 
 __all__ = [
@@ -8,7 +8,7 @@ __all__ = [
     "Tool",
     "ToolCapability",
     "ToolContext",
-    "ToolResult",
+    "ToolRunResult",
     "ToolRegistry",
     "build_default_registry",
 ]

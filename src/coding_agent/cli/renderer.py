@@ -21,7 +21,7 @@ from ..core.events import STOP_REASON_TEXT, StopReason
 from ..logutil import get_logger
 from ..constants.security.mode_labels import MODE_LABELS
 from ..security.approval import ApprovalDecision, ApprovalRequest
-from ..tools.base import ToolResult
+from ..tools.base import ToolRunResult
 
 logger = get_logger("cli")
 
@@ -87,7 +87,7 @@ class Renderer:
         logger.info("调用 %s  %s", name, _format_args(name, args))
         logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
 
-    def tool_finished(self, name: str, result: ToolResult, duration: float) -> None:
+    def tool_finished(self, name: str, result: ToolRunResult, duration: float) -> None:
         text = result.content if result.ok else (result.error or "执行失败")
         mark = "[green]✓[/]" if result.ok else "[red]✗[/]"
         self.console.print(f"  {mark} {_first_line(text)} [dim]({duration:.1f}s)[/]")

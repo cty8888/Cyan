@@ -4,42 +4,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..errors import ToolError
-from ..security.paths import display, resolve_path
-from .base import RiskLevel, Tool, ToolCapability, ToolContext, ToolResult
-
-# 遍历时跳过的噪声目录
-_SKIP_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build", ".idea", ".vscode",
-}
+from ...constants.tools.defs.list_dir import (
+    LIST_DIR_DESCRIPTION,
+    LIST_DIR_NAME,
+    LIST_DIR_PARAMETERS,
+    LIST_DIR_SKIP_DIRS,
+)
+from ...errors import ToolError
+from ...security.paths import display, resolve_path
+from ..base import RiskLevel, Tool, ToolCapability, ToolContext, ToolRunResult
 
 
 class ListDirTool(Tool):
-    name = "list_dir"
-    description = (
-        "列出目录内容，以树形结构返回。用于了解项目结构。"
-        "会自动跳过 .git、node_modules、__pycache__ 等噪声目录。"
-    )
+    name = LIST_DIR_NAME
+    description = LIST_DIR_DESCRIPTION
     capability = ToolCapability.READ
     risk = RiskLevel.MINIMAL
-    parameters = {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "目录路径，相对于工作目录。默认为工作目录根。",
-                "default": ".",
-            },
-            "depth": {
-                "type": "integer",
-                "description": "递归深度，1 表示只列出当前层。默认 2。",
-                "default": 2,
-            },
-        },
-    }
+    parameters = LIST_DIR_PARAMETERS
 
-    def run(self, ctx: ToolContext, path: str = ".", depth: int = 2) -> ToolResult:
+    def run(self, ctx: ToolContext, path: str = ".", depth: int = 2) -> ToolRunResult:
         target = resolve_path(ctx.workspace, path, must_exist=True)
         if not target.is_dir():
             raise ToolError(f"{display(ctx.workspace, target)} 不是目录，如需读取文件请使用 read_file")
@@ -53,7 +36,7 @@ class ListDirTool(Tool):
         if truncated:
             lines.append(f"  ... 条目过多，已截断至 {ctx.tool_config.max_dir_entries} 条")
 
-        return ToolResult.success("\n".join(lines), entry_count=len(lines) - 1)
+        return ToolRunResult.success("\n".join(lines), entry_count=len(lines) - 1)
 
 
 def _walk(directory: Path, depth: int, budget: int, lines: list[str], prefix: str) -> bool:
@@ -70,7 +53,7 @@ def _walk(directory: Path, depth: int, budget: int, lines: list[str], prefix: st
         if len(lines) - 1 >= budget:
             return True
         if entry.is_dir():
-            if entry.name in _SKIP_DIRS:
+            if entry.name in LIST_DIR_SKIP_DIRS:
                 continue
             lines.append(f"{prefix}{entry.name}/")
             if _walk(entry, depth - 1, budget, lines, prefix + "  "):

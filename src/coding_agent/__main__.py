@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["plan", "default", "accept_edits", "accept-edits", "bypass"],
+        choices=["plan", "default", "accept_edits", "bypass"],
         help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准编辑 / bypass=跳过权限，默认 default",
     )
     return parser
@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
             max_iterations=args.max_iterations,
             log_level=args.log_level,
             verbose=args.verbose,
-            permission_mode=PermissionMode.parse(args.mode) if args.mode else None,
+            permission_mode=PermissionMode(args.mode) if args.mode else None,
         )
     except ConfigError as exc:
         console.print(f"[bold red]配置错误[/] {exc}")

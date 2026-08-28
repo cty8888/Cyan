@@ -10,7 +10,7 @@ from ..llm.types import ToolCallBlock, ToolMessage, UserMessage
 from ..security.approval import ApprovalDecision
 from ..security.modes import PermissionMode
 from ..security.permissions import PermissionManager
-from ..tools.base import ToolCapability, ToolContext, ToolResult
+from ..tools.base import ToolCapability, ToolContext, ToolRunResult
 from ..tools.registry import ToolRegistry
 from .events import (
     AgentEvent,
@@ -156,13 +156,13 @@ class Agent:
         try:
             args = parse_tool_arguments(call.arguments, call.name)
         except InvalidToolArgumentsError as exc:
-            self._respond(call, responded, ToolResult.failure(str(exc)), duration=0.0)
+            self._respond(call, responded, ToolRunResult.failure(str(exc)), duration=0.0)
             self.session.record_tool_outcome(ok=False)
             yield Notice(f"{call.name} 参数解析失败：{exc}", level="warning")
             return self._check_failure_threshold()
 
         if not self.registry.has(call.name):
-            result = ToolResult.failure(
+            result = ToolRunResult.failure(
                 f"不存在名为 {call.name} 的工具，可用工具：{', '.join(t.name for t in self.registry)}"
             )
             self._respond(call, responded, result)
@@ -174,7 +174,7 @@ class Agent:
             self._respond(
                 call,
                 responded,
-                ToolResult.failure(
+                ToolRunResult.failure(
                     f"最近若干次调用中，完全相同的 {call.name} 调用已出现 {repeats} 次，"
                     "期间没有任何实质进展，已阻止以避免死循环。"
                 ),
@@ -221,7 +221,7 @@ class Agent:
             return True
 
         if outcome.kind == "deny":
-            self._respond(call, responded, ToolResult.failure(outcome.deny_message or "操作被拒绝。"))
+            self._respond(call, responded, ToolRunResult.failure(outcome.deny_message or "操作被拒绝。"))
             yield Notice(f"已拒绝 {tool.name}", level="warning")
             return False
 
@@ -231,13 +231,13 @@ class Agent:
             self._respond(
                 call,
                 responded,
-                ToolResult.failure(PermissionManager.user_denied_message()),
+                ToolRunResult.failure(PermissionManager.user_denied_message()),
             )
             yield Notice(f"已拒绝 {tool.name}", level="warning")
             return False
         return True
 
-    def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolResult, *, duration: float = 0.0) -> None:
+    def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolRunResult, *, duration: float = 0.0) -> None:
         self._respond_text(
             call,
             result.to_model_text(),

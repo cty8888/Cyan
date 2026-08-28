@@ -1,9 +1,3 @@
-"""审批协议。
-
-core 层只产出 ``ApprovalRequest`` / ``PermissionOutcome`` 并等待 ``ApprovalDecision``，
-具体怎么问用户由 CLI 层决定，因此内核不依赖任何输入输出设施。
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

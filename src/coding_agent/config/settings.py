@@ -111,7 +111,9 @@ def _coerce(raw: str, target_type: Any, source: str) -> Any:
         raise ConfigError(f"环境变量 {source} 的值 {raw!r} 无法转换为 {type_name}") from exc
     if type_name == "PermissionMode":
         try:
-            return PermissionMode.parse(raw)
+            return PermissionMode(raw)
         except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
+            raise ConfigError(
+                f"环境变量 {source} 的值 {raw!r} 不是有效的 PermissionMode"
+            ) from exc
     return raw

@@ -272,6 +272,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 - [x] 把离线测试改写为按模块拆分的 pytest 用例
 - [x] README
+- [x] 最小 GitHub Actions：push / PR 跑 pytest
 - [ ] 整体打磨
 
 ## 8. 依赖

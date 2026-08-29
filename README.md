@@ -95,6 +95,8 @@ uv sync --group dev
 uv run pytest
 ```
 
+推送到 `main` 或开 pull request 时，GitHub Actions 会按 `uv.lock` 安装依赖并跑同一套测试。
+
 ## 开发状态
 
 Phase 1（最小可用闭环）已完成。后续：流式输出与富渲染打磨、上下文压缩与 Memory、

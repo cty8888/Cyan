@@ -7,9 +7,9 @@
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import sys
 
 LOGGER_NAME = "coding_agent"
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

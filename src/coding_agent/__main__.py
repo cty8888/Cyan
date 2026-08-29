@@ -8,10 +8,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from .config import Config
 from .errors import AgentError, ConfigError
 from .logutil import get_logger, setup_logging
-from .security.modes import PermissionMode
+from .security.types import PermissionMode
+from .settings import AgentSettings
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         choices=["plan", "default", "accept_edits", "bypass"],
-        help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准编辑 / bypass=跳过权限，默认 default",
+        help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准编辑 / bypass=跳过普通审批（黑名单与敏感操作仍生效），默认 default",
     )
     return parser
 
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     logger = get_logger()
 
     try:
-        config = Config.load(
+        settings = AgentSettings.load(
             workspace=args.workspace,
             model=args.model,
             api_key=args.api_key,
@@ -65,13 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[bold red]配置错误[/] {exc}")
         return 2
 
-    log_path = setup_logging(config.log_dir, level=config.log_level, to_stderr=config.verbose)
-    logger.info("启动 workspace=%s model=%s log=%s", config.workspace, config.model, log_path)
+    log_path = setup_logging(settings.log_dir, level=settings.cli.log_level, to_stderr=settings.cli.verbose)
+    logger.info("启动 workspace=%s model=%s log=%s", settings.workspace, settings.llm.model, log_path)
 
     from .cli.app import App
 
     try:
-        app = App(config, console=console)
+        app = App(settings, console=console)
         if args.prompt:
             return app.run_once(args.prompt)
         return app.run_interactive()

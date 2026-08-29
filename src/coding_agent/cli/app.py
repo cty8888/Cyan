@@ -10,11 +10,9 @@ from typing import Any
 
 from rich.console import Console
 
-from ..config import Config
-from ..core.agent import Agent
-from ..core.events import (
+from ..core.types import (
     ApprovalRequired,
-    AssistantMessage,
+    AssistantReply,
     Notice,
     StopReason,
     TaskFinished,
@@ -24,13 +22,14 @@ from ..core.events import (
     ToolStarted,
 )
 from ..core.prompts import build_system_prompt
-from ..core.session import Session
+from ..core.runtime import Runtime
 from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
-from ..constants.security.mode_labels import MODE_LABELS
-from ..security.modes import PermissionMode
 from ..security.permissions import PermissionManager
+from ..session import Session
+from ..settings import AgentSettings
 from ..tools.registry import build_default_registry
+from .commands import CommandRegistry, build_default_commands
 from .renderer import Renderer
 
 try:  # 让输入框支持上下键历史与行编辑
@@ -40,32 +39,22 @@ except ImportError:  # pragma: no cover - Windows 原生终端没有 readline
 
 logger = get_logger("cli")
 
-HELP_TEXT = """可用命令：
-  /help          显示本帮助
-  /tools         列出已注册的工具
-  /mode <模式>   切换权限模式：plan / default / accept_edits / bypass
-  /usage         显示本会话的 token 与调用统计
-  /clear         清空对话历史，开始新会话
-  /cwd           显示当前工作目录
-  /exit, /quit   退出
-
-直接输入自然语言即可下达任务。任务执行中按 Ctrl-C 可以中断。"""
-
 
 class App:
-    def __init__(self, config: Config, console: Console | None = None):
-        self.config = config
+    def __init__(self, settings: AgentSettings, console: Console | None = None) -> None:
+        self.settings = settings
         self.renderer = Renderer(console)
-        self.permissions = PermissionManager(config.workspace)
+        self.permissions = PermissionManager(settings.workspace)
         self.registry = build_default_registry()
+        self.commands: CommandRegistry = build_default_commands()
         self.session = Session.create(
-            workspace=config.workspace,
-            system_prompt=build_system_prompt(config.workspace),
-            permission_mode=config.permission_mode,
+            workspace=settings.workspace,
+            system_prompt=build_system_prompt(settings.workspace),
+            permission_mode=settings.cli.permission_mode,
         )
-        self.llm = DeepSeekClient(config, on_retry=self._on_llm_retry)
-        self.agent = Agent(
-            config=config,
+        self.llm = DeepSeekClient(settings.llm, on_retry=self._on_llm_retry)
+        self.runtime = Runtime.create(
+            settings=settings,
             llm=self.llm,
             registry=self.registry,
             permissions=self.permissions,
@@ -79,7 +68,11 @@ class App:
         return 0 if reason is StopReason.COMPLETED else 1
 
     def run_interactive(self) -> int:
-        self.renderer.banner(self.config, [tool.name for tool in self.registry])
+        self.renderer.banner(
+            self.settings,
+            [tool.name for tool in self.registry],
+            self.session.permissions.permission_mode,
+        )
         while True:
             try:
                 raw = self.renderer.console.input("\n[bold cyan]›[/] ").strip()
@@ -100,7 +93,7 @@ class App:
     # ------------------------------------------------------------ 事件消费
     def _execute(self, task: str) -> StopReason:
         logger.info("收到任务：%s", task)
-        stream = self.agent.run(task)
+        stream = self.runtime.run(task)
         reply: Any = None
         reason = StopReason.FATAL_ERROR
 
@@ -131,7 +124,7 @@ class App:
         if isinstance(event, Thinking):
             self.renderer.thinking(event.iteration)
             return None
-        if isinstance(event, AssistantMessage):
+        if isinstance(event, AssistantReply):
             self.renderer.assistant(event.text)
             return None
         if isinstance(event, ToolStarted):
@@ -169,52 +162,14 @@ class App:
 
     # ------------------------------------------------------------ 斜杠命令
     def _handle_command(self, raw: str) -> bool:
-        """返回 True 表示应当退出 REPL。"""
-        command = raw.split()[0].lower()
-        console = self.renderer.console
-
-        if command in {"/exit", "/quit"}:
-            console.print("[dim]再见[/]")
-            logger.info("再见")
-            return True
-        if command == "/help":
-            console.print(HELP_TEXT)
-        elif command == "/tools":
-            for tool in self.registry:
-                console.print(
-                    f"  [bold]{tool.name}[/] "
-                    f"[dim]({tool.capability.value}/{tool.risk.value})[/] — {tool.description}"
-                )
-        elif command == "/mode":
-            parts = raw.split()
-            if len(parts) != 2:
-                console.print("[yellow]用法：/mode plan|default|accept_edits|bypass[/]")
-            else:
-                try:
-                    mode = PermissionMode(parts[1])
-                    self.config.permission_mode = mode
-                    self.session.permissions.permission_mode = mode
-                    label = MODE_LABELS[mode]
-                    console.print(f"[dim]已切换至 {label}[/]")
-                    logger.info("切换权限模式：%s", mode.value)
-                except ValueError:
-                    console.print("[yellow]无效权限模式, 可选: plan / default / accept_edits / bypass[/]")
-        elif command == "/usage":
-            stats = self.session.stats()
-            console.print(
-                f"  模型调用 {stats['llm_calls']} 次 · 工具调用 {stats['tool_calls']} 次\n"
-                f"  tokens：输入 {stats['prompt_tokens']} / 输出 {stats['completion_tokens']}"
-                f" / 合计 {stats['total_tokens']}\n"
-                f"  历史消息 {stats['messages']} 条"
-            )
-        elif command == "/clear":
-            self.session.clear()
-            console.print("[dim]已清空对话历史[/]")
-        elif command == "/cwd":
-            console.print(f"  {self.config.workspace}")
-        else:
-            console.print(f"[yellow]未知命令 {command}，输入 /help 查看可用命令[/]")
-        return False
+        """返回 True 表示应当退出 REPL。新增命令不用改这里，去 cli/commands.py 注册即可。"""
+        parts = raw.split()
+        name = parts[0].lower()
+        command = self.commands.get(name)
+        if command is None:
+            self.renderer.console.print(f"[yellow]未知命令 {name}，输入 /help 查看可用命令[/]")
+            return False
+        return command.handler(self, parts[1:])
 
     def _on_llm_retry(self, attempt: int, delay: float, message: str) -> None:
         self.renderer.notice(f"模型调用失败（{message}），{delay:.1f}s 后第 {attempt} 次重试", level="warning")

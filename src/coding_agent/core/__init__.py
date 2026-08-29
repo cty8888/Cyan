@@ -1,8 +1,10 @@
-from .agent import Agent
-from .events import (
+"""Agent 内核公共导出。"""
+
+from .types import (
     AgentEvent,
+    AgentStream,
     ApprovalRequired,
-    AssistantMessage,
+    AssistantReply,
     Notice,
     StopReason,
     TaskFinished,
@@ -11,14 +13,15 @@ from .events import (
     ToolFinished,
     ToolStarted,
 )
+from .loop import AgentLoop
 from .runtime import Runtime
-from .session import Session
 
 __all__ = [
-    "Agent",
     "AgentEvent",
+    "AgentLoop",
+    "AgentStream",
     "ApprovalRequired",
-    "AssistantMessage",
+    "AssistantReply",
     "Notice",
     "Runtime",
     "StopReason",
@@ -27,5 +30,4 @@ __all__ = [
     "Thinking",
     "ToolFinished",
     "ToolStarted",
-    "Session",
 ]

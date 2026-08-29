@@ -11,7 +11,7 @@ from .types import LLMResponse
 class LLMClient(ABC):
     """任何后端只要实现 ``chat`` 即可接入 Agent Loop。
 
-    ``messages`` 是已经渲染好的 OpenAI 兼容 wire 格式（由 ``Session`` 负责把
+    ``messages`` 是已经渲染好的 OpenAI 兼容 wire 格式（由 ``ContextBuilder`` 把
     ``Message`` 结合 ``ToolHistory`` 转换而成），``LLMClient`` 不需要认识
     ``Message`` 这个内部类型。
     """

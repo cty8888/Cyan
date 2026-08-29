@@ -1,10 +1,13 @@
+"""工具注册表：schema 导出、名称分发与统一执行。"""
+
 from __future__ import annotations
 
 import traceback
 from typing import Any, Iterator
 
 from ..errors import AgentError, ToolError, ToolNotFoundError
-from .base import Tool, ToolContext, ToolRunResult
+from .base import Tool
+from .types import ToolContext, ToolRunResult
 
 
 class ToolRegistry:
@@ -34,11 +37,22 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.to_schema() for tool in self._tools.values()]
 
-    def execute(self, name: str, args: dict[str, Any], ctx: ToolContext) -> ToolRunResult:
-        """执行工具；任何失败都以 ``ToolRunResult`` 返回。"""
+    def execute(
+        self,
+        name: str,
+        args: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        validated: bool = False,
+    ) -> ToolRunResult:
+        """执行工具；任何失败都以 ``ToolRunResult`` 返回。
+
+        ``validated=True`` 表示调用方已做过 ``tool.validate()``（Agent Loop 在审批前会先规范化参数），
+        此处不再重复校验。
+        """
         try:
             tool = self.get(name)
-            normalized = tool.validate(args)
+            normalized = args if validated else tool.validate(args)
             return tool.run(ctx, **normalized)
         except ToolError as exc:
             return ToolRunResult.failure(str(exc))
@@ -69,11 +83,11 @@ class ToolRegistry:
 
 def build_default_registry() -> ToolRegistry:
     """注册默认工具集。新增工具在此追加一行即可。"""
-    from .defs.bash import BashTool
-    from .defs.edit_file import EditFileTool
-    from .defs.list_dir import ListDirTool
-    from .defs.read_file import ReadFileTool
-    from .defs.write_file import WriteFileTool
+    from .builtin.bash import BashTool
+    from .builtin.edit_file import EditFileTool
+    from .builtin.list_dir import ListDirTool
+    from .builtin.read_file import ReadFileTool
+    from .builtin.write_file import WriteFileTool
 
     registry = ToolRegistry()
     registry.register(ListDirTool())

@@ -4,24 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .config import ContextConfig
-from ..core.tool_history import RenderMode, ToolExecution, ToolHistory
 from ..llm.types import Message, ToolMessage
+from ..session.types import RenderMode, ToolExecution, ToolHistory
+from .types import ContextPolicy
 
 
 @dataclass
 class ContextBuilder:
     """根据当前上下文需求，决定 Message / ToolHistory 如何呈现给模型。
 
-    TODO: 接入 CompressionManager——按 token 预算决定哪些 ToolExecution 压缩、render_mode 切换。
-    TODO: 读取 session.state / workspace 参与上下文裁剪（Phase 3）。
+    压缩与 token 预算裁剪尚未接入，目前按 ``render_mode`` 渲染工具结果。
     """
 
     render_mode: RenderMode = "summary"
 
     @classmethod
-    def from_config(cls, config: ContextConfig) -> ContextBuilder:
-        return cls(render_mode=config.tool_result_mode)
+    def from_policy(cls, policy: ContextPolicy) -> ContextBuilder:
+        return cls(render_mode=policy.tool_result_mode)
 
     def render_tool_result(self, execution: ToolExecution | None) -> str:
         if execution is None or execution.result is None:

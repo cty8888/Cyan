@@ -1,1 +1,0 @@
-"""Project-wide constants."""

@@ -1,21 +1,4 @@
-"""与厂商 SDK 解耦的内部消息结构。
-
-Agent Loop 只依赖这里的数据类；换任何 OpenAI 兼容后端只需改 ``llm/`` 下的实现。
-
-两个独立的继承体系：
-
-- ``Block``：消息内容的最小单元（文本 / 工具调用 / 工具结果 / 文件引用 / 代码片段），
-  真正的信息都装在这里，``Block`` 不知道、也不关心谁持有它。
-- ``Message``：按角色拆成 ``SystemMessage`` / ``UserMessage`` / ``AssistantMessage`` /
-  ``ToolMessage``，每一种都只是「``role`` + 一组 ``blocks``」，不直接持有任何业务字段——
-  哪怕是 ``ToolMessage`` 的 ``tool_call_id``，也是通过它持有的 ``ToolResultBlock`` 表达，
-  而不是在 ``Message`` 上另开字段。
-
-``ToolResultBlock`` 本身也只留一个 call id：一次工具调用真正的输出内容、是否成功、
-是否被压缩过，属于 Agent 执行工具的事实记录，不属于 Message——那是
-``core.tool_history.ToolHistory`` 管的事。渲染给模型时由 ``context.builder.ContextBuilder``
-反查 ``ToolHistory`` 并按上下文策略选择展示 ``content`` 还是 ``summary``。
-"""
+"""消息、内容块与模型响应的内部类型。"""
 
 from __future__ import annotations
 
@@ -26,7 +9,7 @@ from typing import Any, ClassVar
 
 
 class Role(Enum):
-    """消息发送者角色"""
+    """消息发送者角色。"""
 
     SYSTEM = "system"
     USER = "user"
@@ -35,7 +18,7 @@ class Role(Enum):
 
 
 class BlockType(Enum):
-    """Block 的种类标签"""
+    """内容块的种类标签。"""
 
     TEXT = "text"
     TOOL_CALL = "tool_call"
@@ -44,23 +27,15 @@ class BlockType(Enum):
     CODE = "code"
 
 
-class ToolResultStatus(Enum):
-    """工具执行结果的状态"""
-
-    RUNNING = "running"
-    OK = "ok"
-    ERROR = "error"
-
-
 class Block(ABC):
-    """消息内容的最小不可再拆分单元"""
+    """消息内容的最小不可再拆分单元。"""
 
     type: ClassVar[BlockType]
 
 
 @dataclass
 class TextBlock(Block):
-    """自然语言文本：用户输入、assistant 回复、系统提示均属此类"""
+    """自然语言文本：用户输入、assistant 回复、系统提示均属此类。"""
 
     type: ClassVar[BlockType] = BlockType.TEXT
     text: str
@@ -68,7 +43,7 @@ class TextBlock(Block):
 
 @dataclass
 class ToolCallBlock(Block):
-    """模型发起的一次工具调用,``arguments`` 保持原始 JSON 字符串，由 parser 解析"""
+    """模型发起的一次工具调用。``arguments`` 保持原始 JSON 字符串，由 parser 解析。"""
 
     type: ClassVar[BlockType] = BlockType.TOOL_CALL
     id: str
@@ -87,7 +62,7 @@ class ToolCallBlock(Block):
 class ToolResultBlock(Block):
     """对一次工具调用结果的引用，只留 call id。
 
-    真正的输出内容、执行状态属于 Agent 的事实记录（见 ``core.tool_history``），
+    真正的输出内容、执行状态属于 Agent 的事实记录（见 ``session.types.ToolHistory``），
     不属于 Message——这里只负责「指向哪一次调用」。
     """
 
@@ -107,7 +82,7 @@ class FileBlock(Block):
 
 @dataclass
 class CodeBlock(Block):
-    """独立的代码片段，与 FileBlock 不同——它不必对应磁盘上的真实文件。"""
+    """独立的代码片段，不必对应磁盘上的真实文件。"""
 
     type: ClassVar[BlockType] = BlockType.CODE
     language: str
@@ -116,10 +91,10 @@ class CodeBlock(Block):
 
 @dataclass
 class Message(ABC):
-    """所有消息角色的公共基类：``role`` + 一组 ``blocks``
+    """所有消息角色的公共基类：``role`` + 一组 ``blocks``。
 
-    子类之间的差异只体现在「允许出现哪些 Block」以及「怎么转成 API payload」上，
-    不应该在 Message 层再额外开业务字段——否则又会退化回原来那种什么都能塞的大类。
+    子类只约束「允许出现哪些 Block」以及「怎么转成 API payload」，
+    不在 Message 层再开业务字段。
     """
 
     role: ClassVar[Role]

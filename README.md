@@ -23,7 +23,7 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 
 | 参数 | 说明 |
 | --- | --- |
-| `-p, --prompt` | 执行单个任务后退出 |
+| `-p, --prompt` | 执行单个任务后退出。写入/执行仍会弹出审批（`y`/`n`/`a`）；无人值守请加 `--mode bypass`（黑名单与敏感操作仍生效） |
 | `-w, --workspace` | 工作目录，默认当前目录；Agent 只能访问该目录内的文件 |
 | `-m, --model` | 模型名称，默认 `deepseek-chat` |
 | `--max-iterations` | 单任务最大轮次，默认 30 |
@@ -35,13 +35,13 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 
 ## 工具
 
-| 工具 | 风险等级 | 说明 |
-| --- | --- | --- |
-| `list_dir` | 只读 | 树形列出目录，自动跳过 `.git`、`node_modules` 等 |
-| `read_file` | 只读 | 带行号读取，支持 offset/limit 分段 |
-| `write_file` | 写入 | 整文件写入，自动创建父目录 |
-| `edit_file` | 写入 | 精确字符串替换，要求匹配唯一 |
-| `bash` | 执行 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
+| 工具 | 类型 | 风险 | 说明 |
+| --- | --- | --- | --- |
+| `list_dir` | 只读 | 极低 | 树形列出目录，自动跳过 `.git`、`node_modules` 等 |
+| `read_file` | 只读 | 低 | 带行号读取，支持 offset/limit 分段 |
+| `write_file` | 写入 | 中 | 整文件写入，自动创建父目录 |
+| `edit_file` | 写入 | 中 | 精确字符串替换，要求匹配唯一 |
+| `bash` | 执行 | 高 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
 
 `bash` 每次调用都是独立新进程，不保留环境变量或别名，`export` 不会带到下一次调用；
 但工作目录会在调用之间延续——命令里 `cd` 到哪，下一次调用就从哪继续，越出工作目录会被自动拉回工作目录根。
@@ -53,7 +53,8 @@ system prompt 里会给出本机 Python 解释器的绝对路径，避免模型�
 
 1. **沙箱**：所有路径 `resolve()` 后必须落在工作目录内，`..` 与符号链接逃逸都会被拒绝。
 2. **黑名单**：`rm -rf /`、`sudo`、`mkfs`、`curl | sh` 等致命命令直接拒绝，任何授权都无法绕过。
-3. **分级审批**：只读操作自动放行；写入与执行需确认，可选 `y` 允许 / `n` 拒绝 / `a` 本会话始终允许。
+3. **分级审批**：只读操作自动放行；写入与执行需确认，可选 `y` 允许 / `n` 拒绝 / `a` 本会话始终允许同类操作
+   （写入按目录前缀，执行按命令名，而不是整个工具一次放行）。
    `.env`、`.git/`、私钥等敏感文件的写入强制逐次确认，不受「始终允许」影响。
 
 写操作在确认前会展示完整 diff。
@@ -64,11 +65,13 @@ system prompt 里会给出本机 Python 解释器的绝对路径，避免模型�
 
 ```
 cli/        REPL 与 rich 渲染，消费事件流、处理审批交互
-core/       Agent Loop、会话状态、事件定义、system prompt
+core/       Agent Loop（Runtime + AgentLoop）、事件定义、system prompt
+session/    会话状态、工具执行历史、工作区视图
+context/    把消息历史与工具结果装配成发给模型的格式
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
 tools/      工具契约、注册表、文件系统与 bash 执行工具
-security/   路径沙箱、命令黑名单、敏感资源识别、权限管理与审批协议
-config.py   三级配置覆盖（CLI 参数 > 环境变量 > 默认值）
+security/   路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议
+settings/   按域拆分的运行时设置（CLI 参数 > 环境变量 > 默认值）
 logutil.py  标准库 logging（默认只写文件）
 errors.py   异常体系
 ```
@@ -82,16 +85,17 @@ Agent Loop 是一个 generator：向外 yield 事件，通过 `send()` 接收审
 
 ## 扩展
 
-新增工具：继承 `Tool`，填 `name`/`description`/`risk`/`parameters`，实现 `run()`，
+新增工具：继承 `Tool`，填 `name`/`description`/`capability`/`risk`/`parameters`，实现 `run()`，
 然后在 `tools/registry.py` 的 `build_default_registry()` 里注册一行。JSON Schema 会自动导出给模型。
 
 ## 开发
 
 ```bash
-uv run python tests/smoke.py   # 离线冒烟测试，用假 LLM 驱动完整循环，不访问网络
+uv sync --group dev
+uv run pytest
 ```
 
 ## 开发状态
 
 Phase 1（最小可用闭环）已完成。后续：流式输出与富渲染打磨、上下文压缩与 Memory、
-任务规划与搜索工具、pytest 测试。
+任务规划与搜索工具。

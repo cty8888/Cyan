@@ -1,0 +1,96 @@
+"""bash：执行命令、工作目录延续、超时与截断。"""
+
+from __future__ import annotations
+
+import sys
+
+from coding_agent.settings import ToolLimits
+
+
+def test_echo(env):
+    result = env.registry.execute("bash", {"command": "echo hello"}, env.ctx)
+    assert result.ok
+    assert "hello" in result.content
+
+
+def test_merges_stdout_and_stderr(env):
+    result = env.registry.execute("bash", {"command": "echo out; echo err >&2"}, env.ctx)
+    assert result.ok
+    assert "out" in result.content
+    assert "err" in result.content
+
+
+def test_nonzero_exit_is_failure(env):
+    result = env.registry.execute("bash", {"command": "exit 3"}, env.ctx)
+    assert not result.ok
+    assert "退出码：3" in (result.error or "")
+
+
+def test_timeout(env):
+    result = env.registry.execute("bash", {"command": "sleep 5", "timeout_ms": 200}, env.ctx)
+    assert not result.ok
+    assert "超时" in (result.error or "")
+
+
+def test_can_run_project_python(env, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    command = f'{sys.executable} -c "from pkg.mod import add; print(add(1, 2))"'
+    result = env.registry.execute("bash", {"command": command}, env.ctx)
+    assert result.ok
+    assert "3" in result.content
+
+
+def test_cwd_persists_across_calls(env, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    result = env.registry.execute("bash", {"command": "cd pkg && pwd"}, env.ctx)
+    assert result.ok
+    assert str((tmp_path / "pkg").resolve()) in result.content
+    result = env.registry.execute("bash", {"command": "pwd"}, env.ctx)
+    assert result.ok
+    assert str((tmp_path / "pkg").resolve()) in result.content
+
+
+def test_leaving_workspace_resets_cwd(env, tmp_path):
+    result = env.registry.execute("bash", {"command": "cd / && pwd"}, env.ctx)
+    assert result.ok
+    assert "已重置回工作目录根" in result.content
+    result = env.registry.execute("bash", {"command": "pwd"}, env.ctx)
+    assert result.ok
+    assert str(tmp_path.resolve()) in result.content
+
+
+def test_output_truncation(make_env, tmp_path):
+    env = make_env(tools=ToolLimits(max_tool_output_chars=50))
+    command = f'{sys.executable} -c "print(\'x\' * 500)"'
+    result = env.registry.execute("bash", {"command": command}, env.ctx)
+    assert result.ok
+    assert result.content.rstrip().endswith("...[truncated]")
+
+
+def test_env_does_not_persist(env):
+    env.registry.execute("bash", {"command": "export CA_FLAG=1"}, env.ctx)
+    result = env.registry.execute("bash", {"command": "echo ${CA_FLAG:-unset}"}, env.ctx)
+    assert result.ok
+    assert "unset" in result.content
+
+
+def test_describe_shows_command(env, tmp_path):
+    summary, detail, fmt = env.registry.get("bash").describe(
+        {"command": "pytest -q"}, tmp_path
+    )
+    assert summary == "执行命令"
+    assert detail == "pytest -q"
+    assert fmt == "shell"
+
+
+def test_blocked_command_at_execution_layer(env):
+    result = env.registry.execute("bash", {"command": "sudo ls"}, env.ctx)
+    assert not result.ok
+
+
+def test_missing_command(env):
+    result = env.registry.execute("bash", {}, env.ctx)
+    assert not result.ok
+    assert "缺少必填参数" in (result.error or "")

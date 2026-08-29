@@ -9,7 +9,7 @@ from typing import Any, Callable
 import openai
 from openai import OpenAI
 
-from ..config import Config
+from ..settings import LLMSettings
 from ..errors import (
     LLMAuthError,
     LLMConnectionError,
@@ -31,14 +31,14 @@ class DeepSeekClient(LLMClient):
     ``on_retry`` 用于把重试情况透传到 rich 界面，避免长时间静默等待。
     """
 
-    def __init__(self, config: Config, on_retry: Callable[[int, float, str], None] | None = None):
-        self.model = config.model
-        self._config = config
+    def __init__(self, llm: LLMSettings, on_retry: Callable[[int, float, str], None] | None = None) -> None:
+        self.model = llm.model
+        self._llm = llm
         self._on_retry = on_retry
         self._client = OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            timeout=config.request_timeout,
+            api_key=llm.api_key,
+            base_url=llm.base_url,
+            timeout=llm.request_timeout,
             max_retries=0,  # 重试逻辑由本类自己掌控，便于向用户反馈
         )
 
@@ -50,21 +50,21 @@ class DeepSeekClient(LLMClient):
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self._config.temperature,
+            "temperature": self._llm.temperature,
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
         last_error: LLMError | None = None
-        for attempt in range(self._config.max_retries + 1):
+        for attempt in range(self._llm.max_retries + 1):
             try:
                 return parse_completion(self._client.chat.completions.create(**payload))
             except LLMResponseError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 统一映射为内部异常
                 error = _map_exception(exc)
-                if not error.retryable or attempt == self._config.max_retries:
+                if not error.retryable or attempt == self._llm.max_retries:
                     raise error from exc
                 last_error = error
                 delay = _backoff_delay(attempt)

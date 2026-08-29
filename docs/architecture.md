@@ -14,70 +14,81 @@
 ```
 src/coding_agent/
   __main__.py            # 入口，参数解析
-  config.py              # 配置（env + CLI flag + 默认值三级覆盖）
   errors.py              # 异常体系
   logutil.py             # logging 配置（默认只写文件，不抢 rich 界面）
+  settings/              # 按职责拆开的运行时设置（CLI 参数 > 环境变量 > 默认值）
+    agent.py             # AgentSettings：一次运行的入口（workspace + 各域）
+    loader.py            # load_settings()
+    llm.py               # LLMSettings：模型、地址、超时与重试
+    loop.py              # LoopLimits：轮次 / 失败 / 重复上限
+    tools.py             # ToolLimits：输出与读取截断
+    cli.py               # CliSettings：日志、权限模式、状态目录
   cli/
-    app.py               # REPL 主循环、斜杠命令、Ctrl-C 中断
-    renderer.py          # rich 渲染：Markdown、工具卡片、diff、审批提示
+    app.py               # REPL 主循环、斜杠命令分发
+    commands.py          # CommandRegistry：可扩展的斜杠命令
+    renderer.py          # rich 渲染与界面文案（模式标签、终止原因、审批面板）
   core/
-    agent.py             # Agent 入口，持有 Runtime 驱动 Loop
-    runtime.py           # Runtime：组合 LLMClient / ContextBuilder / ToolExecutor / PermissionManager
-    tool_executor.py     # ToolExecutor：实际执行工具
-    session/             # Session 数据层（metadata / messages / tool_history / state / workspace / permissions / usage / config）
-    tool_history.py      # ToolExecution / ToolHistory 事实记录
-    events.py            # AgentEvent
+    types.py             # AgentEvent / StopReason / AgentStream
+    runtime.py           # Runtime 组装 LLM / 工具 / 权限 / 上下文
+    loop.py              # AgentLoop 驱动任务循环
+    tool_executor.py     # ToolExecutor：实际执行工具（预留 hook 点）
+    prompts.py           # system prompt
+  session/               # Session 数据层（Loop 只通过 Runtime 读写）
+    types.py             # 会话字段、工具执行历史
+    session.py           # Session 门面
+    workspace_access.py  # 工具能触达的受控工作区视图
   context/
+    types.py             # ContextPolicy（展示模式 / token 预算）
     builder.py           # ContextBuilder：装配 wire 格式，决定工具结果展示策略
   llm/
-    types.py             # Role / Block(...) / Message 继承体系(System/User/Assistant/Tool) / LLMResponse
+    types.py             # Role / Block(...) / Message 继承体系 / LLMResponse
     base.py              # LLMClient 抽象
     deepseek.py          # OpenAI 兼容实现（DeepSeek）
-    parser.py            # 模型输出解析：流式 tool_call 分片拼接、参数 JSON 容错
+    parser.py            # 模型输出解析：tool_call 参数 JSON 容错
   tools/
-    base.py              # Tool 抽象基类 + ToolResult + 参数校验
+    types.py             # ToolCapability / RiskLevel / ToolRunResult / ToolContext
+    base.py              # Tool 抽象基类 + 参数校验
     registry.py          # 注册表：schema 导出 + 名称分发 + 执行封装
-    _diff.py             # write_file / edit_file 共用的 diff 生成
-    _process.py          # bash 工具共用的子进程执行辅助
-    list_dir.py
-    read_file.py
-    write_file.py
-    edit_file.py
-    bash.py
+    diff.py              # write_file / edit_file 共用的 diff 生成
+    process.py           # bash 工具共用的子进程执行
+    builtin/             # 每个内置工具一个文件：schema 常量 + 行为实现
+      list_dir.py
+      read_file.py
+      write_file.py
+      edit_file.py
+      bash.py
   security/
-    policy.py            # 路径沙箱、blocked/restricted/sensitive 统一入口
-    security_rules.py    # Blocked / Restricted / Sensitive 路径与命令规则
-    modes.py             # ExecutionMode（ask / agent / yolo）
+    types.py             # PermissionMode / 审批协议 / PermissionOutcome
     permissions.py       # PermissionManager.evaluate() → PermissionOutcome
-    approval.py          # 审批交互协议（y / n / a）
-  context/
-    manager.py           # 上下文装配 + token 预算 + 压缩触发
-    compactor.py         # 历史摘要压缩
-    memory.py            # 项目记忆（AGENTS.md）+ 会话持久化
+    messages.py          # 回喂模型的权限文案（Plan 拒绝、用户拒绝等）
+    paths.py             # 路径沙箱
+    readonly.py          # Plan 模式只读判定、执行头提取（白名单共用）
+    rules.py             # Blocked / Restricted / Sensitive 路径与命令规则
 ```
+
+每个领域包对齐同一骨架：`types.py` 放 enum / dataclass；行为按职责单独成文件；共用函数用具体名字（`paths` / `diff` / `process` / `readonly`），不设 `utils.py`。`settings/` 本身就是按域拆开的 dataclass，不再套一层 types；`cli/` 没有独立数据契约。
 
 ## 3. Agent Loop 与数据流
 
 ```mermaid
 flowchart TD
-    UserInput[用户输入任务] --> Ctx[ContextManager 装配消息]
-    Ctx --> LLM[LLMClient.chat 流式 + tools schema]
-    LLM --> Parse[parser 解析文本增量与 tool_calls]
+    UserInput[用户输入任务] --> Ctx[ContextBuilder 装配消息]
+    Ctx --> LLM[LLMClient.chat + tools schema]
+    LLM --> Parse[parser 解析文本与 tool_calls]
     Parse --> HasTool{有 tool_calls?}
     HasTool -->|否| Done[输出最终回复, 本轮结束]
     HasTool -->|是| Perm[PermissionManager 判断是否需要审批]
     Perm --> NeedAsk{需要用户确认?}
-    NeedAsk -->|否| Exec[Registry 执行工具]
+    NeedAsk -->|否| Exec[Runtime.execute_tool 执行]
     NeedAsk -->|是| Approve[CLI 审批 y/n/a]
     Approve -->|拒绝| Denied[生成 denied 结果回喂模型]
     Approve -->|同意| Exec
-    Exec --> Result[ToolResult 转 tool 消息]
+    Exec --> Result[ToolRunResult 转 tool 消息]
     Denied --> Result
-    Result --> Budget[更新 token 预算, 必要时压缩]
-    Budget --> Ctx
+    Result --> Ctx
 ```
 
-`agent.run(task)` 是一个 **generator**，`yield` 事件给 CLI，审批通过 `send()` 回传结果，从而让内核完全不依赖 `input()`。
+`runtime.run(task)` 是一个 **generator**，`yield` 事件给 CLI，审批通过 `send()` 回传结果，从而让内核完全不依赖 `input()`。
 
 **终止条件**（必须全部实现，缺一会死循环）：
 
@@ -85,7 +96,8 @@ flowchart TD
 - 达到 `max_iterations`（默认 30）
 - 用户 Ctrl-C 中断
 - 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」重复调用
-- token 预算耗尽且压缩后仍超限
+
+token 预算耗尽后压缩属于 Phase 3，当前未实现，不作为本轮终止条件。
 
 ### Message 继承体系 + Block 内容模型 + ToolHistory 事实记录
 
@@ -105,7 +117,7 @@ Block (ABC：type: ClassVar[BlockType])
 ├── FileBlock        # 文件引用（path / start_line / end_line），不携带文件内容
 └── CodeBlock        # 独立代码片段（language / code）
 
-core.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保存与查询）
+session.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保存与查询）
 ├── ToolResult      # content / summary / ref —— 只存数据，提供 has_summary / content_removed / render()
 ├── ToolExecution   # id / tool_name / arguments / status / result / started_at / finished_at / duration / error
 └── ToolHistory     # dict[call_id, ToolExecution]，record() / get()
@@ -120,6 +132,7 @@ context.builder.ContextBuilder（展示策略层，由 Runtime 持有）
 Runtime（执行层，不保存长期状态）
  ├── LLMClient
  ├── ContextBuilder
+ ├── ToolRegistry
  ├── ToolExecutor
  ├── PermissionManager
  └── Session（数据层）
@@ -128,16 +141,16 @@ Session
  ├── metadata      # id / created_at / updated_at / title
  ├── messages        # list[Message]
  ├── tool_history    # ToolHistory
- ├── state           # current_task / plan / current_step / variables / ...
- ├── workspace       # root / cwd / opened_files / modified_files / environment
- ├── permissions     # always_allowed / denied / rules
- ├── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
- ├── config          # 会话级配置占位（SessionConfig）
- ├── context         # tool_result_mode / max_context_tokens（ContextConfig）
- └── messages[0]    # SystemMessage（系统提示词，不在 config 里）
+ ├── state           # current_task / consecutive_tool_failures / recent_calls
+ ├── workspace       # root / cwd / opened_files / modified_files
+ ├── permissions     # permission_mode / always_allowed（write:{目录} / exec:{命令名}）
+ └── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
+
+ContextPolicy（挂在 Runtime 上，不属于 Session）
+ └── tool_result_mode / max_context_tokens
 ```
 
-模型参数（`model` / `temperature`）留在应用级 ``Config``，不属于 Session。
+模型参数（`model` / `temperature`）留在 ``LLMSettings``，不属于 Session。
 
 核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 
@@ -155,9 +168,11 @@ Session
 class Tool(ABC):
     name: str
     description: str
-    params_schema: dict        # JSON Schema，直接喂给 tool calling
-    risk: RiskLevel            # READ / WRITE / EXEC
-    def execute(self, args: dict, ctx: ToolContext) -> ToolResult: ...
+    capability: ToolCapability  # READ / WRITE / EXEC —— 决定模式怎么分流
+    risk: RiskLevel             # MINIMAL … CRITICAL；CRITICAL 强制逐次确认
+    parameters: dict            # JSON Schema，直接喂给 tool calling
+    def describe(self, args, workspace) -> tuple[str, str | None, str]: ...
+    def run(self, ctx: ToolContext, **kwargs) -> ToolRunResult: ...
 ```
 
 `ToolResult(ok, content, error, metadata)`，`content` 是给模型看的纯文本，`metadata` 给 CLI 渲染用（如 diff）。
@@ -173,35 +188,46 @@ MVP 工具集：
   - 每条命令都在独立新进程里跑，没有持久 shell；不保留环境变量或别名，`export` 不影响下一次调用
   - 工作目录会在调用之间延续：给命令追加一段 trailer 脚本，执行结束后打印 `$PWD`，
     解析出来后写回会话状态（`Session.bash_cwd`），下一次调用从那里继续；越出工作目录会被拉回工作目录根
-  - stdout/stderr 合并成一路输出，超过 `max_tool_output_chars`（默认 30000）从尾部截断并加 `...[truncated]`
+  - stdout/stderr 合并成一路输出，超过 `max_tool_output_chars`（默认 30000）时截掉超出的尾部、保留开头，并加 `...[truncated]`
   - system prompt 里写明本机 `sys.executable` 的绝对路径，避免模型在命令里假设存在 `python` 这个命令（很多环境只有 `python3`）
   - 先不做：后台任务、shell 别名加载、环境变量持久化、输出落盘、权限沙箱——等基础跑稳再加
 
 ## 5. 安全模型
 
-三层权限决策链：
+两轴 + 四级规则，由 [`PermissionManager.evaluate()`](src/coding_agent/security/permissions.py) 一次判定：
 
-1. **Layer 1 — Tool.risk**（工具固有能力）：READ / WRITE / EXEC
-2. **Layer 2 — ExecutionMode**（执行模式）：Ask（只读）/ Agent（默认）/ YOLO（宽松）
-3. **Layer 3 — PermissionManager**（单次判定）：ALLOW / DENY / NEED_APPROVAL
+**两轴**（写在每个 `Tool` 上，正交）：
 
-安全规则分级（[`security_rules.py`](src/coding_agent/security/security_rules.py)，write 与 exec 统一）：
+| 轴 | 回答的问题 | 参与判定的方式 |
+| --- | --- | --- |
+| `ToolCapability`（READ / WRITE / EXEC） | 这是读、写还是执行？ | Plan 拒写；AcceptEdits 放行普通写；Bypass 放行普通写/执行 |
+| `RiskLevel`（MINIMAL … CRITICAL） | 这次操作有多危险？ | **CRITICAL 强制逐次确认**，不受模式 / 「始终允许」影响；其余级别用于审批面板展示 |
 
-| 级别 | 处置 |
-|------|------|
-| **Blocked 黑名单** | 永远 DENY（`sudo`、`rm -rf /` 等） |
-| **Restricted 强硬限制** | Agent/YOLO 直接 DENY，不出审批 UI（`git push -f`、写 `.git/` 等） |
-| **Sensitive 敏感** | NEED_APPROVAL + force（`.env`、`pip install` 等） |
-| **Normal 普通** | 由执行模式决定 |
+**四级规则**（[`rules.py`](src/coding_agent/security/rules.py)，write 与 exec 统一；工具 `run()` 里对 Blocked / Restricted 再拦一次，防止有人绕过权限层直接 `execute`）：
 
-**Agent vs YOLO**（Normal 级别）：Agent 模式下普通 write 直接放行、普通 exec 需审批；YOLO 模式下普通 write/exec 均直接放行。Sensitive 两种模式均逐次确认，Restricted/Blocked 均直接拒绝。
+| 级别 | 处置 | 例子 |
+|------|------|------|
+| **Blocked 黑名单** | 永远 DENY，连 Bypass 也不能绕过 | `sudo`、`rm -rf /`、`mkfs`、`curl \| sh` |
+| **Restricted 强硬限制** | 永远 DENY，不出审批 UI | `git push --force`、写入 `.git/` |
+| **Sensitive 敏感** | NEED_APPROVAL + `force=True`，不受「始终允许」/ AcceptEdits / Bypass 影响 | `.env`、私钥、`pip install`、`git push` |
+| **Normal 普通** | 由 `PermissionMode` 决定 | 普通源码写入、`pytest` |
 
-审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许该工具（仅非 force 操作）。用户拒绝后回喂模型换方案。
+**PermissionMode**（Normal 级别）：
+
+| 模式 | 只读 | 普通写入 | 普通执行 |
+|------|------|----------|----------|
+| Plan | 放行 | DENY | 仅放行只读命令（`git status`、`pytest`、`ls` 等，见 `security/readonly.py`） |
+| Default | 放行 | 需审批 | 需审批 |
+| AcceptEdits | 放行 | 直接放行 | 需审批 |
+| Bypass | 放行 | 直接放行 | 直接放行 |
+
+审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按命令名（`exec:pytest` 只放行 `pytest …`，不放行 `touch`）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则，任何工具读写文件时都生效。
 
 组件职责：
 
-1. **SecurityPolicy**：路径沙箱 + `blocked/restricted/sensitive_concern(tool, args)` 统一入口
-2. **PermissionManager**：结合 ExecutionMode 与白名单，产出 `PermissionOutcome`
+1. **`rules.py`**：Blocked / Restricted / Sensitive 规则表
+2. **`PermissionManager`**：结合 PermissionMode、白名单、`RiskLevel.CRITICAL`，产出 `PermissionOutcome`
+3. **工具 `run()`**：对 Blocked / Restricted 再拦一次（`BlockedCommandError` / `SecurityError`）
 
 ## 6. 上下文管理与 Memory
 
@@ -216,14 +242,14 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 ### Phase 1：MVP 闭环（已完成）
 
-- [x] 搭建目录骨架、`config.py`（三级配置覆盖）、`errors.py` 异常体系
+- [x] 搭建目录骨架、`settings/`（按域拆分的三级覆盖）、`errors.py` 异常体系
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
-- [x] tools 层：Tool 基类 + ToolResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
+- [x] tools 层：Tool 基类 + ToolRunResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
 - [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
-- [x] security 层：路径沙箱、命令黑名单、权限管理与审批协议（y/n/a）
-- [x] `core/agent.py` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
+- [x] security 层：路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`readonly.py`）
+- [x] `core/runtime` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环
-- [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线冒烟测试 `tests/smoke.py`
+- [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线测试 `tests/`（pytest）
 - [x] 标准库 logging：事件写入 `.coding_agent/logs/agent.log`（默认不打 stderr）
 
 ### Phase 2：交互体验
@@ -244,10 +270,10 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 ### Phase 5：工程收尾
 
-- [ ] 把 `tests/smoke.py` 的 50 项检查改写为 pytest 用例
+- [x] 把离线测试改写为按模块拆分的 pytest 用例
 - [x] README
 - [ ] 整体打磨
 
 ## 8. 依赖
 
-现有 `openai` / `python-dotenv` / `rich` 已足够，Phase 5 追加 `pytest`。无需引入任何 Agent 框架。
+现有 `openai` / `python-dotenv` / `rich` 已足够，开发依赖为 `pytest`。无需引入任何 Agent 框架。

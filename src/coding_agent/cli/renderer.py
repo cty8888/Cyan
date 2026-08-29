@@ -16,14 +16,28 @@ from rich.prompt import Prompt
 from rich.syntax import Syntax
 from rich.text import Text
 
-from ..config import Config
-from ..core.events import STOP_REASON_TEXT, StopReason
+from ..core.types import StopReason
 from ..logutil import get_logger
-from ..constants.security.mode_labels import MODE_LABELS
-from ..security.approval import ApprovalDecision, ApprovalRequest
-from ..tools.base import ToolRunResult
+from ..security.types import ApprovalDecision, ApprovalRequest, PermissionMode
+from ..settings import AgentSettings
+from ..tools.types import ToolRunResult
 
 logger = get_logger("cli")
+
+MODE_LABELS = {
+    PermissionMode.PLAN: "Plan (只读规划)",
+    PermissionMode.DEFAULT: "Default (默认)",
+    PermissionMode.ACCEPT_EDITS: "AcceptEdits (自动批准编辑)",
+    PermissionMode.BYPASS: "Bypass (跳过普通审批)",
+}
+STOP_REASON_TEXT = {
+    StopReason.COMPLETED: "任务结束",
+    StopReason.MAX_ITERATIONS: "达到最大轮次上限，已停止",
+    StopReason.TOOL_FAILURES: "连续多次工具调用失败，已停止",
+    StopReason.REPEATED_CALLS: "检测到重复的无效调用，已停止",
+    StopReason.USER_ABORT: "已被用户中断",
+    StopReason.FATAL_ERROR: "发生不可恢复的错误，已停止",
+}
 
 _CAPABILITY_LABEL = {
     "read": "只读",
@@ -45,23 +59,28 @@ _DECISION_BY_KEY = {
 
 
 class Renderer:
-    def __init__(self, console: Console | None = None):
+    def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
 
     # ------------------------------------------------------------------ 通用
-    def banner(self, config: Config, tool_names: list[str]) -> None:
+    def banner(
+        self,
+        settings: AgentSettings,
+        tool_names: list[str],
+        permission_mode: PermissionMode,
+    ) -> None:
         lines = [
-            Text.from_markup(f"[bold cyan]Coding Agent[/]  模型 [green]{config.model}[/]"),
+            Text.from_markup(f"[bold cyan]Coding Agent[/]  模型 [green]{settings.llm.model}[/]"),
             Text.from_markup(
-                f"权限模式  [green]{MODE_LABELS[config.permission_mode]}[/]"
+                f"权限模式  [green]{MODE_LABELS[permission_mode]}[/]"
             ),
-            Text.from_markup(f"工作目录  [dim]{config.workspace}[/]"),
+            Text.from_markup(f"工作目录  [dim]{settings.workspace}[/]"),
             Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
-            Text.from_markup(f"日志文件  [dim]{config.log_dir / 'agent.log'}[/]"),
+            Text.from_markup(f"日志文件  [dim]{settings.log_dir / 'agent.log'}[/]"),
         ]
         lines.append(Text.from_markup("[dim]输入任务开始，/help 查看命令，Ctrl-C 中断当前任务[/]"))
         self.console.print(Panel(Text("\n").join(lines), border_style="cyan", padding=(0, 1)))
-        logger.info("启动 模型=%s workspace=%s tools=%s", config.model, config.workspace, ", ".join(tool_names))
+        logger.info("启动 模型=%s workspace=%s tools=%s", settings.llm.model, settings.workspace, ", ".join(tool_names))
 
     def notice(self, message: str, level: str = "info") -> None:
         style = {"error": "bold red", "warning": "yellow", "info": "dim"}.get(level, "dim")
@@ -123,17 +142,20 @@ class Renderer:
         self.console.print(
             Panel(
                 _stack(body),
-                title=f"需要确认 · {capability} · {risk}",
+                title=title,
                 border_style="yellow",
                 padding=(0, 1),
             )
         )
-        logger.info("需要确认 · %s  %s", title, request.summary)
+        logger.info("%s  %s", title, request.summary)
         if request.detail:
             logger.info("详情:\n%s", request.detail)
 
         choices = ["y", "n"] if request.force else ["y", "n", "a"]
-        hint = "y=允许  n=拒绝" + ("" if request.force else "  a=本会话始终允许该工具")
+        hint = "y=允许  n=拒绝"
+        if not request.force:
+            scope = request.always_label or "同类操作"
+            hint += f"  a=本会话始终允许 {scope}"
         self.console.print(f"[dim]{hint}[/]")
 
         try:

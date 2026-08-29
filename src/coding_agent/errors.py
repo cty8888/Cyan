@@ -3,7 +3,7 @@
 划分为两大类：
 
 - ``AgentError`` 的子类中，凡继承 ``ToolError`` 的都是**可预期失败**，会被 Registry
-  捕获并转换成 ``ToolRunResult`` 回喂给模型, 由模型自行决定如何恢复, 不会中断 Agent Loop.
+  捕获并转换成 ``ToolRunResult`` 回喂给模型，由模型自行决定如何恢复，不会中断 Agent Loop。
 - 其余异常属于**不可恢复错误**，会向上冒泡终止当前任务。
 """
 
@@ -16,10 +16,6 @@ class AgentError(Exception):
 
 class ConfigError(AgentError):
     """配置缺失或非法。"""
-
-
-class UserAbort(AgentError):
-    """用户主动中断（Ctrl-C）。"""
 
 
 # --------------------------------------------------------------------------
@@ -54,7 +50,7 @@ class LLMResponseError(LLMError):
 
 
 # --------------------------------------------------------------------------
-# 工具相关: 以下异常都会被转换成 ToolRunResult 回喂模型
+# 工具相关：以下异常都会被转换成 ToolRunResult 回喂模型
 # --------------------------------------------------------------------------
 
 
@@ -79,8 +75,8 @@ class PathOutsideWorkspaceError(SecurityError):
 
 
 class BlockedCommandError(SecurityError):
-    """命中命令黑名单，任何模式下都不允许执行。"""
+    """命中命令黑名单，任何模式下都不允许执行。
 
-
-class ApprovalDeniedError(ToolError):
-    """用户拒绝了本次工具调用。"""
+    ``PermissionManager`` 会先把这类命令判为 ``POLICY_BLOCKED``；工具 ``run()``
+    里再抛一次，作为有人绕过权限层直接 ``execute`` 时的第二道闸。
+    """

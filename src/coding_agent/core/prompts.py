@@ -1,4 +1,4 @@
-"""System prompt 装配。"""
+"""系统提示词装配。"""
 
 from __future__ import annotations
 

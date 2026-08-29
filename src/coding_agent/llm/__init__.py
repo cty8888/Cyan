@@ -1,3 +1,5 @@
+"""模型客户端公共导出。"""
+
 from .base import LLMClient
 from .deepseek import DeepSeekClient
 from .parser import parse_completion, parse_tool_arguments
@@ -15,7 +17,6 @@ from .types import (
     ToolCallBlock,
     ToolMessage,
     ToolResultBlock,
-    ToolResultStatus,
     UserMessage,
     Usage,
 )
@@ -35,7 +36,6 @@ __all__ = [
     "TextBlock",
     "ToolCallBlock",
     "ToolResultBlock",
-    "ToolResultStatus",
     "FileBlock",
     "CodeBlock",
     "Usage",

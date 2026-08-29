@@ -1,4 +1,4 @@
-"""工具契约 —— Tool 基类、结果类型与参数校验。
+"""工具契约 —— Tool 基类与参数校验。
 
 新增工具：继承 ``Tool``，填写 name / description / capability / risk / parameters，实现 ``run``；
 JSON Schema 由 ``to_schema()`` 自动导出。
@@ -8,75 +8,24 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from ..constants.tools.describe import COMPACT_JSON_LIMIT
-from ..constants.tools.schema_types import JSON_SCHEMA_TYPE_MAP
 from ..errors import InvalidToolArgumentsError
-from ..config.tool import ToolConfig
+from .types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+
+COMPACT_JSON_LIMIT = 120
+JSON_SCHEMA_TYPE_MAP: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
 
 if TYPE_CHECKING:
-    from ..core.session import Session
-
-
-class ToolCapability(Enum):
-    """工具操作类型（read / write / exec）。
-    """
-
-    READ = "read"
-    WRITE = "write"
-    EXEC = "exec"
-
-
-class RiskLevel(Enum):
-    """TODO risklevel尚未参与权限系统"""
-
-    MINIMAL = "minimal"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-@dataclass
-class ToolRunResult:
-    """工具单次执行结果.
-
-    ``content`` 回喂模型; ``metadata`` 仅供 CLI 渲染 (如 diff), 不进上下文.
-    """
-
-    ok: bool
-    content: str = ""
-    error: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def success(cls, content: str, **metadata: Any) -> ToolRunResult:
-        return cls(ok=True, content=content, metadata=metadata)
-
-    @classmethod
-    def failure(cls, error: str, **metadata: Any) -> ToolRunResult:
-        return cls(ok=False, error=error, metadata=metadata)
-
-    def to_model_text(self) -> str:
-        if self.ok:
-            return self.content or "(执行成功，无输出)"
-        return f"错误：{self.error}"
-
-
-@dataclass
-class ToolContext:
-    """工具执行时可访问的运行环境。
-
-    TODO: 不要传入整个 Session，改为 workspace 视图 + 受控 mutator，避免工具层穿透数据边界。
-    """
-
-    workspace: Path
-    tool_config: ToolConfig
-    session: Session
+    from ..session import WorkspaceAccess
 
 
 class Tool(ABC):
@@ -103,16 +52,22 @@ class Tool(ABC):
         """校验并填充默认值，返回规范化后的参数。"""
         return validate_args(self.parameters, args, self.name)
 
-    def describe(self, args: dict[str, Any], workspace: Path) -> tuple[str, str | None, str]:
-        """生成审批面板内容：(摘要, 细节, 细节格式)。子类按需覆盖。"""
+    def describe(
+        self,
+        args: dict[str, Any],
+        workspace: Path,
+        workspace_access: WorkspaceAccess | None = None,
+    ) -> tuple[str, str | None, str]:
+        """生成审批面板内容：（摘要、细节、细节格式）。子类按需覆盖。
+
+        ``workspace_access`` 可选：传入时，预览会走与 ``run()`` 相同的前置检查
+        （例如「修改前必须先读过」），避免审批面板展示一份执行时根本不会发生的 diff。
+        """
         return f"{self.name}({_compact_json(args)})", None, "text"
 
     @abstractmethod
     def run(self, ctx: ToolContext, **kwargs: Any) -> ToolRunResult:
-        """执行工具. 可预期失败应抛 ``ToolError`` 子类或返回 ``ToolRunResult.failure``."""
-
-
-# ---------------------------------------------------------------- JSON Schema 校验
+        """执行工具。可预期失败应抛 ``ToolError`` 子类或返回 ``ToolRunResult.failure``。"""
 
 
 def validate_args(schema: dict[str, Any], args: dict[str, Any], tool_name: str = "") -> dict[str, Any]:

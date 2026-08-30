@@ -24,7 +24,7 @@ from coding_agent.llm.types import (
 )
 from coding_agent.session import Session
 
-from .conftest import FakeLLM, drive, make_runtime
+from .conftest import FakeLLM, drive, make_runtime, tool_call
 
 
 def _add_turn(session: Session, user_text: str, call_id: str, tool_output: str) -> None:
@@ -47,6 +47,17 @@ def _three_turns(tmp_path) -> Session:
     return session
 
 
+def _add_assistant_round(session: Session, call_id: str, tool_output: str) -> None:
+    session.add(
+        AssistantMessage.of(
+            tool_calls=[ToolCallBlock(id=call_id, name="read_file", arguments='{"path": "a.py"}')]
+        )
+    )
+    session.start_tool_execution(call_id=call_id, tool_name="read_file", arguments='{"path": "a.py"}')
+    session.finish_tool_execution(call_id=call_id, ok=True, content=tool_output)
+    session.add(ToolMessage.of(call_id))
+
+
 def test_find_keep_from_skips_summary_and_cuts_on_user(tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="sys")
     session.add(SummaryMessage.of("旧摘要"))
@@ -57,6 +68,18 @@ def test_find_keep_from_skips_summary_and_cuts_on_user(tmp_path):
     assert keep_from is not None
     assert isinstance(session.messages[keep_from], UserMessage)
     assert session.messages[keep_from].text == "任务B"
+
+
+def test_find_keep_from_cuts_early_rounds_in_one_task(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "round-0")
+    _add_assistant_round(session, "c1", "round-1")
+    _add_assistant_round(session, "c2", "round-2")
+    keep_from = find_keep_from(session.messages, keep_recent_turns=2)
+    assert keep_from is not None
+    assert isinstance(session.messages[keep_from], AssistantMessage)
+    assert session.messages[keep_from].tool_calls[0].id == "c1"
 
 
 def test_skip_when_not_enough_turns(tmp_path):
@@ -70,6 +93,46 @@ def test_skip_when_not_enough_turns(tmp_path):
 
     assert find_keep_from(session.messages, policy.keep_recent_turns) is None
     assert try_compact(session, boom, policy) is False
+
+
+def test_compact_single_task_keeps_user_and_recent_rounds(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "round-0-unique")
+    _add_assistant_round(session, "c1", "round-1-unique")
+    _add_assistant_round(session, "c2", "round-2-unique")
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("单任务摘要"), usage=Usage(20, 5, 25))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert isinstance(session.messages[0], SystemMessage)
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.messages[1].text == "单任务摘要"
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert len(users) == 1
+    assert users[0].text == "做任务"
+    assert session.tool_history.get("c0") is None
+    assert session.tool_history.get("c1") is not None
+    assert session.tool_history.get("c2") is not None
+
+
+def test_compact_request_truncates_tool_text(tmp_path):
+    session = _three_turns(tmp_path)
+    execution = session.tool_history.get("ca")
+    assert execution is not None and execution.result is not None
+    execution.result.content = "Y" * 40_000
+    captured: list[list[dict]] = []
+
+    def call_llm(messages, tools=None):
+        captured.append(messages)
+        return LLMResponse(message=AssistantMessage.of("摘要"), usage=Usage(8, 4, 12))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    blob = str(captured[0])
+    assert "...[truncated]" in blob
+    assert "Y" * 40_000 not in blob
+    assert "Y" * 100 in blob
 
 
 def test_compact_replaces_dropped_and_deletes_history(tmp_path):
@@ -134,6 +197,18 @@ def test_needs_compact_uses_last_prompt_tokens(tmp_path):
     assert needs_compact(session, policy) is True
 
 
+def test_needs_compact_single_task_when_tools_grow(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "x" * 4000)
+    _add_assistant_round(session, "c1", "y" * 4000)
+    _add_assistant_round(session, "c2", "z" * 4000)
+    policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
+    session.usage.last_prompt_tokens = 50
+    assert find_keep_from(session.messages, policy.keep_recent_turns) is not None
+    assert needs_compact(session, policy) is True
+
+
 def test_needs_compact_when_tools_grew_session(tmp_path):
     """上一轮 prompt 很小，但工具结果已经把当前会话撑过阈值，仍应压缩。"""
     session = _three_turns(tmp_path)
@@ -160,6 +235,10 @@ def test_loop_compacts_before_task_llm(env, tmp_path):
     session.usage.last_prompt_tokens = 200_000
     llm = FakeLLM([AssistantMessage.of("本轮完成。")])
     runtime = make_runtime(env, llm, session)
+    # 默认窗口 256k 时 200_000 已低于触发线；这里收紧副本，专门测「出门前先压」。
+    runtime.compact_policy.max_context_tokens = 2_000
+    runtime.compact_policy.reserve_tokens = 100
+    runtime.compact_policy.trigger_ratio = 0.9
     events, reason = drive(runtime, "任务C")
     assert reason is StopReason.COMPLETED
     assert llm.compact_requests
@@ -191,6 +270,34 @@ def test_loop_compacts_when_session_grew_after_last_call(env, tmp_path):
     assert isinstance(session.messages[1], SummaryMessage)
     notices = [e.message for e in events if isinstance(e, Notice)]
     assert any("正在压缩" in m for m in notices)
+
+
+def test_loop_compacts_during_single_task(env, tmp_path):
+    (tmp_path / "big.txt").write_text("x" * 8000, encoding="utf-8")
+    llm = FakeLLM(
+        [
+            tool_call("read_file", '{"path": "big.txt"}', "r1"),
+            tool_call("read_file", '{"path": "big.txt"}', "r2"),
+            tool_call("read_file", '{"path": "big.txt"}', "r3"),
+            AssistantMessage.of("读完了"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    runtime.compact_policy.max_context_tokens = 2_000
+    runtime.compact_policy.reserve_tokens = 100
+    runtime.compact_policy.trigger_ratio = 0.9
+    events, reason = drive(runtime, "读大文件")
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    assert any(isinstance(m, SummaryMessage) for m in runtime.session.messages)
+    users = [
+        m
+        for m in runtime.session.messages
+        if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)
+    ]
+    assert any(m.text == "读大文件" for m in users)
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("已压缩" in m for m in notices)
 
 
 def test_slash_compact_command(env, tmp_path):

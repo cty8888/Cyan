@@ -8,6 +8,7 @@ from typing import Callable
 from ..core.prompts import COMPACT_SYSTEM_PROMPT
 from ..errors import LLMError
 from ..llm.types import (
+    AssistantMessage,
     LLMResponse,
     Message,
     SummaryMessage,
@@ -16,6 +17,7 @@ from ..llm.types import (
     UserMessage,
 )
 from ..settings.compact import CompactPolicy
+from ..settings.tools import DEFAULT_TOOL_RESULT_CHARS
 from .session import Session
 from .types import ToolHistory
 
@@ -28,23 +30,42 @@ def compact_threshold(policy: CompactPolicy) -> int:
     return int(usable * policy.trigger_ratio)
 
 
-def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | None:
-    """保留段起点：倒数第 ``keep_recent_turns`` 条真正的 UserMessage。
+def _is_real_user(message: Message) -> bool:
+    """真正的用户任务，不含压缩摘要（SummaryMessage 的 role 也是 user）。"""
+    return isinstance(message, UserMessage) and not isinstance(message, SummaryMessage)
 
-    切点落在 User 下标上，避免拆开 tool_call 对。没有可压缩区间时返回 ``None``。
+
+def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | None:
+    """保留段起点：倒数第 ``keep_recent_turns`` 条 AssistantMessage。
+
+    切点落在 Assistant（或其紧前的 User）上，不拆 tool_call 对。
+    同一条用户任务里只要模型轮次多于保留数，就能压掉更早的工具轮。
+    若当前问题还没有 assistant 回复，则退回按用户任务切，兼容多轮交互。
     """
     start = 1 if messages and isinstance(messages[0], SystemMessage) else 0
+    assistant_indices = [
+        index
+        for index, message in enumerate(messages)
+        if index >= start and isinstance(message, AssistantMessage)
+    ]
     user_indices = [
         index
         for index, message in enumerate(messages)
-        if index >= start and isinstance(message, UserMessage) and not isinstance(message, SummaryMessage)
+        if index >= start and _is_real_user(message)
     ]
-    if len(user_indices) <= keep_recent_turns:
-        return None
-    keep_from = user_indices[-keep_recent_turns]
-    if keep_from <= start:
-        return None
-    return keep_from
+
+    if len(assistant_indices) > keep_recent_turns:
+        keep_from = assistant_indices[-keep_recent_turns]
+        if keep_from > start and _is_real_user(messages[keep_from - 1]):
+            keep_from -= 1
+        return keep_from if keep_from > start else None
+
+    if user_indices and len(user_indices) > keep_recent_turns:
+        last_user = user_indices[-1]
+        if not any(index > last_user for index in assistant_indices):
+            keep_from = user_indices[-keep_recent_turns]
+            return keep_from if keep_from > start else None
+    return None
 
 
 def needs_compact(
@@ -110,15 +131,37 @@ def try_compact(session: Session, call_llm: CallLLM, policy: CompactPolicy) -> b
 
 
 def _apply_compact(session: Session, keep_from: int, summary: str, *, has_system: bool) -> None:
-    """用 SummaryMessage 替换被压缩段，并删除对应 tool_history。"""
+    """用 SummaryMessage 替换被压缩段，并删除对应 tool_history。
+
+    切在当前任务内部时，用户那句话会落在被压段里；摘要请求需要它，
+    会话里也必须留下，否则模型丢掉当前任务原文。
+    """
     head: list[Message] = [session.messages[0]] if has_system else []
     dropped_start = 1 if has_system else 0
     dropped = session.messages[dropped_start:keep_from]
+    preserved_user = _user_to_preserve(session.messages, dropped_start, keep_from)
     call_ids = _tool_call_ids(dropped)
-    session.messages[:] = [*head, SummaryMessage.of(summary), *session.messages[keep_from:]]
+    kept: list[Message] = [*head, SummaryMessage.of(summary)]
+    if preserved_user is not None:
+        kept.append(preserved_user)
+    kept.extend(session.messages[keep_from:])
+    session.messages[:] = kept
     for call_id in call_ids:
         session.tool_history.remove(call_id)
     session.metadata.touch()
+
+
+def _user_to_preserve(messages: list[Message], dropped_start: int, keep_from: int) -> UserMessage | None:
+    """被压段若含当前用户任务，返回那条 UserMessage，供写回保留段。"""
+    last_index: int | None = None
+    last_message: UserMessage | None = None
+    for index, message in enumerate(messages):
+        if _is_real_user(message):
+            last_index = index
+            last_message = message
+    if last_index is not None and dropped_start <= last_index < keep_from:
+        return last_message
+    return None
 
 
 def _tool_call_ids(messages: list[Message]) -> list[str]:
@@ -139,7 +182,7 @@ def _message_to_wire(message: Message, tool_history: ToolHistory) -> dict:
 
 
 def _tool_text(tool_history: ToolHistory, message: ToolMessage) -> str:
-    """摘要请求里必须带上工具全文；此时 history 还不能删。"""
+    """摘要请求带上工具正文，但按组窗同一上限截尾，避免总结那次自己先超窗。"""
     block = message.tool_result
     if block is None:
         return ""
@@ -147,5 +190,14 @@ def _tool_text(tool_history: ToolHistory, message: ToolMessage) -> str:
     if execution is None:
         return ""
     if execution.result is not None and execution.result.content:
-        return execution.result.content
-    return execution.error or ""
+        text = execution.result.content
+    else:
+        text = execution.error or ""
+    return _truncate_tool_text(text, DEFAULT_TOOL_RESULT_CHARS)
+
+
+def _truncate_tool_text(text: str, limit: int) -> str:
+    """与组窗同一规则：超限留开头。``limit <= 0`` 表示不截。"""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit] + "...[truncated]"

@@ -216,6 +216,22 @@ def test_alternating_failed_reads_are_not_repeated_calls(make_env):
     assert reason is StopReason.COMPLETED
 
 
+def test_failing_commands_do_not_trip_tool_failures(make_env):
+    env = make_env(loop=LoopLimits(max_consecutive_tool_failures=3, max_iterations=10))
+    llm = FakeLLM(
+        [
+            tool_call("bash", '{"command": "exit 1"}', "b1"),
+            tool_call("bash", '{"command": "exit 2"}', "b2"),
+            tool_call("bash", '{"command": "exit 3"}', "b3"),
+            AssistantMessage.of("测试红了，接着改。"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "跑测试")
+    assert reason is StopReason.COMPLETED
+    assert runtime.session.consecutive_tool_failures == 0
+
+
 def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):
     env = make_env(cli=CliSettings(permission_mode=PermissionMode.PLAN))
     session = Session.create(workspace=tmp_path, system_prompt="", permission_mode=PermissionMode.PLAN)

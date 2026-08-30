@@ -105,3 +105,41 @@
 **改动**：`src/coding_agent/core/loop.py`（`_pair_pending_tool_calls`）、`src/coding_agent/cli/app.py`、`src/coding_agent/cli/renderer.py`
 
 **测试**：`tests/test_loop.py` — `test_interrupt_after_assistant_reply_pairs_tool_calls`
+
+---
+
+## 6. 压缩切点按用户问题数，单次任务压不到
+
+**现象**：一次任务里用户只说一句话，后面全是模型读文件、跑命令。对话体积会涨，但 `needs_compact` 一直是 False，压缩不跑。交互里连问两句也一样；要第三句用户输入才第一次有可压区间。组窗只截单条 30k，超窗后 `LLMError` 直接 `FATAL_ERROR`。架构上对话变瘦只靠 compact，没有滑动窗口，切点错了就等于没有上下文管理。
+
+**原因**：`find_keep_from` 按真正的 `UserMessage` 条数切，默认 `keep_recent_turns = 2`，且必须**严格多于 2 条**才认为有东西可压。体积判断排在切点后面，切点失败时根本轮不到。摘要请求还带着被压段的工具全文，即便切点改对了，总结那次自己也能先超窗。
+
+**修复**：
+
+- 切点改为倒数第 `keep_recent_turns` 条 `AssistantMessage`（紧前若是 User 则一并保留，避免拆开「用户问题 + 第一轮回复」）。同一条用户任务里模型轮次多于保留数，就能压掉更早的工具轮。
+- 当前问题还没有 assistant 回复时，退回按用户任务切，多轮交互行为不变。
+- 切在当前任务内部时，用户那句话会进摘要请求，写回时再插回保留段，避免丢掉当前任务原文。
+- 摘要请求的工具正文按 `DEFAULT_TOOL_RESULT_CHARS` 截尾，与组窗同一把尺子。
+
+**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/settings/compact.py`
+
+**测试**：`tests/test_compact.py` — `test_find_keep_from_cuts_early_rounds_in_one_task`、`test_compact_single_task_keeps_user_and_recent_rounds`、`test_compact_request_truncates_tool_text`、`test_needs_compact_single_task_when_tools_grow`、`test_loop_compacts_during_single_task`
+
+---
+
+## 7. 命令非零退出被当成工具失败，红灯测试掐死任务
+
+**现象**：模型连跑三条失败的 `pytest` / 探测命令，任务被 `TOOL_FAILURES` 终止。用户拒绝、参数解析失败也算在同一条连续失败计数里；bash 把 `exit_code != 0` 写成 `ok=False`，保险丝把「命令红了」和「工具没跑成」绑在一起。
+
+**原因**：Claude Code 的 Bash 是「工具跑完了就算成功，exit code 写在正文里给模型看」。这里 `bash.run` 在超时或非零退出时返回 `ToolRunResult(ok=False)`，`Session.finish_tool_execution` 据此累加 `consecutive_tool_failures`。默认上限 3，同批三条失败命令一轮就会停。
+
+**修复**：
+
+- 非零退出仍 `ok=True`，退出码留在正文和 `metadata.exit_code` 里给模型看。
+- 超时（进程被杀掉、工具没有正常跑完）仍算失败。
+- 连续失败只统计「工具没跑成」：读文件不存在、参数非法、权限拒绝、超时等。红灯测试不再清保险丝，也不再误杀任务。
+- CLI 仍按退出码显示红叉，避免界面看起来像命令成功了。
+
+**改动**：`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
+
+**测试**：`tests/test_bash.py` — `test_nonzero_exit_is_still_ok`；`tests/test_loop.py` — `test_failing_commands_do_not_trip_tool_failures`

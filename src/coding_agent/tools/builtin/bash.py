@@ -85,8 +85,9 @@ class BashTool(Tool):
         content = "\n".join(lines)
 
         metadata = {"exit_code": result.exit_code, "cwd": display_cwd}
-        if result.timed_out or result.exit_code != 0:
-            return ToolRunResult(ok=False, error=content, metadata=metadata)
+        if result.timed_out:
+            # 进程被杀掉，工具没有正常跑完；非零退出则是命令自己的结果，仍算工具成功。
+            return ToolRunResult.failure(content, **metadata)
         return ToolRunResult.success(content, **metadata)
 
     def _update_cwd(self, ctx: ToolContext, cwd_text: str | None) -> str | None:

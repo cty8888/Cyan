@@ -20,10 +20,12 @@ def test_merges_stdout_and_stderr(env):
     assert "err" in result.content
 
 
-def test_nonzero_exit_is_failure(env):
+def test_nonzero_exit_is_still_ok(env):
+    """命令失败是给模型看的结果，不是工具没跑成。"""
     result = env.registry.execute("bash", {"command": "exit 3"}, env.ctx)
-    assert not result.ok
-    assert "退出码：3" in (result.error or "")
+    assert result.ok
+    assert "退出码：3" in result.content
+    assert result.metadata.get("exit_code") == 3
 
 
 def test_timeout(env):

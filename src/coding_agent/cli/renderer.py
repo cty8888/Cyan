@@ -109,7 +109,8 @@ class Renderer:
     def tool_finished(self, name: str, result: ToolRunResult, duration: float) -> None:
         """一行摘要；bash 额外摘几行输出，写文件则附上 diff。"""
         text = result.content if result.ok else (result.error or "执行失败")
-        mark = "[green]✓[/]" if result.ok else "[red]✗[/]"
+        command_failed = result.metadata.get("exit_code") not in (None, 0)
+        mark = "[green]✓[/]" if result.ok and not command_failed else "[red]✗[/]"
         self.console.print(f"  {mark} {_first_line(text)} [dim]({duration:.1f}s)[/]")
         logger.info("%s %s  %s  (%.1fs)", name, "成功" if result.ok else "失败", _first_line(text), duration)
         if not result.ok:

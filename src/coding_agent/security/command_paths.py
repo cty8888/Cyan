@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,7 +14,13 @@ from ..errors import PathOutsideWorkspaceError, SecurityError
 from . import rules
 from .messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
 from .paths import display, resolve_path
-from .shell import split_command_segments
+from .shell import (
+    executable_name,
+    peel_git_globals,
+    split_command_segments,
+    tokenize,
+    unwrap_argv,
+)
 
 _REDIRECT = re.compile(r"(?<!&)(?:\d*)(>>?|<<?)(?!&)\s*([^\s|&;<>]+)")
 _UNRESOLVED = re.compile(r"^\$|/\$\{|\$\{")
@@ -48,11 +53,13 @@ _WRITE_FLAG_NEXT = {
     "curl": frozenset({"-o", "--output"}),
     "wget": frozenset({"-O", "--output-document"}),
     "install": frozenset({"-t", "--target-directory"}),
+    "sort": frozenset({"-o", "--output"}),
 }
 _WRITE_FLAG_EQ = {
     "curl": ("--output=",),
     "wget": ("--output-document=",),
     "install": ("--target-directory=",),
+    "sort": ("--output=",),
 }
 # curl/wget 把本地文件当请求体：-d @.env、--data-binary @file、-T file
 _UPLOAD_AT_FLAGS = frozenset(
@@ -82,9 +89,10 @@ _UPLOAD_FLAG_EQ = {
     ),
     "wget": ("--post-file=",),
 }
-_GIT_DIR_FLAGS = frozenset({"--git-dir", "--work-tree"})
-_GIT_DIR_EQ = ("--git-dir=", "--work-tree=")
 _OPAQUE_HEADS = frozenset({"xargs", "parallel", "awk"})
+_GIT_CONTENT_SUBCOMMANDS = frozenset(
+    {"show", "cat-file", "blame", "diff", "log", "ls-files", "ls-tree"}
+)
 _READ_ARGS = frozenset(
     {
         "cat",
@@ -196,88 +204,157 @@ def reject_unsafe_paths(workspace: Path, command: str, cwd: Path | None = None) 
 
 def written_paths(workspace: Path, command: str, cwd: Path | None = None) -> list[Path]:
     """命令里能看清的写目标，解析为工作区内的绝对路径。"""
-    tracked = cwd or workspace
-    found: list[Path] = []
-    for segment in split_command_segments(command):
-        for raw, kind in _segment_touches(segment):
-            if _unresolved(raw):
-                continue
-            try:
-                resolved = resolve_path(workspace, raw, base=tracked)
-            except Exception:
-                continue
-            if kind == "write":
-                found.append(resolved)
-            if _segment_is_cd(segment):
-                tracked = resolved
-    return found
+    return [
+        path
+        for _relative, kind, path in _walk_resolved(workspace, command, cwd, ignore_outside=True)
+        if kind == "write"
+    ]
 
 
 def _outside_with_cwd_tracking(workspace: Path, command: str, start: Path) -> str | None:
-    cwd = start
-    for segment in split_command_segments(command):
-        for raw, _kind in _segment_touches(segment):
-            if _unresolved(raw):
-                continue
-            try:
-                resolved = resolve_path(workspace, raw, base=cwd)
-            except PathOutsideWorkspaceError as exc:
-                return str(exc)
-            except Exception:
-                continue
-            if _segment_is_cd(segment):
-                cwd = resolved
+    try:
+        list(_walk_resolved(workspace, command, start, ignore_outside=False))
+    except PathOutsideWorkspaceError as exc:
+        return str(exc)
     return None
 
 
 def _resolved_touches(workspace: Path, command: str, start: Path) -> list[tuple[str, str]]:
-    cwd = start
-    found: list[tuple[str, str]] = []
+    return [
+        (relative, kind)
+        for relative, kind, _path in _walk_resolved(workspace, command, start, ignore_outside=True)
+    ]
+
+
+def _walk_resolved(
+    workspace: Path,
+    command: str,
+    start: Path | None,
+    *,
+    ignore_outside: bool,
+) -> list[tuple[str, str, Path]]:
+    """按段解析路径。``env -C`` / ``git -C`` 只影响该段内层命令，不影响重定向。"""
+    cwd = start or workspace
+    found: list[tuple[str, str, Path]] = []
     for segment in split_command_segments(command):
-        for raw, kind in _segment_touches(segment):
-            if _unresolved(raw):
-                continue
-            try:
-                resolved = resolve_path(workspace, raw, base=cwd)
-            except PathOutsideWorkspaceError:
-                continue
-            except Exception:
-                continue
-            found.append((display(workspace, resolved), kind))
-            if _segment_is_cd(segment):
-                cwd = resolved
+        plan = _plan_segment(segment)
+        resolved_here: list[tuple[str, str, Path]] = []
+
+        def add(raw: str, kind: str, base: Path) -> Path | None:
+            item = _try_resolve(workspace, raw, base, ignore_outside=ignore_outside)
+            if item is None:
+                return None
+            resolved_here.append((item[0], kind, item[1]))
+            return item[1]
+
+        for raw, kind in plan.shell_touches:
+            add(raw, kind, cwd)
+
+        proc_base = cwd
+        if plan.proc_chdir:
+            resolved = add(plan.proc_chdir, "read", cwd)
+            if resolved is not None:
+                proc_base = resolved
+
+        if plan.git_chdir:
+            resolved = add(plan.git_chdir, "read", proc_base)
+            if resolved is not None:
+                proc_base = resolved
+
+        for raw, kind in plan.inner_touches:
+            add(raw, kind, proc_base)
+
+        found.extend(resolved_here)
+        if plan.is_cd:
+            for _relative, kind, path in resolved_here:
+                if kind == "read":
+                    cwd = path
+                    break
     return found
 
 
+def _try_resolve(
+    workspace: Path, raw: str, base: Path, *, ignore_outside: bool
+) -> tuple[str, Path] | None:
+    """解析成功返回 ``(展示路径, 绝对路径)``；区外在 ``ignore_outside`` 时跳过。"""
+    if _unresolved(raw):
+        return None
+    try:
+        resolved = resolve_path(workspace, raw, base=base)
+    except PathOutsideWorkspaceError:
+        if ignore_outside:
+            return None
+        raise
+    except Exception:
+        return None
+    return display(workspace, resolved), resolved
+
+
 def _analyze_segment(segment: str, analysis: CommandPathAnalysis) -> None:
-    for raw, kind in _segment_touches(segment):
+    plan = _plan_segment(segment)
+    for raw, kind in plan.shell_touches:
         analysis.touches.append(PathTouch(raw=raw, kind=kind))
-    tokens = _tokenize(segment)
-    if tokens and tokens[0] in {"printenv", "env"} and _is_bare_env(tokens):
+    if plan.proc_chdir:
+        analysis.touches.append(PathTouch(raw=plan.proc_chdir, kind="read"))
+    if plan.git_chdir:
+        analysis.touches.append(PathTouch(raw=plan.git_chdir, kind="read"))
+    for raw, kind in plan.inner_touches:
+        analysis.touches.append(PathTouch(raw=raw, kind=kind))
+    tokens = tokenize(segment)
+    if tokens and executable_name(tokens[0]) in {"printenv", "env"} and _is_bare_env(tokens):
         analysis.dumps_env = True
 
 
-def _segment_touches(segment: str) -> list[tuple[str, str]]:
-    touches: list[tuple[str, str]] = []
+@dataclass
+class _SegmentPlan:
+    """一段命令里：重定向跟 shell cwd，内层路径跟 ``env -C`` / ``git -C``。"""
+
+    shell_touches: list[tuple[str, str]]
+    proc_chdir: str | None
+    git_chdir: str | None
+    inner_touches: list[tuple[str, str]]
+    is_cd: bool
+
+
+def _plan_segment(segment: str) -> _SegmentPlan:
+    shell_touches: list[tuple[str, str]] = []
     for match in _REDIRECT.finditer(segment):
         op, target = match.group(1), match.group(2)
         if target.startswith("&"):
             continue
-        kind = "write" if ">" in op else "read"
-        touches.append((target, kind))
+        shell_touches.append((target, "write" if ">" in op else "read"))
 
-    tokens = _tokenize(segment)
+    tokens = tokenize(segment)
+    is_cd = bool(tokens) and tokens[0] == "cd"
+    if is_cd:
+        target = tokens[-1] if len(tokens) > 1 else str(Path.home())
+        shell_touches.append((target, "read"))
+        return _SegmentPlan(shell_touches, None, None, [], True)
+
+    unwrapped = unwrap_argv(tokens)
+    inner = unwrapped.tokens
+    git_chdir: str | None = None
+    inner_touches: list[tuple[str, str]] = []
+    if inner and executable_name(inner[0]) == "git":
+        peeled = peel_git_globals(inner)
+        git_chdir = peeled.chdir
+        inner_touches.extend(
+            (path, kind) for path, kind in peeled.touches if path != peeled.chdir
+        )
+        inner_touches.extend((path, "read") for path in _git_content_paths(peeled.argv))
+    elif inner:
+        inner_touches.extend(_argv_touches(inner))
+    return _SegmentPlan(shell_touches, unwrapped.chdir, git_chdir, inner_touches, False)
+
+
+def _argv_touches(tokens: list[str]) -> list[tuple[str, str]]:
+    """内层命令（已剥包装）碰到的路径。"""
     if not tokens:
-        return touches
-    head, *rest = tokens
-    if head == "cd":
-        target = rest[-1] if rest else str(Path.home())
-        touches.append((target, "read"))
-        return touches
-
+        return []
+    touches: list[tuple[str, str]] = []
+    head = executable_name(tokens[0])
     touches.extend((path, "write") for path in _write_flag_paths(tokens))
     touches.extend((path, kind) for path, kind in _dd_paths(tokens))
-    touches.extend((path, "write") for path in _git_dir_paths(tokens))
     touches.extend((path, "read") for path in _upload_paths(tokens))
 
     paths = _path_args(tokens)
@@ -288,16 +365,75 @@ def _segment_touches(segment: str) -> list[tuple[str, str]]:
         touches.append((paths[-1], "write"))
     elif head == "sed" and _sed_is_inplace(tokens):
         touches.extend((path, "write") for path in paths)
-    elif _executable_name(head) in _INPLACE_INTERPRETERS and _inplace_rewrite(tokens):
+    elif head in _INPLACE_INTERPRETERS and _inplace_rewrite(tokens):
         touches.extend((path, "write") for path in paths)
     elif head in _READ_ARGS:
         touches.extend((path, "read") for path in paths)
     return touches
 
 
+def _git_content_paths(argv: list[str]) -> list[str]:
+    """``git show HEAD:.env`` / ``git blame id_rsa`` 这类能打出文件内容的参数。"""
+    if not argv or argv[0] not in _GIT_CONTENT_SUBCOMMANDS:
+        return []
+    paths: list[str] = []
+    skip_next = False
+    for index, token in enumerate(argv[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            for extra in argv[index + 1 :]:
+                path = _git_path_from_token(extra, after_dash_dash=True)
+                if path:
+                    paths.append(path)
+            break
+        if token.startswith("-"):
+            if token in {"-p", "--pretty", "-s", "--stat", "-w", "--color"}:
+                continue
+            skip_next = token in {"-t", "--type", "-o"} or (
+                token.startswith("-") and not token.startswith("--") and len(token) == 2
+            )
+            continue
+        path = _git_path_from_token(token, after_dash_dash=False)
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _git_path_from_token(token: str, *, after_dash_dash: bool) -> str | None:
+    if not token or token.startswith("-"):
+        return None
+    if ":" in token:
+        suffix = token.rsplit(":", 1)[-1]
+        return suffix or None
+    if after_dash_dash or _looks_like_path(token):
+        return token
+    return None
+
+
+def _looks_like_path(token: str) -> bool:
+    name = token.rsplit("/", 1)[-1].lower()
+    if token.startswith(".") or "/" in token or "\\" in token:
+        return True
+    return name in {
+        ".env",
+        ".envrc",
+        ".npmrc",
+        ".netrc",
+        "credentials",
+        "credentials.json",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "authorized_keys",
+        "kubeconfig",
+    }
+
+
 def _dd_paths(tokens: list[str]) -> list[tuple[str, str]]:
     """抽出 ``dd if=`` / ``of=``。"""
-    if not tokens or _executable_name(tokens[0]) != "dd":
+    if not tokens or executable_name(tokens[0]) != "dd":
         return []
     paths: list[tuple[str, str]] = []
     for token in tokens[1:]:
@@ -308,36 +444,13 @@ def _dd_paths(tokens: list[str]) -> list[tuple[str, str]]:
     return paths
 
 
-def _git_dir_paths(tokens: list[str]) -> list[str]:
-    """抽出 ``git --git-dir`` / ``--work-tree``，避免写到工作区外。"""
-    if not tokens or tokens[0] != "git":
-        return []
-    paths: list[str] = []
-    skip_next = False
-    for index, token in enumerate(tokens[1:], start=1):
-        if skip_next:
-            skip_next = False
-            continue
-        if token in _GIT_DIR_FLAGS:
-            if index + 1 < len(tokens):
-                paths.append(tokens[index + 1])
-                skip_next = True
-            continue
-        for prefix in _GIT_DIR_EQ:
-            if token.startswith(prefix):
-                value = token[len(prefix) :]
-                if value:
-                    paths.append(value)
-                break
-    return paths
-
-
 def _upload_paths(tokens: list[str]) -> list[str]:
     """抽出 ``curl -d @file`` / ``wget --post-file`` 读到的本地文件。"""
     if not tokens:
         return []
-    next_flags = _UPLOAD_FLAG_NEXT.get(tokens[0])
-    eq_prefixes = _UPLOAD_FLAG_EQ.get(tokens[0], ())
+    head = executable_name(tokens[0])
+    next_flags = _UPLOAD_FLAG_NEXT.get(head)
+    eq_prefixes = _UPLOAD_FLAG_EQ.get(head, ())
     if not next_flags and not eq_prefixes:
         return []
     paths: list[str] = []
@@ -380,16 +493,13 @@ def _inplace_rewrite(tokens: list[str]) -> bool:
     return False
 
 
-def _executable_name(token: str) -> str:
-    return Path(token).name
-
-
 def _write_flag_paths(tokens: list[str]) -> list[str]:
-    """抽出 ``curl -o FILE`` / ``wget -O FILE`` / ``install -t DIR`` 的写目标。"""
+    """抽出 ``curl -o FILE`` / ``wget -O FILE`` / ``sort -o FILE`` 的写目标。"""
     if not tokens:
         return []
-    next_flags = _WRITE_FLAG_NEXT.get(tokens[0])
-    eq_prefixes = _WRITE_FLAG_EQ.get(tokens[0], ())
+    head = executable_name(tokens[0])
+    next_flags = _WRITE_FLAG_NEXT.get(head)
+    eq_prefixes = _WRITE_FLAG_EQ.get(head, ())
     if not next_flags and not eq_prefixes:
         return []
     paths: list[str] = []
@@ -441,17 +551,11 @@ def _path_args(tokens: list[str]) -> list[str]:
     return paths
 
 
-def _tokenize(segment: str) -> list[str]:
-    try:
-        return shlex.split(segment)
-    except ValueError:
-        return segment.split()
-
-
 def _is_bare_env(tokens: list[str]) -> bool:
-    if tokens[0] == "printenv":
+    name = executable_name(tokens[0])
+    if name == "printenv":
         return True
-    if tokens[0] != "env":
+    if name != "env":
         return False
     rest = tokens[1:]
     i = 0
@@ -478,17 +582,17 @@ _RECURSIVE_GREP_FLAGS = frozenset({"-r", "-R", "--recursive"})
 
 
 def _is_pytest_module(tokens: list[str]) -> bool:
-    return _executable_name(tokens[0]) in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]
+    return executable_name(tokens[0]) in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]
 
 
 def _is_opaque(command: str) -> bool:
     if any(pattern.search(command) for pattern in _OPAQUE_PATTERNS):
         return True
     for segment in split_command_segments(command):
-        tokens = _tokenize(segment)
+        tokens = unwrap_argv(tokenize(segment)).tokens
         if not tokens:
             continue
-        head = _executable_name(tokens[0])
+        head = executable_name(tokens[0])
         if head in _OPAQUE_HEADS:
             return True
         if head in _INTERPRETER_NAMES and not _is_pytest_module(tokens):
@@ -502,16 +606,20 @@ _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 def _is_unbounded_read(command: str) -> bool:
     """通配或递归搜索可能扫到 .env / 密钥，不能当「看清了路径的只读」。"""
     for segment in split_command_segments(command):
-        tokens = _tokenize(segment)
+        tokens = unwrap_argv(tokenize(segment)).tokens
         if not tokens:
             continue
+        if executable_name(tokens[0]) == "git":
+            peeled = peel_git_globals(tokens)
+            if peeled.argv and peeled.argv[0] == "grep":
+                return True
         head, *rest = tokens
-        if _executable_name(head) in _RECURSIVE_SEARCH_HEADS:
+        if executable_name(head) in _RECURSIVE_SEARCH_HEADS:
             return True
-        if _executable_name(head) in _GREP_HEADS and _has_recursive_grep_flag(rest):
+        if executable_name(head) in _GREP_HEADS and _has_recursive_grep_flag(rest):
             return True
         unquoted = _QUOTED.sub(" ", segment)
-        unquoted_tokens = _tokenize(unquoted)
+        unquoted_tokens = tokenize(unquoted)
         if any(_is_glob_token(token) for token in unquoted_tokens[1:]):
             return True
     return False
@@ -534,8 +642,3 @@ def _is_glob_token(token: str) -> bool:
 
 def _unresolved(raw: str) -> bool:
     return bool(_UNRESOLVED.search(raw))
-
-
-def _segment_is_cd(segment: str) -> bool:
-    tokens = _tokenize(segment)
-    return bool(tokens) and tokens[0] == "cd"

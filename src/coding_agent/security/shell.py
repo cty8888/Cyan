@@ -1,9 +1,17 @@
-"""Shell 命令分析：Plan 模式只读判定，以及执行头提取（白名单共用）。"""
+"""Shell 命令分析：切段、包装展开、Plan 只读判定、执行头提取。
+
+白名单、只读、路径抽取共用这里的切段和展开结果：
+一段命令先剥 ``env`` / ``timeout`` 等前缀，再认 ``git -C`` 这类全局选项，
+最后才看真正的命令头。复合命令按 ``&&`` / ``||`` / ``;`` / ``|`` / 换行切段，
+每段各自判定，不能拿第一段的头去放行整串。
+"""
 
 from __future__ import annotations
 
 import re
 import shlex
+from dataclasses import dataclass
+from pathlib import Path
 
 # bash 把换行和 ; 同级当命令分隔符。只切 && || ; | 时，
 # ``cd /tmp\\necho x > a`` 会当成一段，相对路径按工作区解析，实际写到 /tmp。
@@ -25,6 +33,7 @@ _SIMPLE_READONLY_BINARIES = frozenset(
 
 _FIND_DANGEROUS_FLAGS = frozenset({"-delete", "-exec", "-execdir", "-fprintf", "-fls", "-ok", "-okdir"})
 _SED_INPLACE_FLAGS = frozenset({"-i", "--in-place"})
+_SORT_OUTPUT_FLAGS = frozenset({"-o", "--output"})
 
 # git 子命令：本身就是只读操作，不需要再看参数。
 _GIT_READONLY_SUBCOMMANDS = frozenset(
@@ -35,6 +44,36 @@ _GIT_READONLY_SUBCOMMANDS = frozenset(
     }
 )
 
+_ENV_VALUE_FLAGS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
+_TIMEOUT_VALUE_FLAGS = frozenset({"-k", "--kill-after", "-s", "--signal"})
+_STDBUF_VALUE_FLAGS = frozenset({"-i", "-o", "-e"})
+_GIT_CHDIR_FLAGS = frozenset({"-C", "--work-tree"})
+_GIT_DIR_FLAGS = frozenset({"--git-dir"})
+_GIT_CONFIG_FLAGS = frozenset({"-c", "--namespace", "--config-env", "--super-prefix", "--exec-path"})
+_GIT_CHDIR_EQ = ("--work-tree=",)
+_GIT_DIR_EQ = ("--git-dir=",)
+_GIT_CONFIG_EQ = ("--namespace=", "--config-env=", "--super-prefix=", "--exec-path=")
+
+
+@dataclass(frozen=True)
+class UnwrappedArgv:
+    """剥掉 ``env`` / ``timeout`` 等前缀之后的 argv。
+
+    ``chdir`` 是 ``env -C`` / ``--chdir`` 留下的进程工作目录，相对外层 shell cwd。
+    """
+
+    tokens: list[str]
+    chdir: str | None = None
+
+
+@dataclass(frozen=True)
+class GitGlobals:
+    """``git`` 全局选项剥完之后剩下的子命令 argv。"""
+
+    argv: list[str]
+    chdir: str | None = None
+    touches: tuple[tuple[str, str], ...] = ()
+
 
 def split_command_segments(command: str) -> list[str]:
     """按 ``&&`` / ``||`` / ``;`` / ``|`` / 换行切开，去掉分隔符本身。"""
@@ -43,6 +82,136 @@ def split_command_segments(command: str) -> list[str]:
         for seg in _SPLIT_OPERATORS.split(command)
         if seg.strip() and seg not in _SEPARATOR_TOKENS
     ]
+
+
+def tokenize(segment: str) -> list[str]:
+    """把一段命令拆成 argv；引号不配对时退回空白切分。"""
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def executable_name(token: str) -> str:
+    """``/usr/bin/env`` → ``env``，供包装命令识别。"""
+    return Path(token).name
+
+
+def unwrap_argv(tokens: list[str]) -> UnwrappedArgv:
+    """剥 ``env`` / ``timeout`` / ``nice`` 等前缀，露出真正要执行的命令。
+
+    剥不干净（裸 ``env``、缺 duration 的 ``timeout``）就停，tokens 保持原样。
+    """
+    current = list(tokens)
+    chdir: str | None = None
+    while current:
+        name = executable_name(current[0])
+        if name == "env":
+            inner, env_chdir = _peel_env(current)
+            if env_chdir:
+                chdir = env_chdir
+            if inner is None:
+                return UnwrappedArgv(current, chdir)
+            current = inner
+            continue
+        if name == "timeout":
+            inner = _peel_timeout(current)
+            if inner is None:
+                break
+            current = inner
+            continue
+        if name == "nice":
+            inner = _peel_nice(current)
+            if inner is None:
+                break
+            current = inner
+            continue
+        if name == "stdbuf":
+            inner = _peel_stdbuf(current)
+            if inner is None:
+                break
+            current = inner
+            continue
+        if name == "command":
+            inner = _peel_command_wrapper(current)
+            if inner is None:
+                break
+            current = inner
+            continue
+        if name in {"nohup", "time"}:
+            inner = current[1:]
+            if not inner:
+                break
+            current = inner
+            continue
+        break
+    return UnwrappedArgv(current, chdir)
+
+
+def peel_git_globals(tokens: list[str]) -> GitGlobals:
+    """剥 ``git -C`` / ``--git-dir`` / ``--work-tree`` / ``-c``，露出子命令。"""
+    if not tokens or executable_name(tokens[0]) != "git":
+        return GitGlobals(argv=list(tokens))
+
+    chdir: str | None = None
+    touches: list[tuple[str, str]] = []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _GIT_CHDIR_FLAGS:
+            if index + 1 >= len(tokens):
+                break
+            value = tokens[index + 1]
+            chdir = value
+            touches.append((value, "read"))
+            index += 2
+            continue
+        if token in _GIT_DIR_FLAGS:
+            if index + 1 >= len(tokens):
+                break
+            touches.append((tokens[index + 1], "write"))
+            index += 2
+            continue
+        if token in _GIT_CONFIG_FLAGS:
+            index += 2 if index + 1 < len(tokens) else 1
+            continue
+        matched_eq = False
+        for prefix in _GIT_CHDIR_EQ:
+            if token.startswith(prefix):
+                value = token[len(prefix) :]
+                if value:
+                    chdir = value
+                    touches.append((value, "read"))
+                matched_eq = True
+                break
+        if matched_eq:
+            index += 1
+            continue
+        for prefix in _GIT_DIR_EQ:
+            if token.startswith(prefix):
+                value = token[len(prefix) :]
+                if value:
+                    touches.append((value, "write"))
+                matched_eq = True
+                break
+        if matched_eq:
+            index += 1
+            continue
+        for prefix in _GIT_CONFIG_EQ:
+            if token.startswith(prefix):
+                matched_eq = True
+                break
+        if matched_eq:
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    return GitGlobals(argv=tokens[index:], chdir=chdir, touches=tuple(touches))
 
 
 def is_readonly_command(command: str) -> bool:
@@ -61,21 +230,32 @@ def is_readonly_command(command: str) -> bool:
 
 
 def command_head(command: str) -> str:
-    """命令的执行头：第一个 token；``python -m pytest`` / ``git status`` 视为一个整体。"""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    """一段命令的执行头。先展开包装，``python -m pytest`` / ``git status`` 视为一个整体。
+
+    复合命令应先 ``split_command_segments`` 再逐段调用；对本函数传入整串时，
+    ``&&`` 只是普通 token，结果仍是第一段的头——白名单不能依赖这一点。
+    """
+    tokens = unwrap_argv(tokenize(command)).tokens
     if not tokens:
         return ""
     if tokens[0] in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]:
         return "python -m pytest"
-    if tokens[0] == "git":
-        for token in tokens[1:]:
-            if not token.startswith("-"):
-                return f"git {token}"
-        return "git"
+    if executable_name(tokens[0]) == "git":
+        peeled = peel_git_globals(tokens)
+        if not peeled.argv:
+            return "git"
+        return f"git {peeled.argv[0]}"
     return tokens[0]
+
+
+def command_heads(command: str) -> list[str]:
+    """复合命令里每一段的执行头，供白名单按段核对。"""
+    heads: list[str] = []
+    for segment in split_command_segments(command):
+        head = command_head(segment)
+        if head:
+            heads.append(head)
+    return heads
 
 
 def _is_readonly_segment(segment: str) -> bool:
@@ -84,27 +264,141 @@ def _is_readonly_segment(segment: str) -> bool:
     if re.search(r">(?!&)", segment):
         return False  # 文件写重定向（> / >> / 2> file）；2>&1 这种 fd 合并允许
 
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        return False
+    tokens = tokenize(segment)
     if not tokens:
         return False
     if "&" in tokens:
         return False  # 后台执行，脱离了本次判定能追踪的范围
 
+    unwrapped = unwrap_argv(tokens)
+    tokens = unwrapped.tokens
+    if not tokens:
+        return False
+
     head, *rest = tokens
-    if head == "git":
+    name = executable_name(head)
+    if name == "git":
         return _is_readonly_git(rest)
-    if head == "env":
+    if name == "env":
         return _is_readonly_env(rest)
     if command_head(segment) == "python -m pytest":
         return True
-    if head == "find":
+    if name == "find":
         return not any(flag in _FIND_DANGEROUS_FLAGS for flag in rest)
-    if head == "sed":
-        return not any(flag in _SED_INPLACE_FLAGS for flag in rest)
-    return head in _SIMPLE_READONLY_BINARIES
+    if name == "sed":
+        return not any(flag in _SED_INPLACE_FLAGS or flag.startswith("-i") for flag in rest)
+    if name == "sort":
+        return not _sort_writes(rest)
+    return name in _SIMPLE_READONLY_BINARIES
+
+
+def _sort_writes(rest: list[str]) -> bool:
+    """``sort -o FILE`` / ``--output=FILE`` 会写文件，不能当只读。"""
+    for token in rest:
+        if token in _SORT_OUTPUT_FLAGS or token.startswith("--output="):
+            return True
+    return False
+
+
+def _peel_env(tokens: list[str]) -> tuple[list[str] | None, str | None]:
+    """返回 ``(内层命令, -C 目录)``。裸 ``env`` 的内层是 ``None``。"""
+    chdir: str | None = None
+    index = 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            inner = tokens[index + 1 :]
+            return (inner or None, chdir)
+        if arg in {"-C", "--chdir"}:
+            if index + 1 >= len(tokens):
+                return None, chdir
+            chdir = tokens[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--chdir="):
+            chdir = arg[len("--chdir=") :]
+            index += 1
+            continue
+        if arg in _ENV_VALUE_FLAGS:
+            index += 2
+            continue
+        if arg.startswith("-") and not arg.startswith("-="):
+            index += 1
+            continue
+        if "=" in arg:
+            index += 1
+            continue
+        return tokens[index:], chdir
+    return None, chdir
+
+
+def _peel_timeout(tokens: list[str]) -> list[str] | None:
+    index = 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            inner = tokens[index + 1 :]
+            return inner or None
+        if arg in _TIMEOUT_VALUE_FLAGS:
+            index += 2
+            continue
+        if arg.startswith("--kill-after=") or arg.startswith("--signal="):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        # 下一个非选项是 duration，再后面才是命令
+        inner = tokens[index + 1 :]
+        return inner or None
+    return None
+
+
+def _peel_nice(tokens: list[str]) -> list[str] | None:
+    rest = tokens[1:]
+    if not rest:
+        return None
+    if rest[0] in {"-n", "--adjustment"}:
+        inner = rest[2:]
+        return inner or None
+    if rest[0].startswith("-") and rest[0][1:].lstrip("+-").isdigit():
+        inner = rest[1:]
+        return inner or None
+    return rest
+
+
+def _peel_stdbuf(tokens: list[str]) -> list[str] | None:
+    index = 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            inner = tokens[index + 1 :]
+            return inner or None
+        if arg in _STDBUF_VALUE_FLAGS:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return tokens[index:]
+    return None
+
+
+def _peel_command_wrapper(tokens: list[str]) -> list[str] | None:
+    index = 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            inner = tokens[index + 1 :]
+            return inner or None
+        if arg in {"-p", "-v", "-V"}:
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return tokens[index:]
+    return None
 
 
 def _is_readonly_env(rest: list[str]) -> bool:
@@ -112,22 +406,10 @@ def _is_readonly_env(rest: list[str]) -> bool:
 
     否则 ``env FOO=1 touch x`` 会被当成只读白名单命令，Plan 模式下直接放行。
     """
-    i = 0
-    while i < len(rest):
-        arg = rest[i]
-        if arg == "--":
-            return _is_readonly_argv(rest[i + 1 :]) if rest[i + 1 :] else True
-        if arg in {"-u", "--unset", "-C", "--chdir"}:
-            i += 2
-            continue
-        if arg.startswith("-") and not arg.startswith("-="):
-            i += 1
-            continue
-        if "=" in arg:
-            i += 1
-            continue
-        return _is_readonly_argv(rest[i:])
-    return True  # 裸 `env` / 只有赋值，相当于打印环境变量
+    inner, _chdir = _peel_env(["env", *rest])
+    if inner is None:
+        return True
+    return _is_readonly_argv(inner)
 
 
 def _is_readonly_argv(tokens: list[str]) -> bool:
@@ -138,9 +420,10 @@ def _is_readonly_argv(tokens: list[str]) -> bool:
 
 
 def _is_readonly_git(rest: list[str]) -> bool:
-    if not rest:
+    peeled = peel_git_globals(["git", *rest])
+    if not peeled.argv:
         return False  # 裸 `git` 没有子命令，没有意义，保守拒绝
-    subcommand, *args = rest
+    subcommand, *args = peeled.argv
     if subcommand in _GIT_READONLY_SUBCOMMANDS:
         return True
     handler = _GIT_CONDITIONAL_READONLY.get(subcommand)

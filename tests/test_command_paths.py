@@ -210,6 +210,79 @@ def test_find_is_unbounded(tmp_path):
 def test_command_head_includes_git_subcommand():
     assert command_head("git status") == "git status"
     assert command_head("git commit -m x") == "git commit"
+    assert command_head("git -C /tmp status") == "git status"
+    assert command_head("env FOO=1 pytest -q") == "pytest"
+    assert command_head("timeout 5 pytest") == "pytest"
+
+
+def test_sort_output_is_write():
+    analysis = analyze_command("sort -o out.txt in.txt")
+    assert any(touch.raw == "out.txt" and touch.kind == "write" for touch in analysis.touches)
+    assert is_readonly_command("sort -o out.txt in.txt") is False
+    assert is_readonly_command("sort in.txt") is True
+
+
+def test_sort_output_eq_is_write():
+    analysis = analyze_command("sort --output=out.txt in.txt")
+    assert any(touch.raw == "out.txt" and touch.kind == "write" for touch in analysis.touches)
+
+
+def test_git_c_outside_is_denied(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "git -C /tmp status")
+    assert reason is not None
+    assert "之外" in reason
+
+
+def test_env_c_outside_is_denied(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "env -C /tmp cat .env")
+    assert reason is not None
+    assert "之外" in reason
+
+
+def test_env_cat_env_is_forced(tmp_path):
+    analysis = analyze_command("env cat .env")
+    assert any(touch.raw == ".env" and touch.kind == "read" for touch in analysis.touches)
+    reason = forced_exec_reason(tmp_path, "env cat .env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_timeout_cat_env_is_forced(tmp_path):
+    reason = forced_exec_reason(tmp_path, "timeout 5 cat .env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_git_show_env_is_forced(tmp_path):
+    analysis = analyze_command("git show HEAD:.env")
+    assert any(touch.raw == ".env" and touch.kind == "read" for touch in analysis.touches)
+    reason = forced_exec_reason(tmp_path, "git show HEAD:.env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_git_show_index_env_is_forced(tmp_path):
+    reason = forced_exec_reason(tmp_path, "git show :.env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_git_c_show_env_is_forced(tmp_path):
+    (tmp_path / ".env").write_text("K=1\n", encoding="utf-8")
+    reason = forced_exec_reason(tmp_path, "git -C . show HEAD:.env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_env_wrapped_python_is_opaque():
+    analysis = analyze_command("env FOO=1 python rewrite.py")
+    assert analysis.opaque is True
+
+
+def test_git_grep_is_unbounded(tmp_path):
+    analysis = analyze_command("git grep SECRET")
+    assert analysis.unbounded_read is True
+    assert forced_exec_reason(tmp_path, "git grep SECRET") == UNBOUNDED_READ_MSG
 
 
 def test_curl_data_at_file_is_read():

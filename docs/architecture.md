@@ -245,7 +245,7 @@ MVP 工具集：
 | AcceptEdits | 放行 | 直接放行 | 需审批 |
 | Bypass | 放行 | 直接放行 | 直接放行 |
 
-审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按命令名（`exec:pytest` 只放行 `pytest …`，不放行 `touch`）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则：文件工具走 `resolve_path`；bash 由 `command_paths.py` 抽出能看清的路径（重定向、`cat`/`echo`/`cd` 等）再套同一套 Restricted / Sensitive / 区外拒绝。`python -c`、命令替换等解析不到的标成不透明，强制逐次确认且不能「始终允许」。执行头按 `git status` 而不是整条 `git` 记白名单。
+审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按**每一段**的命令头（`exec:pytest` 只放行 `pytest …`，不放行 `touch`；`git status && git commit` 要两段都在白名单里）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则：文件工具走 `resolve_path`；bash 由 `command_paths.py` 抽出能看清的路径（重定向、`cat`/`echo`/`cd`、`env -C` / `git -C`、`git show HEAD:.env` 等）再套同一套 Restricted / Sensitive / 区外拒绝。先剥 `env` / `timeout` 等包装再判定。`python -c`、命令替换等解析不到的标成不透明，强制逐次确认且不能「始终允许」。执行头按 `git status` 而不是整条 `git` 记白名单。
 
 组件职责：
 

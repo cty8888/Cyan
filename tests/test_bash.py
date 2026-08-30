@@ -81,6 +81,18 @@ def test_redirect_outside_is_rejected(env):
     assert not result.ok
 
 
+def test_git_c_outside_is_rejected(env):
+    result = env.registry.execute("bash", {"command": "git -C /tmp status"}, env.ctx)
+    assert not result.ok
+    assert "之外" in (result.error or result.content or "")
+
+
+def test_env_c_outside_is_rejected(env):
+    result = env.registry.execute("bash", {"command": "env -C /tmp cat .env"}, env.ctx)
+    assert not result.ok
+    assert "之外" in (result.error or result.content or "")
+
+
 def test_write_git_dir_is_rejected(env, tmp_path):
     (tmp_path / ".git").mkdir(exist_ok=True)
     result = env.registry.execute("bash", {"command": "echo hacked > .git/config"}, env.ctx)

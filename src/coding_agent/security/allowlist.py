@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from ..tools.types import ToolCapability
 from .command_paths import analyze_command
 from .paths import write_target_display
-from .shell import command_head
+from .shell import command_head, split_command_segments
 
 if TYPE_CHECKING:
     from ..tools.base import Tool
@@ -61,8 +61,8 @@ def is_always_allowed(
                 return True
         return False
     if tool.capability is ToolCapability.EXEC:
-        key = always_key(workspace, tool, args)
-        return bool(key) and key in always_allowed
+        keys = _exec_keys(str(args.get("command") or ""))
+        return bool(keys) and all(key in always_allowed for key in keys)
     return tool.name in always_allowed
 
 
@@ -79,14 +79,38 @@ def always_key(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
         scope = write_dir_scope(workspace, args)
         return f"{WRITE_SCOPE_PREFIX}{scope}" if scope is not None else None
     if tool.capability is ToolCapability.EXEC:
-        command = str(args.get("command") or "")
-        head = command_head(command)
-        if not head or head in _NEVER_ALWAYS_ALLOW_HEADS:
+        keys = _exec_keys(str(args.get("command") or ""))
+        if not keys:
             return None
-        if analyze_command(command).opaque:
+        unique = set(keys)
+        if len(unique) != 1:
             return None
-        return f"{EXEC_SCOPE_PREFIX}{head}"
+        return unique.pop()
     return tool.name
+
+
+def _exec_segment_key(segment: str) -> str | None:
+    """一段命令能否记入白名单：不透明、过宽的头都不能。"""
+    if analyze_command(segment).opaque:
+        return None
+    head = command_head(segment)
+    if not head or head in _NEVER_ALWAYS_ALLOW_HEADS:
+        return None
+    return f"{EXEC_SCOPE_PREFIX}{head}"
+
+
+def _exec_keys(command: str) -> list[str] | None:
+    """复合命令每一段的白名单键。任一段无法归类则整串都不能「始终允许」。"""
+    segments = split_command_segments(command)
+    if not segments:
+        return None
+    keys: list[str] = []
+    for segment in segments:
+        key = _exec_segment_key(segment)
+        if key is None:
+            return None
+        keys.append(key)
+    return keys
 
 
 def always_label(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:

@@ -576,3 +576,92 @@ def test_git_status_whitelist_does_not_cover_commit(env):
         env, env.registry.get("bash"), {"command": "git commit -m x"}, always_allowed=remembered
     )
     assert outcome.kind == "need_approval"
+
+
+def test_git_status_whitelist_does_not_cover_compound_commit(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "git status"},
+        remembered,
+    )
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "git status && git commit -m x"},
+        always_allowed=remembered,
+    )
+    assert outcome.kind == "need_approval"
+
+
+def test_compound_always_allow_is_not_remembered(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "git status && git commit -m x"},
+        remembered,
+    )
+    assert remembered == set()
+
+
+def test_compound_allowed_when_every_head_is_whitelisted(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "git status && pytest -q"},
+        always_allowed={"exec:git status", "exec:pytest"},
+    )
+    assert outcome.kind == "allow"
+
+
+def test_env_wrapped_pytest_uses_pytest_whitelist(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "env FOO=1 pytest -q"},
+        always_allowed={"exec:pytest"},
+    )
+    assert outcome.kind == "allow"
+
+
+def test_plan_rejects_sort_output(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "sort -o out.txt in.txt"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "deny"
+
+
+def test_plan_git_c_outside_is_denied(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "git -C /tmp status"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "deny"
+    assert outcome.deny_reason.value == "policy"
+
+
+def test_plan_env_cat_env_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "env cat .env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_git_show_env_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "git show HEAD:.env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_bypass_env_c_outside_is_denied(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "env -C /tmp cat .env"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "deny"

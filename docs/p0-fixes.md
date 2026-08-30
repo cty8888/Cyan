@@ -258,3 +258,29 @@
 **改动**：`src/coding_agent/tools/process.py`
 
 **测试**：`tests/test_process.py` — `test_api_key_env_names_are_secret`、`test_subprocess_env_drops_api_key`、`test_subprocess_does_not_inherit_api_key`
+
+---
+
+## 15. bash 判定粒度不统一：复合命令、包装命令、sort -o、git show
+
+四条洞是同一条 invariant 的缺口：白名单、只读、路径抽取必须按同一套切段 / 展开结果工作。
+
+**现象**：
+
+- 对 `git status` 选「始终允许」后，`git status && git commit` 不再询问。
+- Plan 下 `sort -o out.txt in.txt` 被当成只读直接放行，实际会写文件。
+- `git -C /tmp status`、`env -C /tmp cat .env`、`env cat .env` 抽不出真实路径，区外与敏感读都漏检。
+- Plan 下 `git show HEAD:.env` / `git show :.env` 算只读，已跟踪的密钥进上下文。
+
+**原因**：`command_head` 看整串第一个头；路径抽取只认第一个 token，且只处理 `--git-dir` / `--work-tree`；`sort` 在只读表里，`-o` 又被当成通用带值 flag；`git show` 的 `rev:path` 不是文件系统路径。
+
+**修复**：
+
+- 切段后每段各自算执行头；白名单要覆盖**每一段**。混合头的复合命令不能「始终允许」。
+- 先剥 `env` / `timeout` / `nice` / `command` 等前缀，再认 `git -C` / `--work-tree` / `--git-dir`，内层路径相对这些目录解析。重定向仍跟 shell cwd，不跟 `env -C`。
+- `sort -o` / `--output` 记成写目标，Plan 不再当只读。
+- `git show` / `cat-file` / `blame` 抽出 `HEAD:.env` 这类路径；`git grep` 标成无界读取。
+
+**改动**：`src/coding_agent/security/shell.py`、`command_paths.py`、`allowlist.py`
+
+**测试**：`tests/test_command_paths.py`、`tests/test_permissions.py`、`tests/test_bash.py` — 复合命令白名单、`sort -o`、`git -C`、`env cat`、`git show HEAD:.env`

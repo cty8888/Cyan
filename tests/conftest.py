@@ -31,9 +31,10 @@ class Env:
 class FakeLLM(LLMClient):
     """按预设脚本依次返回响应。压缩用的 chat（专用 system prompt）不消耗 script。"""
 
-    def __init__(self, script):
+    def __init__(self, script, task_errors=None):
         self.model = "fake"
         self.script = list(script)
+        self.task_errors = list(task_errors or [])
         self.calls = 0
         self.compact_requests: list[list[dict]] = []
 
@@ -48,6 +49,8 @@ class FakeLLM(LLMClient):
                 ),
                 usage=Usage(8, 4, 12),
             )
+        if self.task_errors:
+            raise self.task_errors.pop(0)
         item = self.script.pop(0) if self.script else AssistantMessage.of("done")
         return LLMResponse(message=item, usage=Usage(10, 5, 15))
 

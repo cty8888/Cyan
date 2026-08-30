@@ -13,6 +13,7 @@ from ..settings import LLMSettings
 from ..errors import (
     LLMAuthError,
     LLMConnectionError,
+    LLMContextOverflowError,
     LLMError,
     LLMRateLimitError,
     LLMResponseError,
@@ -95,7 +96,39 @@ def _map_exception(exc: Exception) -> LLMError:
     if isinstance(exc, openai.InternalServerError):
         return LLMConnectionError(f"模型服务端错误：{exc}")
     if isinstance(exc, openai.BadRequestError):
+        if is_context_overflow(exc):
+            return LLMContextOverflowError(f"上下文超出模型窗口：{exc}")
         return LLMError(f"请求非法：{exc}")
     if isinstance(exc, openai.APIStatusError):
+        if is_context_overflow(exc):
+            return LLMContextOverflowError(f"上下文超出模型窗口：{exc}")
         return LLMError(f"模型服务返回错误 {exc.status_code}：{exc}")
     return LLMConnectionError(f"调用模型时发生未预期错误：{exc}")
+
+
+_OVERFLOW_MARKERS = (
+    "context_length",
+    "context length",
+    "maximum context",
+    "max context",
+    "too many tokens",
+    "token limit",
+    "prompt is too long",
+    "exceeds the context",
+    "exceed context",
+    "context window",
+)
+_OVERFLOW_CODES = frozenset({"context_length_exceeded", "string_above_max_length"})
+
+
+def is_context_overflow(exc: Exception) -> bool:
+    """厂商把超窗标成 400 / BadRequest，靠 code 或文案识别。"""
+    code = getattr(exc, "code", None)
+    if code in _OVERFLOW_CODES:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and error.get("code") in _OVERFLOW_CODES:
+            return True
+    return any(marker in str(exc).lower() for marker in _OVERFLOW_MARKERS)

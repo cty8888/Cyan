@@ -41,6 +41,10 @@ def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | Non
     切点落在 Assistant（或其紧前的 User）上，不拆 tool_call 对。
     同一条用户任务里只要模型轮次多于保留数，就能压掉更早的工具轮。
     若当前问题还没有 assistant 回复，则退回按用户任务切，兼容多轮交互。
+
+    ``keep_recent_turns <= 0`` 是紧急切点：压掉 system 之后的全部历史，
+    当前用户任务由 ``_apply_compact`` 再插回。``[-0]`` 在 Python 里等于
+    ``[0]``，不能套用「倒数第 N 条」公式。
     """
     start = 1 if messages and isinstance(messages[0], SystemMessage) else 0
     assistant_indices = [
@@ -53,6 +57,9 @@ def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | Non
         for index, message in enumerate(messages)
         if index >= start and _is_real_user(message)
     ]
+
+    if keep_recent_turns <= 0:
+        return len(messages) if assistant_indices else None
 
     if len(assistant_indices) > keep_recent_turns:
         keep_from = assistant_indices[-keep_recent_turns]
@@ -68,6 +75,24 @@ def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | Non
     return None
 
 
+def resolve_keep_from(
+    messages: list[Message],
+    keep_recent_turns: int,
+    *,
+    max_keep: int | None = None,
+) -> int | None:
+    """选出一个切点：优先保留更多轮，必要时降到 1 轮乃至全部压进摘要。
+
+    ``max_keep`` 限制最多保留几轮（溢出重试传 0，强制紧急压缩）。
+    """
+    preferred = keep_recent_turns if max_keep is None else min(keep_recent_turns, max_keep)
+    for keep in range(preferred, -1, -1):
+        cut = find_keep_from(messages, keep)
+        if cut is not None:
+            return cut
+    return None
+
+
 def needs_compact(
     session: Session,
     policy: CompactPolicy,
@@ -80,7 +105,7 @@ def needs_compact(
     （``estimated_tokens``），否则粗估 Session。上一轮 API 回报的
     ``last_prompt_tokens`` 只作补充——那次已经超阈值，这轮出门前先压。
     """
-    if find_keep_from(session.messages, policy.keep_recent_turns) is None:
+    if resolve_keep_from(session.messages, policy.keep_recent_turns) is None:
         return False
     threshold = compact_threshold(policy)
     current = estimated_tokens if estimated_tokens is not None else estimate_session_tokens(session)
@@ -100,9 +125,18 @@ def estimate_session_tokens(session: Session) -> int:
     return estimate_payload_tokens(payloads)
 
 
-def try_compact(session: Session, call_llm: CallLLM, policy: CompactPolicy) -> bool:
-    """压缩被压缩段。成功返回 True；无可切区间、空回复或 LLMError 返回 False，Session 不动。"""
-    keep_from = find_keep_from(session.messages, policy.keep_recent_turns)
+def try_compact(
+    session: Session,
+    call_llm: CallLLM,
+    policy: CompactPolicy,
+    *,
+    max_keep: int | None = None,
+) -> bool:
+    """压缩被压缩段。成功返回 True；无可切区间、空回复或 LLMError 返回 False，Session 不动。
+
+    ``max_keep`` 限制最多保留几轮；溢出恢复传 0，把能压的历史全部收成摘要。
+    """
+    keep_from = resolve_keep_from(session.messages, policy.keep_recent_turns, max_keep=max_keep)
     if keep_from is None:
         return False
 
@@ -112,8 +146,11 @@ def try_compact(session: Session, call_llm: CallLLM, policy: CompactPolicy) -> b
     if not dropped:
         return False
 
+    tool_limit = _compact_tool_char_limit(dropped, policy)
     payloads = [{"role": "system", "content": COMPACT_SYSTEM_PROMPT}]
-    payloads.extend(_message_to_wire(message, session.tool_history) for message in dropped)
+    payloads.extend(
+        _message_to_wire(message, session.tool_history, tool_limit) for message in dropped
+    )
 
     try:
         response = call_llm(payloads, None)
@@ -175,14 +212,26 @@ def _tool_call_ids(messages: list[Message]) -> list[str]:
     return ids
 
 
-def _message_to_wire(message: Message, tool_history: ToolHistory) -> dict:
+def _compact_tool_char_limit(dropped: list[Message], policy: CompactPolicy) -> int:
+    """摘要请求的单条工具正文上限：按即将出门的窗口均分，避免总结那次自己先超窗。"""
+    tool_count = sum(1 for message in dropped if isinstance(message, ToolMessage))
+    if tool_count <= 0:
+        return DEFAULT_TOOL_RESULT_CHARS
+    budget_chars = max(0, policy.max_context_tokens - policy.reserve_tokens) * 4
+    per_tool = budget_chars // (tool_count * 2)
+    return max(1_000, min(DEFAULT_TOOL_RESULT_CHARS, per_tool))
+
+
+def _message_to_wire(
+    message: Message, tool_history: ToolHistory, tool_limit: int = DEFAULT_TOOL_RESULT_CHARS
+) -> dict:
     if isinstance(message, ToolMessage):
-        return message.to_api(content=_tool_text(tool_history, message))
+        return message.to_api(content=_tool_text(tool_history, message, tool_limit))
     return message.to_api()
 
 
-def _tool_text(tool_history: ToolHistory, message: ToolMessage) -> str:
-    """摘要请求带上工具正文，但按组窗同一上限截尾，避免总结那次自己先超窗。"""
+def _tool_text(tool_history: ToolHistory, message: ToolMessage, limit: int) -> str:
+    """摘要请求带上工具正文，但按上限截尾，避免总结那次自己先超窗。"""
     block = message.tool_result
     if block is None:
         return ""
@@ -193,7 +242,7 @@ def _tool_text(tool_history: ToolHistory, message: ToolMessage) -> str:
         text = execution.result.content
     else:
         text = execution.error or ""
-    return _truncate_tool_text(text, DEFAULT_TOOL_RESULT_CHARS)
+    return _truncate_tool_text(text, limit)
 
 
 def _truncate_tool_text(text: str, limit: int) -> str:

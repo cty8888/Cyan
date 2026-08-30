@@ -34,6 +34,15 @@ _GIT_READONLY_SUBCOMMANDS = frozenset(
 )
 
 
+def split_command_segments(command: str) -> list[str]:
+    """按 ``&&`` / ``||`` / ``;`` / ``|`` 切开，去掉分隔符本身。"""
+    return [
+        seg.strip()
+        for seg in _SPLIT_OPERATORS.split(command)
+        if seg.strip() and seg not in _SEPARATOR_TOKENS
+    ]
+
+
 def is_readonly_command(command: str) -> bool:
     """Plan 模式：判断 shell 命令是否为只读操作。
 
@@ -43,14 +52,14 @@ def is_readonly_command(command: str) -> bool:
     if not command.strip():
         return False
 
-    segments = [seg for seg in _SPLIT_OPERATORS.split(command) if seg.strip() and seg not in _SEPARATOR_TOKENS]
+    segments = split_command_segments(command)
     if not segments:
         return False
-    return all(_is_readonly_segment(seg.strip()) for seg in segments)
+    return all(_is_readonly_segment(seg) for seg in segments)
 
 
 def command_head(command: str) -> str:
-    """命令的执行头：第一个 token；``python -m pytest`` 视为一个整体。"""
+    """命令的执行头：第一个 token；``python -m pytest`` / ``git status`` 视为一个整体。"""
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -59,6 +68,11 @@ def command_head(command: str) -> str:
         return ""
     if tokens[0] in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]:
         return "python -m pytest"
+    if tokens[0] == "git":
+        for token in tokens[1:]:
+            if not token.startswith("-"):
+                return f"git {token}"
+        return "git"
     return tokens[0]
 
 

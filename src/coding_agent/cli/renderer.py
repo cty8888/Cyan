@@ -157,11 +157,11 @@ class Renderer:
         if request.detail:
             logger.info("详情:\n%s", request.detail)
 
-        choices = ["y", "n"] if request.force else ["y", "n", "a"]
+        can_always = not request.force and bool(request.always_label)
+        choices = ["y", "n", "a"] if can_always else ["y", "n"]
         hint = "y=允许  n=拒绝"
-        if not request.force:
-            scope = request.always_label or "同类操作"
-            hint += f"  a=本会话始终允许 {scope}"
+        if can_always:
+            hint += f"  a=本会话始终允许 {request.always_label}"
         self.console.print(f"[dim]{hint}[/]")
 
         try:

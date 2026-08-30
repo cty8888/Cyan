@@ -54,13 +54,32 @@ def test_cwd_persists_across_calls(env, tmp_path):
     assert str((tmp_path / "pkg").resolve()) in result.content
 
 
-def test_leaving_workspace_resets_cwd(env, tmp_path):
+def test_leaving_workspace_is_rejected(env):
     result = env.registry.execute("bash", {"command": "cd / && pwd"}, env.ctx)
+    assert not result.ok
+    assert "之外" in (result.error or result.content or "")
+
+
+def test_opaque_cd_outside_still_resets_cwd(env, tmp_path):
+    """``$HOME`` 解析不到真实路径，执行层拦不住；结束后仍把 cwd 拉回。"""
+    result = env.registry.execute("bash", {"command": 'cd "$HOME" && pwd'}, env.ctx)
     assert result.ok
     assert "已重置回工作目录根" in result.content
     result = env.registry.execute("bash", {"command": "pwd"}, env.ctx)
     assert result.ok
     assert str(tmp_path.resolve()) in result.content
+
+
+def test_redirect_outside_is_rejected(env):
+    result = env.registry.execute("bash", {"command": "echo x > /tmp/coding-agent-escape.txt"}, env.ctx)
+    assert not result.ok
+
+
+def test_write_git_dir_is_rejected(env, tmp_path):
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    result = env.registry.execute("bash", {"command": "echo hacked > .git/config"}, env.ctx)
+    assert not result.ok
+    assert not (tmp_path / ".git" / "config").exists()
 
 
 def test_output_truncation(make_env, tmp_path):

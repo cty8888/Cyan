@@ -65,6 +65,7 @@ src/coding_agent/
     messages.py          # 回喂模型的权限文案（Plan 拒绝、用户拒绝等）
     paths.py             # 路径沙箱 + 写目标展示路径
     shell.py             # Plan 模式只读命令判定、执行头提取（白名单共用）
+    command_paths.py     # 从 bash 命令抽出路径，套文件规则
     allowlist.py         # 本会话「始终允许」：write:{目录} / exec:{命令}
     rules.py             # Blocked / Restricted / Sensitive 路径与命令规则
     readonly.py          # 兼容旧导入，转调 shell.py
@@ -244,20 +245,21 @@ MVP 工具集：
 | AcceptEdits | 放行 | 直接放行 | 需审批 |
 | Bypass | 放行 | 直接放行 | 直接放行 |
 
-审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按命令名（`exec:pytest` 只放行 `pytest …`，不放行 `touch`）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则，任何工具读写文件时都生效。
+审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按命令名（`exec:pytest` 只放行 `pytest …`，不放行 `touch`）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则：文件工具走 `resolve_path`；bash 由 `command_paths.py` 抽出能看清的路径（重定向、`cat`/`echo`/`cd` 等）再套同一套 Restricted / Sensitive / 区外拒绝。`python -c`、命令替换等解析不到的标成不透明，强制逐次确认且不能「始终允许」。执行头按 `git status` 而不是整条 `git` 记白名单。
 
 组件职责：
 
 1. **`rules.py`**：Blocked / Restricted / Sensitive 规则表
 2. **`shell.py`**：Plan 只读命令判定与执行头提取
-3. **`allowlist.py`**：本会话始终允许的范围键
-4. **`PermissionManager`**：编排判定链，产出 `PermissionOutcome`
-5. **工具 `run()`**：对 Blocked / Restricted 再拦一次（`BlockedCommandError` / `SecurityError`）
+3. **`command_paths.py`**：从 bash 命令抽出路径，套文件沙箱 / Restricted / Sensitive
+4. **`allowlist.py`**：本会话始终允许的范围键（过宽的命令头不能写入）
+5. **`PermissionManager`**：编排判定链，产出 `PermissionOutcome`
+6. **工具 `run()`**：对 Blocked / Restricted / 区外路径再拦一次
 
 ## 6. 上下文管理与 Memory
 
-- Token 记账：压缩触发看「即将发出的整包」——组窗后的 wire 用 JSON 字符数 / 4 粗估；上一轮 API 的 `usage.prompt_tokens`（`last_prompt_tokens`）只作补充，那次已经超阈值则这轮出门前先压
-- 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；保留最近 `keep_recent_turns` 轮原文。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
+- Token 记账：压缩触发看「即将发出的整包」——组窗后的 wire 用 JSON 字符数 / 4 粗估；上一轮 API 的 `usage.prompt_tokens`（`last_prompt_tokens`）只作补充，那次已经超阈值则这轮出门前先压。默认窗口按 deepseek-chat 常见 64k 计。优先保留 `keep_recent_turns` 轮；不够切或仍超窗时降到 1 轮乃至全部压进摘要。API 报超窗则紧急压缩后重试一次。
+- 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；优先保留最近 `keep_recent_turns` 轮原文，切不到或仍超窗则降档。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
 - 不做滑动窗口：对话变瘦只靠 compact。组窗仍送出当前全部 messages；``ContextBuilder`` 对每条工具正文按 ``max_tool_result_chars``（默认 30000）截尾，不写回 Session。压缩那次 chat 仍用 history 全文。
 - Memory 两层（未做）：项目级 `AGENTS.md` + 会话级持久化与 `--continue`
 

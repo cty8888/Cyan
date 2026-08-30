@@ -121,11 +121,14 @@ class Runtime:
             estimated_tokens=self.estimate_request_tokens(),
         )
 
-    def compact(self) -> bool:
-        """压缩较早对话。无可切区间或 LLM 失败时返回 False，Session 保持原样。"""
+    def compact(self, *, max_keep: int | None = None) -> bool:
+        """压缩较早对话。无可切区间或 LLM 失败时返回 False，Session 保持原样。
+
+        ``max_keep`` 限制最多保留几轮；溢出恢复传 0，把能压的历史全部收成摘要。
+        """
         from ..session.compact import try_compact
 
-        return try_compact(self.session, self.call_llm, self.compact_policy)
+        return try_compact(self.session, self.call_llm, self.compact_policy, max_keep=max_keep)
 
     def has_tool(self, name: str) -> bool:
         return self.registry.has(name)

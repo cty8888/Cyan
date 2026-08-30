@@ -122,9 +122,11 @@ def _cmd_usage(app: App, args: list[str]) -> bool:
 
 
 def _cmd_compact(app: App, args: list[str]) -> bool:
-    from ..session.compact import find_keep_from
+    from ..session.compact import resolve_keep_from
 
-    keep_from = find_keep_from(app.session.messages, app.runtime.compact_policy.keep_recent_turns)
+    keep_from = resolve_keep_from(
+        app.session.messages, app.runtime.compact_policy.keep_recent_turns
+    )
     if keep_from is None:
         app.renderer.notice("消息太少，无需压缩。", level="warning")
         return False

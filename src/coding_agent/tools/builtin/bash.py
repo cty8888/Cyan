@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ...errors import BlockedCommandError, SecurityError
+from ...security.command_paths import reject_unsafe_paths
 from ...security.paths import display
 from ...security.rules import blocked_command, restricted_command
 from ..base import Tool
@@ -64,6 +65,7 @@ class BashTool(Tool):
             # 上次记录的目录已不存在，退回工作目录根
             cwd = ctx.workspace
             ctx.workspace_access.bash_cwd = None
+        reject_unsafe_paths(ctx.workspace, command, cwd)
 
         timeout_seconds = max(0.001, int(timeout_ms) / 1000)
         wrapped = command + _state_trailer()

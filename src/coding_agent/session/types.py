@@ -42,8 +42,9 @@ class SessionPermissions:
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     # 按「同类操作」记键，而不是整个工具名：写入是 ``write:{目录}``（根目录文件为
     # ``write:.``，只放行根下其它文件，不含子目录；``write:pkg`` 放行 ``pkg/`` 及其子目录），
-    # 执行是 ``exec:{命令名}``（如 ``exec:pytest``）。敏感路径 / CRITICAL 走 force=True，
-    # 不受这份白名单影响。
+    # 执行是 ``exec:{命令名}``（如 ``exec:pytest``、``exec:git status``）。
+    # ``echo`` / ``python`` 等太宽的命令头不能写入白名单。敏感路径 / CRITICAL 走
+    # force=True，不受这份白名单影响。
     always_allowed: set[str] = field(default_factory=set)
 
 

@@ -8,10 +8,16 @@ from rich.console import Console
 
 from coding_agent.cli.commands import build_default_commands
 from coding_agent.cli.renderer import Renderer
-from coding_agent.session.compact import CompactPolicy, find_keep_from, needs_compact, try_compact
+from coding_agent.session.compact import (
+    CompactPolicy,
+    find_keep_from,
+    needs_compact,
+    resolve_keep_from,
+    try_compact,
+)
 from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT
 from coding_agent.core.types import Notice, StopReason
-from coding_agent.errors import LLMError
+from coding_agent.errors import LLMContextOverflowError, LLMError
 from coding_agent.llm.types import (
     AssistantMessage,
     LLMResponse,
@@ -82,16 +88,59 @@ def test_find_keep_from_cuts_early_rounds_in_one_task(tmp_path):
     assert session.messages[keep_from].tool_calls[0].id == "c1"
 
 
-def test_skip_when_not_enough_turns(tmp_path):
+def test_preferred_cut_requires_more_than_keep_turns(tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="sys")
     _add_turn(session, "任务A", "ca", "a")
     _add_turn(session, "任务B", "cb", "b")
+    assert find_keep_from(session.messages, keep_recent_turns=2) is None
+    assert resolve_keep_from(session.messages, keep_recent_turns=2) is not None
+
+
+def test_fallback_compacts_two_assistant_rounds(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "round-0-unique")
+    _add_assistant_round(session, "c1", "round-1-unique")
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("两轮摘要"), usage=Usage(20, 5, 25))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.tool_history.get("c0") is None
+    assert session.tool_history.get("c1") is not None
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert [m.text for m in users] == ["做任务"]
+
+
+def test_emergency_cut_drops_all_assistant_rounds(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "only-round")
+    keep_from = find_keep_from(session.messages, keep_recent_turns=0)
+    assert keep_from == len(session.messages)
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("紧急摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy(), max_keep=0) is True
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.messages[1].text == "紧急摘要"
+    assert session.tool_history.get("c0") is None
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert [m.text for m in users] == ["做任务"]
+    assert not any(isinstance(m, AssistantMessage) for m in session.messages)
+
+
+def test_skip_when_no_assistant(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("还没开始"))
     policy = CompactPolicy()
 
     def boom(messages, tools=None):
         raise AssertionError("不应调用")
 
-    assert find_keep_from(session.messages, policy.keep_recent_turns) is None
+    assert resolve_keep_from(session.messages, policy.keep_recent_turns) is None
     assert try_compact(session, boom, policy) is False
 
 
@@ -235,7 +284,7 @@ def test_loop_compacts_before_task_llm(env, tmp_path):
     session.usage.last_prompt_tokens = 200_000
     llm = FakeLLM([AssistantMessage.of("本轮完成。")])
     runtime = make_runtime(env, llm, session)
-    # 默认窗口 256k 时 200_000 已低于触发线；这里收紧副本，专门测「出门前先压」。
+    # 默认窗口下 200_000 已高于触发线；这里收紧副本，专门测「出门前先压」。
     runtime.compact_policy.max_context_tokens = 2_000
     runtime.compact_policy.reserve_tokens = 100
     runtime.compact_policy.trigger_ratio = 0.9
@@ -320,6 +369,76 @@ def test_slash_compact_command(env, tmp_path):
     assert isinstance(session.messages[1], SummaryMessage)
     assert session.tool_history.get("ca") is None
     assert llm.compact_requests
+
+
+def test_needs_compact_when_only_two_assistant_rounds(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "x" * 4000)
+    _add_assistant_round(session, "c1", "y" * 4000)
+    policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
+    session.usage.last_prompt_tokens = 50
+    assert find_keep_from(session.messages, policy.keep_recent_turns) is None
+    assert resolve_keep_from(session.messages, policy.keep_recent_turns) is not None
+    assert needs_compact(session, policy) is True
+
+
+def test_loop_compacts_two_rounds_in_one_task(env, tmp_path):
+    (tmp_path / "big.txt").write_text("x" * 8000, encoding="utf-8")
+    llm = FakeLLM(
+        [
+            tool_call("read_file", '{"path": "big.txt"}', "r1"),
+            tool_call("read_file", '{"path": "big.txt"}', "r2"),
+            AssistantMessage.of("读完了"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    runtime.compact_policy.max_context_tokens = 2_000
+    runtime.compact_policy.reserve_tokens = 100
+    runtime.compact_policy.trigger_ratio = 0.9
+    events, reason = drive(runtime, "读大文件")
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    assert any(isinstance(m, SummaryMessage) for m in runtime.session.messages)
+    users = [
+        m
+        for m in runtime.session.messages
+        if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)
+    ]
+    assert any(m.text == "读大文件" for m in users)
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("已压缩" in m for m in notices)
+
+
+def test_loop_retries_after_context_overflow(env, tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "early-round")
+    llm = FakeLLM(
+        [AssistantMessage.of("压完后继续。")],
+        task_errors=[LLMContextOverflowError("This model's maximum context length is 65536 tokens")],
+    )
+    runtime = make_runtime(env, llm, session)
+    events, reason = drive(runtime, "下一问")
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.tool_history.get("c0") is None
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("超出模型窗口" in m for m in notices)
+    assert any("已压缩" in m for m in notices)
+
+
+def test_loop_overflow_without_history_is_fatal(env, tmp_path):
+    llm = FakeLLM(
+        [],
+        task_errors=[LLMContextOverflowError("maximum context length exceeded")],
+    )
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "超大问题")
+    assert reason is StopReason.FATAL_ERROR
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("无法缩小上下文" in m or "模型调用失败" in m for m in notices)
 
 
 def test_runtime_compact_policy_is_a_copy(make_env, tmp_path):

@@ -327,3 +327,96 @@ def test_dir_whitelist_excludes_repo_root_file(env):
 def test_readonly_tool_needs_no_approval(env):
     outcome = eval_perm(env, env.registry.get("read_file"), {"path": "a.py"})
     assert outcome.kind == "allow"
+
+
+def test_bash_write_env_is_forced(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "echo K=1 >> .env"})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_bash_write_git_dir_is_restricted(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "echo hacked > .git/config"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "deny"
+    assert outcome.deny_reason.value == "restricted"
+
+
+def test_bash_read_outside_is_denied(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "cat /etc/passwd"},
+        mode=PermissionMode.PLAN,
+    )
+    assert outcome.kind == "deny"
+    assert outcome.deny_reason.value == "policy"
+
+
+def test_bash_cd_outside_then_write_is_denied(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "cd /tmp && echo x > escaped.txt"}
+    )
+    assert outcome.kind == "deny"
+
+
+def test_plan_cat_env_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "cat .env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_printenv_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "printenv"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_python_c_is_forced(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "python -c \"open('.env','w').write('x')\""},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_echo_cannot_be_always_allowed(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "echo hello"},
+        remembered,
+    )
+    assert remembered == set()
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "echo hello"}, always_allowed=remembered
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.always_label is None
+
+
+def test_git_status_whitelist_does_not_cover_commit(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "git status"},
+        remembered,
+    )
+    assert remembered == {"exec:git status"}
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "git commit -m x"}, always_allowed=remembered
+    )
+    assert outcome.kind == "need_approval"

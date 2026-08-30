@@ -8,15 +8,22 @@ from typing import Any
 from ..errors import PathOutsideWorkspaceError
 
 
-def resolve_path(workspace: Path, raw: str, *, must_exist: bool = False) -> Path:
-    """把工具参数中的路径解析为绝对路径，并校验未逃出沙箱。"""
+def resolve_path(
+    workspace: Path, raw: str, *, must_exist: bool = False, base: Path | None = None
+) -> Path:
+    """把工具参数中的路径解析为绝对路径，并校验未逃出沙箱。
+
+    ``base`` 是相对路径的起点（bash 的会话 cwd）；默认工作目录根。
+    无论从哪起算，解析结果都必须落在工作区内。
+    """
     root = Path(workspace).resolve()
     if raw is None or str(raw).strip() == "":
         raise PathOutsideWorkspaceError("路径不能为空")
 
     candidate = Path(str(raw)).expanduser()
     if not candidate.is_absolute():
-        candidate = root / candidate
+        origin = Path(base).resolve() if base is not None else root
+        candidate = origin / candidate
 
     resolved = candidate.resolve()
     if resolved != root and root not in resolved.parents:

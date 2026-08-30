@@ -13,7 +13,8 @@ from dataclasses import dataclass
 class CompactPolicy:
     """何时压、留几轮。不存放会话内容。"""
 
-    max_context_tokens: int = 256_000
+    # 须贴近当前模型窗口。deepseek-chat 常见上限是 64k；写太大则压缩永远轮不到，API 一拒就是 FATAL。
+    max_context_tokens: int = 64_000
     reserve_tokens: int = 3_000  # 给总结那次 chat 留口，不存放内容
     trigger_ratio: float = 0.9  # 阈值 = (max - reserve) * ratio
-    keep_recent_turns: int = 2  # 保留段：最近几轮 Assistant（同一任务内较早的工具轮可压）
+    keep_recent_turns: int = 2  # 优先保留的 Assistant 轮数；超窗时会降到 1 轮乃至全部压进摘要

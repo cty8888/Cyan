@@ -29,6 +29,10 @@ class LLMError(AgentError):
     retryable: bool = False
 
 
+class LLMContextOverflowError(LLMError):
+    """请求超出模型上下文窗口。不走 HTTP 重试，由 Loop 先压缩再打一次。"""
+
+
 class LLMAuthError(LLMError):
     """API Key 无效或权限不足。"""
 

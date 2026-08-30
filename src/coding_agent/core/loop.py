@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generator
 
-from ..errors import AgentError, InvalidToolArgumentsError, LLMError
+from ..errors import AgentError, InvalidToolArgumentsError, LLMContextOverflowError, LLMError
 from ..llm.parser import parse_tool_arguments
 from ..llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
 from ..security.messages import USER_DENIED_MSG
@@ -70,16 +70,24 @@ class AgentLoop:
             for iteration in range(1, self.settings.loop.max_iterations + 1):
                 yield Thinking(iteration=iteration)
 
-                if self.runtime.needs_compact():
-                    yield Notice("上下文接近上限，正在压缩…")
-                    compacted = self.runtime.compact()
-                    if compacted:
-                        yield Notice("已压缩较早的对话历史。")
-                    else:
-                        yield Notice("压缩失败，继续使用原文。", level="warning")
+                yield from self._shrink_context()
 
                 try:
                     response = self.runtime.call_llm(self.runtime.messages_for_request(), tools=schemas)
+                except LLMContextOverflowError as exc:
+                    recovered = yield from self._compact_after_overflow()
+                    if not recovered:
+                        yield Notice(f"模型调用失败：{exc}", level="error")
+                        yield self._finish(StopReason.FATAL_ERROR, final_text)
+                        return
+                    try:
+                        response = self.runtime.call_llm(
+                            self.runtime.messages_for_request(), tools=schemas
+                        )
+                    except LLMError as retry_exc:
+                        yield Notice(f"模型调用失败：{retry_exc}", level="error")
+                        yield self._finish(StopReason.FATAL_ERROR, final_text)
+                        return
                 except LLMError as exc:
                     yield Notice(f"模型调用失败：{exc}", level="error")
                     yield self._finish(StopReason.FATAL_ERROR, final_text)
@@ -302,6 +310,39 @@ class AgentLoop:
             if block and block.tool_call_id:
                 responded.add(block.tool_call_id)
         self._respond_unanswered(assistant.tool_calls, responded, error)
+
+    def _shrink_context(self) -> Generator[AgentEvent, Any, bool]:
+        """出门前按阈值尽量压。保留段仍超窗时会降到更少轮，最多压 ``keep+1`` 次。"""
+        did = False
+        limit = max(1, self.runtime.compact_policy.keep_recent_turns + 1)
+        for _ in range(limit):
+            if not self.runtime.needs_compact():
+                break
+            if not did:
+                yield Notice("上下文接近上限，正在压缩…")
+            if not self.runtime.compact():
+                if not did:
+                    yield Notice("压缩失败，继续使用原文。", level="warning")
+                break
+            did = True
+        if did:
+            yield Notice("已压缩较早的对话历史。")
+        return did
+
+    def _compact_after_overflow(self) -> Generator[AgentEvent, Any, bool]:
+        """估算漏检、API 已拒时：强制紧急压缩（不留原文轮），再按阈值尽量再压。"""
+        yield Notice("上下文超出模型窗口，正在压缩后重试…", level="warning")
+        if not self.runtime.compact(max_keep=0):
+            yield Notice("压缩失败，无法缩小上下文。", level="error")
+            return False
+        limit = max(1, self.runtime.compact_policy.keep_recent_turns)
+        for _ in range(limit):
+            if not self.runtime.needs_compact():
+                break
+            if not self.runtime.compact():
+                break
+        yield Notice("已压缩较早的对话历史。")
+        return True
 
     def _check_failure_threshold(self) -> StopReason | None:
         """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""

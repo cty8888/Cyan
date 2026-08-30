@@ -2,7 +2,8 @@
 
 - 写入：``write:{目录}``。根目录文件为 ``write:.``，只放行根下其它文件，不含子目录；
   ``write:pkg`` 放行 ``pkg/`` 及其子目录。
-- 执行：``exec:{命令名}``（如 ``exec:pytest``）。``python -m pytest`` 视为一个命令名。
+- 执行：``exec:{命令名}``（如 ``exec:pytest``、``exec:git status``）。
+  ``echo`` / ``python`` / ``env`` / ``bash`` 等太宽的命令头不能「始终允许」。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..tools.types import ToolCapability
+from .command_paths import analyze_command
 from .paths import write_target_display
 from .shell import command_head
 
@@ -19,6 +21,29 @@ if TYPE_CHECKING:
 
 WRITE_SCOPE_PREFIX = "write:"
 EXEC_SCOPE_PREFIX = "exec:"
+
+# 这些命令头太宽，或本身就能绕开路径解析，禁止写入「始终允许」。
+_NEVER_ALWAYS_ALLOW_HEADS = frozenset(
+    {
+        "echo",
+        "python",
+        "python3",
+        "env",
+        "bash",
+        "sh",
+        "zsh",
+        "tee",
+        "eval",
+        "exec",
+        "node",
+        "nodejs",
+        "ruby",
+        "perl",
+        "awk",
+        "sed",
+        "git",
+    }
+)
 
 
 def is_always_allowed(
@@ -36,8 +61,8 @@ def is_always_allowed(
                 return True
         return False
     if tool.capability is ToolCapability.EXEC:
-        head = command_head(str(args.get("command") or ""))
-        return bool(head) and f"{EXEC_SCOPE_PREFIX}{head}" in always_allowed
+        key = always_key(workspace, tool, args)
+        return bool(key) and key in always_allowed
     return tool.name in always_allowed
 
 
@@ -54,8 +79,13 @@ def always_key(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
         scope = write_dir_scope(workspace, args)
         return f"{WRITE_SCOPE_PREFIX}{scope}" if scope is not None else None
     if tool.capability is ToolCapability.EXEC:
-        head = command_head(str(args.get("command") or ""))
-        return f"{EXEC_SCOPE_PREFIX}{head}" if head else None
+        command = str(args.get("command") or "")
+        head = command_head(command)
+        if not head or head in _NEVER_ALWAYS_ALLOW_HEADS:
+            return None
+        if analyze_command(command).opaque:
+            return None
+        return f"{EXEC_SCOPE_PREFIX}{head}"
     return tool.name
 
 
@@ -69,7 +99,10 @@ def always_label(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | Non
             return "工作目录根下的写入"
         return f"{scope}/ 下的写入"
     if tool.capability is ToolCapability.EXEC:
-        head = command_head(str(args.get("command") or ""))
+        key = always_key(workspace, tool, args)
+        if key is None:
+            return None
+        head = key[len(EXEC_SCOPE_PREFIX) :]
         return f"{head} 命令" if head else None
     return None
 

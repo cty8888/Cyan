@@ -143,3 +143,48 @@
 **改动**：`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
 
 **测试**：`tests/test_bash.py` — `test_nonzero_exit_is_still_ok`；`tests/test_loop.py` — `test_failing_commands_do_not_trip_tool_failures`
+
+---
+
+## 8. 压缩到保留段后无法再瘦，超窗直接 FATAL
+
+**现象**：切点改成按 Assistant 之后，单次任务理论上能压。但 `keep_recent_turns = 2` 是硬下限：`find_keep_from` 必须「Assistant 条数严格大于 2」才有切点。两轮大文件读取就能顶满 DeepSeek 常见的 64k 窗口；此时体积够大、切点为 `None`，`needs_compact` 恒为 False。默认窗口还写死 256k，触发线约 227k，压缩永远轮不到。API 一拒就是 `BadRequestError` → `FATAL_ERROR`，没有压完再打。
+
+**原因**：
+
+- 切点失败时体积判断根本轮不到，保留段本身就能超过真实窗口。
+- `max_context_tokens = 256000` 和 `deepseek-chat` 的常见上限对不上。
+- `chars/4` 粗估会偏低（中文更甚）；估错之后没有「超窗 → 压缩 → 重试」。
+
+**修复**：
+
+- `resolve_keep_from` 优先保留 `keep_recent_turns` 轮，切不到或仍超窗时降到 1 轮，再不行把 system 之后全部收成摘要，只留下当前用户任务。
+- Loop 出门前最多连压 `keep + 1` 次，避免「摘要 + 最近两轮」仍然撑满。
+- 默认窗口改为 64k，对齐 `deepseek-chat` 常见上限。
+- 厂商把超窗标成 400，识别为 `LLMContextOverflowError`：先做紧急压缩（`max_keep=0`）再重试一次；没有可压历史才 FATAL。
+- 摘要请求按窗口均分工具正文，降低总结那次自己先超窗的概率。
+
+**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/core/loop.py`、`src/coding_agent/core/runtime.py`、`src/coding_agent/settings/compact.py`、`src/coding_agent/llm/deepseek.py`、`src/coding_agent/errors.py`、`src/coding_agent/cli/commands.py`
+
+**测试**：`tests/test_compact.py` — `test_fallback_compacts_two_assistant_rounds`、`test_emergency_cut_drops_all_assistant_rounds`、`test_needs_compact_when_only_two_assistant_rounds`、`test_loop_compacts_two_rounds_in_one_task`、`test_loop_retries_after_context_overflow`；`tests/test_deepseek_errors.py`
+
+---
+
+## 9. bash 绕开路径沙箱、敏感文件和「始终允许」粒度
+
+**现象**：README 写的三道防线——路径必须在工作区内、不能自动改 `.git/`、`.env` 每次确认、改已有文件必须先读——全部挂在 `write_file` / `edit_file` 上。模型改走 `bash` 做同一件事，判定链只看命令正则，不看碰了哪条路径。`echo SECRET >> .env`、`echo hacked > .git/config`、`cat ~/.ssh/id_rsa`、`cd /tmp && echo x > a` 都能跑。Plan 模式把 `cat` / `printenv` 当只读放行，API Key 和区外文件会进上下文。对 `git status` 选「始终允许」得到 `exec:git`，随后 `git commit` 不再问。
+
+**原因**：`PermissionManager` 对 EXEC 只跑 `blocked_command` / `restricted_command` / `sensitive_command`。`restricted_path` / `sensitive_path` / `resolve_path` 只在 `ToolCapability.WRITE` 上生效。白名单按第一个 token 记键，`echo` / `python` / `git` 一次放行整类命令。cwd 越界只在命令结束后拉回，写入已经发生。
+
+**修复**：
+
+- 新增 `command_paths.py`：从命令里抽出能看清的路径（重定向、`cat` / `echo` / `cd` / `cp` 等），相对 bash cwd 解析后套同一套区外拒绝、Restricted、Sensitive。
+- `cd /tmp && echo x > a` 按段跟踪 cwd，后续相对路径也能看到越界。
+- Plan 下只读命令若读 `.env` 或 `printenv`，改为强制确认；区外仍直接拒绝。
+- `python -c`、命令替换、`$VAR` 重定向等解析不到的标成不透明：每次确认，且不能「始终允许」。
+- 白名单执行头改为 `git status` 而不是整条 `git`；`echo` / `python` / `env` / `bash` / `sh` / `tee` 等过宽命令头禁止写入「始终允许」。
+- `bash.run()` 对区外路径和写 `.git/` 再拦一遍。
+
+**改动**：`src/coding_agent/security/command_paths.py`、`src/coding_agent/security/permissions.py`、`src/coding_agent/security/allowlist.py`、`src/coding_agent/security/shell.py`、`src/coding_agent/security/paths.py`、`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
+
+**测试**：`tests/test_command_paths.py`；`tests/test_permissions.py` — `test_bash_write_env_is_forced`、`test_bash_write_git_dir_is_restricted`、`test_bash_read_outside_is_denied`、`test_git_status_whitelist_does_not_cover_commit`；`tests/test_bash.py` — `test_leaving_workspace_is_rejected`、`test_redirect_outside_is_rejected`、`test_write_git_dir_is_rejected`

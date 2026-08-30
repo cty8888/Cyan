@@ -19,6 +19,7 @@ _BACKUP_COUNT = 5
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
+    """取 ``coding_agent`` 或其子 logger；调用方不必自己拼名字。"""
     if name:
         return logging.getLogger(f"{LOGGER_NAME}.{name}")
     return logging.getLogger(LOGGER_NAME)

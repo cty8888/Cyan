@@ -47,6 +47,7 @@ class BashTool(Tool):
     parameters = BASH_PARAMETERS
 
     def describe(self, args: dict[str, Any], workspace: Path, workspace_access=None) -> tuple[str, str | None, str]:
+        """审批面板：摘要固定为「执行命令」，详情是待执行的 shell 原文。"""
         return "执行命令", str(args.get("command", "")), "shell"
 
     def run(self, ctx: ToolContext, command: str, timeout_ms: int = BASH_DEFAULT_TIMEOUT_MS) -> ToolRunResult:

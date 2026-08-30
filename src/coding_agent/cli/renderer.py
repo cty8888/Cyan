@@ -107,6 +107,7 @@ class Renderer:
         logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
 
     def tool_finished(self, name: str, result: ToolRunResult, duration: float) -> None:
+        """一行摘要；bash 额外摘几行输出，写文件则附上 diff。"""
         text = result.content if result.ok else (result.error or "执行失败")
         mark = "[green]✓[/]" if result.ok else "[red]✗[/]"
         self.console.print(f"  {mark} {_first_line(text)} [dim]({duration:.1f}s)[/]")
@@ -127,6 +128,10 @@ class Renderer:
 
     # ------------------------------------------------------------------ 审批
     def ask_approval(self, request: ApprovalRequest) -> ApprovalDecision:
+        """弹出审批面板，读取 y/n/a，返回对应的 ``ApprovalDecision``。
+
+        ``force=True`` 时没有「始终允许」。Ctrl-C / EOF 视为拒绝。
+        """
         capability = _CAPABILITY_LABEL.get(request.capability, request.capability)
         risk = _RISK_LABEL.get(request.risk, request.risk)
         title = f"需要确认 · {capability} · {risk}"
@@ -192,6 +197,7 @@ def _stack(items: list[Any]) -> Any:
 
 
 def _render_detail(detail: str, fmt: str) -> Any:
+    """按 detail_format 选语法高亮：diff / shell / 纯文本。"""
     if fmt == "diff":
         return Syntax(detail, "diff", theme="ansi_dark", background_color="default")
     if fmt in {"shell", "bash"}:

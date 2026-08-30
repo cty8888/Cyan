@@ -1,0 +1,186 @@
+"""会话压缩：被压缩段换成 SummaryMessage，对应 tool_history 先喂后删。"""
+
+from __future__ import annotations
+
+from io import StringIO
+
+from rich.console import Console
+
+from coding_agent.cli.commands import build_default_commands
+from coding_agent.cli.renderer import Renderer
+from coding_agent.session.compact import CompactPolicy, find_keep_from, needs_compact, try_compact
+from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT
+from coding_agent.core.types import Notice, StopReason
+from coding_agent.errors import LLMError
+from coding_agent.llm.types import (
+    AssistantMessage,
+    LLMResponse,
+    SummaryMessage,
+    SystemMessage,
+    ToolCallBlock,
+    ToolMessage,
+    Usage,
+    UserMessage,
+)
+from coding_agent.session import Session
+
+from .conftest import FakeLLM, drive, make_runtime
+
+
+def _add_turn(session: Session, user_text: str, call_id: str, tool_output: str) -> None:
+    session.add(UserMessage.of(user_text))
+    session.add(
+        AssistantMessage.of(
+            tool_calls=[ToolCallBlock(id=call_id, name="read_file", arguments='{"path": "a.py"}')]
+        )
+    )
+    session.start_tool_execution(call_id=call_id, tool_name="read_file", arguments='{"path": "a.py"}')
+    session.finish_tool_execution(call_id=call_id, ok=True, content=tool_output)
+    session.add(ToolMessage.of(call_id))
+
+
+def _three_turns(tmp_path) -> Session:
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    _add_turn(session, "任务A", "ca", "output-A-unique")
+    _add_turn(session, "任务B", "cb", "output-B-unique")
+    _add_turn(session, "任务C", "cc", "output-C-unique")
+    return session
+
+
+def test_find_keep_from_skips_summary_and_cuts_on_user(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(SummaryMessage.of("旧摘要"))
+    _add_turn(session, "任务A", "ca", "a")
+    _add_turn(session, "任务B", "cb", "b")
+    _add_turn(session, "任务C", "cc", "c")
+    keep_from = find_keep_from(session.messages, keep_recent_turns=2)
+    assert keep_from is not None
+    assert isinstance(session.messages[keep_from], UserMessage)
+    assert session.messages[keep_from].text == "任务B"
+
+
+def test_skip_when_not_enough_turns(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    _add_turn(session, "任务A", "ca", "a")
+    _add_turn(session, "任务B", "cb", "b")
+    policy = CompactPolicy()
+
+    def boom(messages, tools=None):
+        raise AssertionError("不应调用")
+
+    assert find_keep_from(session.messages, policy.keep_recent_turns) is None
+    assert try_compact(session, boom, policy) is False
+
+
+def test_compact_replaces_dropped_and_deletes_history(tmp_path):
+    session = _three_turns(tmp_path)
+    captured: list[tuple[list[dict], list[dict] | None]] = []
+
+    def call_llm(messages, tools=None):
+        captured.append((messages, tools))
+        return LLMResponse(message=AssistantMessage.of("摘要正文"), usage=Usage(20, 5, 25))
+
+    policy = CompactPolicy()
+    assert try_compact(session, call_llm, policy) is True
+    assert isinstance(session.messages[0], SystemMessage)
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.messages[1].text == "摘要正文"
+    assert session.tool_history.get("ca") is None
+    assert session.tool_history.get("cb") is not None
+    assert session.tool_history.get("cc") is not None
+    assert any(m.text == "任务B" for m in session.messages if isinstance(m, UserMessage))
+    assert not any(m.text == "任务A" for m in session.messages if isinstance(m, UserMessage))
+
+    request, tools = captured[0]
+    assert tools is None
+    assert request[0]["content"] == COMPACT_SYSTEM_PROMPT
+    blob = str(request)
+    assert "output-A-unique" in blob
+    assert "任务A" in blob
+    assert "output-B-unique" not in blob
+    assert "任务C" not in blob
+
+
+def test_compact_llm_error_leaves_session(tmp_path):
+    session = _three_turns(tmp_path)
+    original = list(session.messages)
+    history_ids = set(session.tool_history.executions)
+
+    def call_llm(messages, tools=None):
+        raise LLMError("boom")
+
+    assert try_compact(session, call_llm, CompactPolicy()) is False
+    assert session.messages == original
+    assert set(session.tool_history.executions) == history_ids
+
+
+def test_empty_summary_does_not_mutate(tmp_path):
+    session = _three_turns(tmp_path)
+    original_len = len(session.messages)
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("   "), usage=Usage(3, 0, 3))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is False
+    assert len(session.messages) == original_len
+    assert session.tool_history.get("ca") is not None
+
+
+def test_needs_compact_uses_last_prompt_tokens(tmp_path):
+    session = _three_turns(tmp_path)
+    policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
+    assert needs_compact(session, policy) is False
+    session.usage.last_prompt_tokens = 900
+    assert needs_compact(session, policy) is True
+
+
+def test_loop_compacts_before_task_llm(env, tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    _add_turn(session, "任务A", "ca", "output-A-unique")
+    _add_turn(session, "任务B", "cb", "output-B-unique")
+    session.usage.last_prompt_tokens = 200_000
+    llm = FakeLLM([AssistantMessage.of("本轮完成。")])
+    runtime = make_runtime(env, llm, session)
+    events, reason = drive(runtime, "任务C")
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    blob = str(llm.compact_requests[0])
+    assert "output-A-unique" in blob
+    assert "output-B-unique" not in blob
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.tool_history.get("ca") is None
+    assert session.tool_history.get("cb") is not None
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("正在压缩" in m for m in notices)
+    assert any("已压缩" in m for m in notices)
+
+
+def test_slash_compact_command(env, tmp_path):
+    session = _three_turns(tmp_path)
+    llm = FakeLLM([])
+    runtime = make_runtime(env, llm, session)
+    renderer = Renderer(Console(file=StringIO(), force_terminal=True))
+
+    class App:
+        pass
+
+    app = App()
+    app.runtime = runtime
+    app.session = session
+    app.renderer = renderer
+    commands = build_default_commands()
+    command = commands.get("/compact")
+    assert command is not None
+    assert command.handler(app, []) is False
+    assert isinstance(session.messages[1], SummaryMessage)
+    assert session.tool_history.get("ca") is None
+    assert llm.compact_requests
+
+
+def test_runtime_compact_policy_is_a_copy(make_env, tmp_path):
+    env = make_env()
+    env.settings.compact.keep_recent_turns = 5
+    runtime = make_runtime(env, FakeLLM([]), Session.create(workspace=tmp_path, system_prompt=""))
+    assert runtime.compact_policy.keep_recent_turns == 5
+    runtime.compact_policy.keep_recent_turns = 1
+    assert env.settings.compact.keep_recent_turns == 5

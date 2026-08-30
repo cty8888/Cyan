@@ -1,8 +1,9 @@
-"""工作区路径沙箱：解析与展示。"""
+"""工作区路径沙箱：解析、展示，以及给规则/白名单用的写目标路径。"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ..errors import PathOutsideWorkspaceError
 
@@ -29,8 +30,26 @@ def resolve_path(workspace: Path, raw: str, *, must_exist: bool = False) -> Path
 
 
 def display(workspace: Path, path: Path) -> str:
+    """把绝对路径收成相对工作区的展示路径；不在工作区内则退回原路径。"""
     root = Path(workspace).resolve()
     try:
         return str(path.resolve().relative_to(root)) or "."
     except ValueError:
         return str(path)
+
+
+def write_target_display(workspace: Path, args: dict[str, Any]) -> str | None:
+    """把 write 类工具的 path 参数收成相对工作目录的展示路径，供规则与白名单匹配。
+
+    解析失败（空路径、逃出沙箱等）时退回原始字符串，只影响匹配准确性，
+    不在这里抛异常——真正的路径合法性校验交给工具自己的 ``resolve_path``。
+    """
+    raw = args.get("path")
+    if raw is None:
+        return None
+    raw = str(raw)
+    try:
+        resolved = resolve_path(workspace, raw)
+    except Exception:
+        return raw
+    return display(workspace, resolved)

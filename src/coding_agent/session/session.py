@@ -45,6 +45,7 @@ class Session:
         title: str | None = None,
         permission_mode: PermissionMode = PermissionMode.DEFAULT,
     ) -> Session:
+        """绑定工作目录并写入系统提示，作为一次新会话的起点。"""
         session = cls(
             metadata=SessionMetadata.create(title=title),
             workspace=SessionWorkspace.for_root(workspace),
@@ -78,6 +79,7 @@ class Session:
         self.state.consecutive_tool_failures = value
 
     def add(self, message: Message) -> None:
+        """追加一条消息并刷新会话的最近更新时间。"""
         self.messages.append(message)
         self.metadata.touch()
 
@@ -88,6 +90,7 @@ class Session:
         tool_name: str,
         arguments: str,
     ) -> None:
+        """记一条 RUNNING 状态的工具执行，供后续 finish 补全结果。"""
         execution = ToolExecution(
             id=call_id,
             tool_name=tool_name,
@@ -106,6 +109,7 @@ class Session:
         error: str | None = None,
         duration: float | None = None,
     ) -> None:
+        """把工具调用标为完成，并更新连续失败计数。"""
         execution = self.tool_history.get(call_id)
         if execution is None:
             raise RuntimeError(f"不存在对应的工具调用记录: {call_id}")
@@ -127,24 +131,30 @@ class Session:
             self.state.consecutive_tool_failures += 1
         self.metadata.touch()
 
-    def record_usage(self, usage: Usage) -> None:
+    def record_usage(self, usage: Usage, *, for_trigger: bool = True) -> None:
+        """累加本轮模型调用的 token 与次数。
+
+        ``for_trigger=True`` 时更新 ``last_prompt_tokens``（任务调用）。
+        压缩用的那次 chat 传 ``False``，避免刚压完又立刻再压。
+        """
         self.usage.input_tokens += usage.prompt_tokens
         self.usage.output_tokens += usage.completion_tokens
         self.usage.llm_calls += 1
+        if for_trigger:
+            self.usage.last_prompt_tokens = usage.prompt_tokens
         self.metadata.touch()
 
     # ------------------------------------------------------------------ 循环控制
 
     def record_call_fingerprint(self, name: str, args: dict[str, Any]) -> int:
+        """记录「同工具 + 同参数」指纹，返回它在最近窗口里出现的次数。"""
         payload = json.dumps({"name": name, "args": args}, sort_keys=True, ensure_ascii=False, default=str)
         fingerprint = hashlib.sha1(payload.encode("utf-8")).hexdigest()
         self.state.recent_calls.append(fingerprint)
         return self.state.recent_calls.count(fingerprint)
 
-    def record_progress(self) -> None:
-        self.state.recent_calls.clear()
-
     def reset_repeat_tracking(self) -> None:
+        """有实质进展（例如文件被改动）时清空重复调用窗口。"""
         self.state.recent_calls.clear()
 
     # ------------------------------------------------------------------ 工作区
@@ -184,6 +194,7 @@ class Session:
         self.metadata.touch()
 
     def stats(self) -> dict[str, Any]:
+        """供任务结束面板与 ``/usage`` 展示的汇总数字。"""
         return {
             "llm_calls": self.usage.llm_calls,
             "tool_calls": self.usage.tool_calls,

@@ -44,6 +44,7 @@ class WriteFileTool(Tool):
         workspace: Path,
         workspace_access: WorkspaceAccess | None = None,
     ) -> tuple[str, str | None, str]:
+        """审批预览：摘要说明新建还是覆写，详情是 unified diff。"""
         raw_path = str(args.get("path", ""))
         try:
             target, existed, old_content = _prepare_write(

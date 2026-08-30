@@ -17,6 +17,7 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> Tool:
+        """按 ``tool.name`` 注册；重名或未定义 name 会立刻失败。"""
         if not tool.name:
             raise ValueError(f"{type(tool).__name__} 未定义 name")
         if tool.name in self._tools:
@@ -35,6 +36,7 @@ class ToolRegistry:
         return name in self._tools
 
     def schemas(self) -> list[dict[str, Any]]:
+        """导出全部工具的 OpenAI function calling 定义。"""
         return [tool.to_schema() for tool in self._tools.values()]
 
     def execute(

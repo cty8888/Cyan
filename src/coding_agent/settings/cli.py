@@ -10,6 +10,6 @@ from ..security.types import PermissionMode
 @dataclass
 class CliSettings:
     log_level: str = "INFO"
-    verbose: bool = False
+    verbose: bool = False  # True 时日志同时打到 stderr
     permission_mode: PermissionMode = PermissionMode.DEFAULT
-    state_dirname: str = ".coding_agent"
+    state_dirname: str = ".coding_agent"  # 工作区内的状态/日志目录名

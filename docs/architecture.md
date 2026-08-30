@@ -23,6 +23,7 @@ src/coding_agent/
     loop.py              # LoopLimits：轮次 / 失败 / 重复上限
     tools.py             # ToolLimits：输出与读取截断
     cli.py               # CliSettings：日志、权限模式、状态目录
+    compact.py           # CompactPolicy：阈值、预留、保留轮数（启动默认值）
   cli/
     app.py               # REPL 主循环、斜杠命令分发
     commands.py          # CommandRegistry：可扩展的斜杠命令
@@ -36,9 +37,10 @@ src/coding_agent/
   session/               # Session 数据层（Loop 只通过 Runtime 读写）
     types.py             # 会话字段、工具执行历史
     session.py           # Session 门面
+    compact.py           # 对话压缩（区间 → 额外 chat → SummaryMessage）
     workspace_access.py  # 工具能触达的受控工作区视图
   context/
-    types.py             # ContextPolicy（展示模式 / token 预算）
+    types.py             # ContextPolicy（工具结果 summary / full）
     builder.py           # ContextBuilder：装配 wire 格式，决定工具结果展示策略
   llm/
     types.py             # Role / Block(...) / Message 继承体系 / LLMResponse
@@ -59,14 +61,16 @@ src/coding_agent/
       bash.py
   security/
     types.py             # PermissionMode / 审批协议 / PermissionOutcome
-    permissions.py       # PermissionManager.evaluate() → PermissionOutcome
+    permissions.py       # PermissionManager：判定链入口
     messages.py          # 回喂模型的权限文案（Plan 拒绝、用户拒绝等）
-    paths.py             # 路径沙箱
-    readonly.py          # Plan 模式只读判定、执行头提取（白名单共用）
+    paths.py             # 路径沙箱 + 写目标展示路径
+    shell.py             # Plan 模式只读命令判定、执行头提取（白名单共用）
+    allowlist.py         # 本会话「始终允许」：write:{目录} / exec:{命令}
     rules.py             # Blocked / Restricted / Sensitive 路径与命令规则
+    readonly.py          # 兼容旧导入，转调 shell.py
 ```
 
-每个领域包对齐同一骨架：`types.py` 放 enum / dataclass；行为按职责单独成文件；共用函数用具体名字（`paths` / `diff` / `process` / `readonly`），不设 `utils.py`。`settings/` 本身就是按域拆开的 dataclass，不再套一层 types；`cli/` 没有独立数据契约。
+每个领域包对齐同一骨架：`types.py` 放 enum / dataclass；行为按职责单独成文件；共用函数用具体名字（`paths` / `diff` / `process` / `shell`），不设 `utils.py`。`settings/` 本身就是按域拆开的 dataclass，不再套一层 types；`cli/` 没有独立数据契约。
 
 ## 3. Agent Loop 与数据流
 
@@ -90,6 +94,8 @@ flowchart TD
 
 `runtime.run(task)` 是一个 **generator**，`yield` 事件给 CLI，审批通过 `send()` 回传结果，从而让内核完全不依赖 `input()`。
 
+事件类型、与对话 Message 的双轨划分、以及和 Claude Code（异步 `query()` / 单向 message 流 / `can_use_tool` 回调）的对照，见 [docs/event-stream.md](event-stream.md)。**先不要改这套协议**——改形态会动 Loop / CLI / 测试里的 `drive()`，干扰对当前闭环的理解。
+
 **终止条件**（必须全部实现，缺一会死循环）：
 
 - 模型返回无 `tool_calls` 的完整回复
@@ -97,7 +103,7 @@ flowchart TD
 - 用户 Ctrl-C 中断
 - 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」重复调用
 
-token 预算耗尽后压缩属于 Phase 3，当前未实现，不作为本轮终止条件。
+token 预算触发压缩后任务继续，压缩失败不中断循环。
 
 ### Message 继承体系 + Block 内容模型 + ToolHistory 事实记录
 
@@ -107,6 +113,7 @@ token 预算耗尽后压缩属于 Phase 3，当前未实现，不作为本轮终
 Message (ABC dataclass：role: ClassVar[Role] + blocks: list[Block])
 ├── SystemMessage      # 只放一个 TextBlock
 ├── UserMessage        # TextBlock，未来可以混入 FileBlock / CodeBlock
+├── SummaryMessage     # 压缩后的区间摘要；to_api 仍是 user
 ├── AssistantMessage   # TextBlock + 若干 ToolCallBlock，覆写 to_api() 处理 tool_calls
 └── ToolMessage        # 只放一个 ToolResultBlock（只有 call id）
 
@@ -131,7 +138,8 @@ context.builder.ContextBuilder（展示策略层，由 Runtime 持有）
 ```
 Runtime（执行层，不保存长期状态）
  ├── LLMClient
- ├── ContextBuilder
+ ├── ContextBuilder / ContextPolicy   # 只装配 messages + tool_history
+ ├── CompactPolicy                    # 何时压、留几轮
  ├── ToolRegistry
  ├── ToolExecutor
  ├── PermissionManager
@@ -146,15 +154,28 @@ Session
  ├── permissions     # permission_mode / always_allowed（write:{目录} / exec:{命令名}）
  └── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
 
-ContextPolicy（挂在 Runtime 上，不属于 Session）
- └── tool_result_mode / max_context_tokens
+ContextPolicy（装配，不属于 Session）
+ └── tool_result_mode
+
+CompactPolicy（压缩：默认值在 ``AgentSettings.compact``，App 拷一份注入 Runtime）
+ └── max_context_tokens / reserve_tokens / trigger_ratio / keep_recent_turns
 ```
+
+**运行时策略与斜杠命令（回头再做，先不改代码）**
+
+配置分三类，不要一律 `replace`：
+
+- **启动身份**（workspace、api_key、log）：留在 `AgentSettings` / App，进程内基本不改；换模型要重建客户端。
+- **会话状态**（`permission_mode`、`always_allowed`）：继续挂在 Session；`/mode` 已是这个模式。
+- **本会话行为策略**（compact / loop / tools / context）：默认值只住 `settings/`，App 拷一份注入 Runtime，Loop 只读 Runtime 上的副本。会话中途用斜杠命令改副本，不写回 `AgentSettings`。
+
+Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtime.settings.*`，`ContextPolicy` 还在 `Runtime.create` 里直接 `ContextPolicy()`，回头一起收齐。同时丰富 `/` 命令：除现有 `/compact`、`/mode` 外，补查看与修改阈值、保留轮数、轮次上限、工具截断、工具结果展示等（改 `runtime.compact_policy` / 将来的 `loop` / `tools` / `context`）。
 
 模型参数（`model` / `temperature`）留在 ``LLMSettings``，不属于 Session。
 
 核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 
-关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起长期存在于 `tool_history` 里，不属于 Message——这是为 Phase 3 的上下文压缩铺路：压缩由 `CompressionManager` 负责（生成 `summary`、保存原文、`ref`、删除 `content`），完全不用碰 `Message` 历史。
+关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起存在于 `tool_history` 里，不属于 Message。对话压缩（[`session/compact.py`](src/coding_agent/session/compact.py)）会把较早的消息区间额外 `chat` 一次收成 `SummaryMessage` 写回列表，并删除该区间对应的 `tool_history` 条目；失败则两者都不改。
 
 `ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存数据（`content` / `summary` / `ref`），提供 `has_summary`、`content_removed` 等基础状态视图，以及 `render(mode="summary"|"full")` 基础渲染——不参与压缩策略判断。`ContextBuilder.render_mode` 决定调用哪种渲染模式；调试或深入分析时可设为 `"full"`。
 
@@ -216,7 +237,7 @@ MVP 工具集：
 
 | 模式 | 只读 | 普通写入 | 普通执行 |
 |------|------|----------|----------|
-| Plan | 放行 | DENY | 仅放行只读命令（`git status`、`pytest`、`ls` 等，见 `security/readonly.py`） |
+| Plan | 放行 | DENY | 仅放行只读命令（`git status`、`pytest`、`ls` 等，见 `security/shell.py`） |
 | Default | 放行 | 需审批 | 需审批 |
 | AcceptEdits | 放行 | 直接放行 | 需审批 |
 | Bypass | 放行 | 直接放行 | 直接放行 |
@@ -226,15 +247,17 @@ MVP 工具集：
 组件职责：
 
 1. **`rules.py`**：Blocked / Restricted / Sensitive 规则表
-2. **`PermissionManager`**：结合 PermissionMode、白名单、`RiskLevel.CRITICAL`，产出 `PermissionOutcome`
-3. **工具 `run()`**：对 Blocked / Restricted 再拦一次（`BlockedCommandError` / `SecurityError`）
+2. **`shell.py`**：Plan 只读命令判定与执行头提取
+3. **`allowlist.py`**：本会话始终允许的范围键
+4. **`PermissionManager`**：编排判定链，产出 `PermissionOutcome`
+5. **工具 `run()`**：对 Blocked / Restricted 再拦一次（`BlockedCommandError` / `SecurityError`）
 
 ## 6. 上下文管理与 Memory
 
-- Token 记账：以 API 返回的 `usage.prompt_tokens` 为准，本地启发式估算做预判
-- 超过阈值（如 70% 上下文窗口）触发压缩：保留 system prompt + 最近 K 轮原始消息，中间历史用一次额外 LLM 调用摘要成「已完成事项 / 关键文件 / 待办」结构化文本
-- 工具结果单条过长时先做局部截断，再考虑全局压缩
-- Memory 两层：项目级 `AGENTS.md`（启动时注入 system prompt）+ 会话级持久化到 `.coding_agent/sessions/*.json`，支持 `--continue` 恢复
+- Token 记账：以 API 返回的 `usage.prompt_tokens` 为准（写入 `SessionUsage.last_prompt_tokens`），尚无 usage 时用 JSON 字符数 / 4 做预判
+- 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；保留最近 `keep_recent_turns` 轮原文。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
+- 工具结果单条过长时仍由各工具自己截断（如 bash 的 `max_tool_output_chars`）
+- Memory 两层（未做）：项目级 `AGENTS.md` + 会话级持久化与 `--continue`
 
 ## 7. 开发排期
 
@@ -246,7 +269,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
 - [x] tools 层：Tool 基类 + ToolRunResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
 - [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
-- [x] security 层：路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`readonly.py`）
+- [x] security 层：路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`shell.py`）
 - [x] `core/runtime` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环
 - [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线测试 `tests/`（pytest）
@@ -257,10 +280,11 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [ ] 流式输出（`stream=True` + tool_call 分片拼接）
 - [x] rich 富渲染：工具卡片、diff 预览、执行输出摘要
 - [x] Ctrl-C 中断（中断时补齐未响应的 tool_call，保证上下文完整）
+- [ ] 丰富斜杠命令：会话中改 Runtime 上的策略副本（compact / loop / tools / context），不写回 `AgentSettings`；先把 loop/tools/context 收成与 compact 相同的「settings 默认 → App 拷贝注入」
 
 ### Phase 3：上下文与记忆
 
-- [ ] 上下文 token 预算与历史摘要压缩
+- [x] 上下文 token 预算与历史摘要压缩（改写 Session.messages 为 SummaryMessage，不落盘）
 - [ ] Memory：`AGENTS.md` 注入、会话持久化与 `--continue` 恢复
 
 ### Phase 4：规划与检索

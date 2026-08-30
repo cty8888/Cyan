@@ -31,7 +31,7 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 
 终端界面用 rich 渲染（Markdown、diff、审批面板）。完整运行记录同时写入工作目录的 `.coding_agent/logs/agent.log`。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/clear`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/compact`、`/clear`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
 
 ## 工具
 

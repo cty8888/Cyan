@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT
 from coding_agent.core.runtime import Runtime
 from coding_agent.core.types import ApprovalRequired, TaskFinished
 from coding_agent.llm.base import LLMClient
@@ -28,17 +29,34 @@ class Env:
 
 
 class FakeLLM(LLMClient):
-    """按预设脚本依次返回响应。"""
+    """按预设脚本依次返回响应。压缩用的 chat（专用 system prompt）不消耗 script。"""
 
     def __init__(self, script):
         self.model = "fake"
         self.script = list(script)
         self.calls = 0
+        self.compact_requests: list[list[dict]] = []
 
     def chat(self, messages, tools=None):
         self.calls += 1
+        if _is_compact_request(messages):
+            self.compact_requests.append(list(messages))
+            return LLMResponse(
+                message=AssistantMessage.of(
+                    "# 已完成事项\n压缩测试摘要\n# 关键文件、结论与约束\n无\n"
+                    "# 未完成待办\n无\n# 当前任务停在哪\n继续"
+                ),
+                usage=Usage(8, 4, 12),
+            )
         item = self.script.pop(0) if self.script else AssistantMessage.of("done")
         return LLMResponse(message=item, usage=Usage(10, 5, 15))
+
+
+def _is_compact_request(messages) -> bool:
+    if not messages:
+        return False
+    first = messages[0]
+    return isinstance(first, dict) and first.get("role") == "system" and first.get("content") == COMPACT_SYSTEM_PROMPT
 
 
 def tool_call(name: str, args_json: str, cid: str = "c1") -> AssistantMessage:

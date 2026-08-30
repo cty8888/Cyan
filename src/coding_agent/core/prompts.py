@@ -35,8 +35,21 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个运行在命令行中的编程助手，�
 - 当你认为任务已经完成或需要用户补充信息时，直接给出文字回复而不再调用工具，这会结束本轮任务。
 """
 
+COMPACT_SYSTEM_PROMPT = """你正在把一段较早的编程对话压缩成摘要，供同一个编程助手稍后接着工作。
+
+随后消息是将从会话中移除的原文（含工具输入与完整输出）。请只根据这些内容总结，不要编造未见过的文件或结论。
+
+用简体中文输出，结构固定为以下四段标题（每段若干短句即可，不要复述大段工具原文）：
+
+# 已完成事项
+# 关键文件、结论与约束
+# 未完成待办
+# 当前任务停在哪
+"""
+
 
 def build_system_prompt(workspace: Path) -> str:
+    """把工作目录、系统、日期和本机 Python 路径填进系统提示模板。"""
     return SYSTEM_PROMPT_TEMPLATE.format(
         workspace=workspace,
         platform=f"{platform.system()} {platform.release()}",

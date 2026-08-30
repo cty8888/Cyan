@@ -15,6 +15,7 @@ from .settings import AgentSettings
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """声明命令行参数；真正的默认值在 ``AgentSettings`` / 环境变量里。"""
     parser = argparse.ArgumentParser(
         prog="coding-agent",
         description="一个自主读写文件、执行命令来完成编程任务的命令行智能体",
@@ -46,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """加载配置、初始化日志，然后进入一次性任务或交互 REPL。"""
     args = build_parser().parse_args(argv)
     console = Console()
     logger = get_logger()

@@ -60,6 +60,7 @@ class ToolRunResult:
         return cls(ok=False, error=error, metadata=metadata)
 
     def to_model_text(self) -> str:
+        """回喂模型的文本：成功用 content，失败带「错误：」前缀。"""
         if self.ok:
             return self.content or "(执行成功，无输出)"
         return f"错误：{self.error}"

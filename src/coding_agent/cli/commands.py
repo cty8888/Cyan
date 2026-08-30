@@ -3,6 +3,10 @@
 设计上与 ``tools/registry.py`` 保持一致：新增一个命令 = 写一个 handler 函数 + 在
 ``build_default_commands()`` 里注册一行，不需要再去改一条 if/elif 链，``/help`` 的
 文本也会跟着自动列出新命令，不需要手动同步一份 ``HELP_TEXT`` 字符串。
+
+回头要丰富命令：会话里改行为策略（压缩阈值、保留轮数、轮次上限、工具截断等）
+只写 ``app.runtime`` 上的副本，不改 ``app.settings``。见 ``docs/architecture.md``
+「运行时策略与斜杠命令」。
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ CommandHandler = Callable[["App", list[str]], bool]
 
 @dataclass(frozen=True)
 class SlashCommand:
+    """一条斜杠命令的声明：名称、用法、说明、处理函数，以及可选别名。"""
+
     name: str
     usage: str
     description: str
@@ -40,6 +46,7 @@ class CommandRegistry:
         self._order: list[str] = []
 
     def register(self, command: SlashCommand) -> SlashCommand:
+        """按主名和别名注册；名称冲突立即失败。"""
         for name in (command.name, *command.aliases):
             if name in self._commands:
                 raise ValueError(f"命令名重复：{name}")
@@ -58,6 +65,7 @@ class CommandRegistry:
 
 
 def build_help_text(registry: CommandRegistry) -> str:
+    """根据当前注册表生成 /help 文本，新增命令不必再手写一份列表。"""
     lines = ["可用命令："]
     for command in registry:
         label = command.usage
@@ -113,6 +121,22 @@ def _cmd_usage(app: App, args: list[str]) -> bool:
     return False
 
 
+def _cmd_compact(app: App, args: list[str]) -> bool:
+    from ..session.compact import find_keep_from
+
+    keep_from = find_keep_from(app.session.messages, app.runtime.compact_policy.keep_recent_turns)
+    if keep_from is None:
+        app.renderer.notice("消息太少，无需压缩。", level="warning")
+        return False
+    app.renderer.notice("正在压缩较早的对话历史…")
+    if app.runtime.compact():
+        app.renderer.notice("已压缩较早的对话历史。")
+        logger.info("手动压缩会话历史")
+    else:
+        app.renderer.notice("压缩失败，对话历史未改动。", level="warning")
+    return False
+
+
 def _cmd_clear(app: App, args: list[str]) -> bool:
     app.session.clear()
     app.renderer.console.print("[dim]已清空对话历史[/]")
@@ -139,6 +163,7 @@ def build_default_commands() -> CommandRegistry:
         SlashCommand("/mode", "/mode <模式>", "切换权限模式：plan / default / accept_edits / bypass", _cmd_mode)
     )
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
+    registry.register(SlashCommand("/compact", "/compact", "把较早的对话压缩成摘要", _cmd_compact))
     registry.register(SlashCommand("/clear", "/clear", "清空对话历史，开始新会话", _cmd_clear))
     registry.register(SlashCommand("/cwd", "/cwd", "显示当前工作目录", _cmd_cwd))
     registry.register(SlashCommand("/exit", "/exit", "退出", _cmd_exit, aliases=("/quit",)))

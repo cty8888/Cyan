@@ -52,6 +52,7 @@ class EditFileTool(Tool):
         workspace: Path,
         workspace_access: WorkspaceAccess | None = None,
     ) -> tuple[str, str | None, str]:
+        """审批预览：走与 ``run`` 相同的前置检查，详情是替换后的 diff。"""
         raw_path = str(args.get("path", ""))
         try:
             target, original, updated, occurrences = _prepare_edit(

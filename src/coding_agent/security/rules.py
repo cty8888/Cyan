@@ -26,6 +26,7 @@ from ..errors import SecurityError
 
 
 def _word(pattern: str) -> re.Pattern[str]:
+    """编译一条命令规则。单独抽出是为了表格里写起来短一点。"""
     return re.compile(pattern)
 
 
@@ -97,6 +98,7 @@ def sensitive_command(command: str) -> str | None:
 
 
 def _first_match(rules: tuple[tuple[re.Pattern[str], str], ...], command: str) -> str | None:
+    """按表顺序返回第一条命中规则的拒绝/确认理由。"""
     for pattern, reason in rules:
         if pattern.search(command):
             return reason
@@ -158,6 +160,7 @@ def sensitive_path(relative_path: str) -> str | None:
 
 
 def _normalize(relative_path: str) -> str:
+    """统一分隔符并去掉前导 ``./``，供路径规则做子串/分段匹配。"""
     text = relative_path.replace("\\", "/")
     while text.startswith("./"):
         text = text[2:]

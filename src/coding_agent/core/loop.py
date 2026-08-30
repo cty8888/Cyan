@@ -56,6 +56,7 @@ class AgentLoop:
         )
 
     def run(self, task: str) -> AgentStream:
+        """驱动「调用模型 → 执行工具 → 再调用」直到完成或触发终止条件。"""
         self.session.state.current_task = task
         self.session.add(UserMessage.of(task))
         self.session.consecutive_tool_failures = 0
@@ -68,6 +69,14 @@ class AgentLoop:
         try:
             for iteration in range(1, self.settings.loop.max_iterations + 1):
                 yield Thinking(iteration=iteration)
+
+                if self.runtime.needs_compact():
+                    yield Notice("上下文接近上限，正在压缩…")
+                    compacted = self.runtime.compact()
+                    if compacted:
+                        yield Notice("已压缩较早的对话历史。")
+                    else:
+                        yield Notice("压缩失败，继续使用原文。", level="warning")
 
                 try:
                     response = self.runtime.call_llm(self.runtime.messages_for_request(), tools=schemas)
@@ -107,6 +116,8 @@ class AgentLoop:
             yield self._finish(StopReason.FATAL_ERROR, final_text)
 
     def _run_tool_calls(self, tool_calls: list[ToolCallBlock]) -> Generator[AgentEvent, Any, StopReason | None]:
+        # 已写回 tool 结果的 call id。下轮 LLM 要求本批每条 tool_call 都有对应回复；
+        # Ctrl-C 时用它区分「已经回过」和「还没执行」，只给后者补一条中断结果。
         responded: set[str] = set()
         try:
             for call in tool_calls:
@@ -117,17 +128,21 @@ class AgentLoop:
         except KeyboardInterrupt:
             for call in tool_calls:
                 if call.id not in responded:
-                    self._respond_text(
+                    self._respond(
                         call,
-                        "用户中断了任务，该工具调用未执行。",
-                        ok=False,
-                        error="用户中断了任务，该工具调用未执行。",
+                        responded,
+                        ToolRunResult.failure("用户中断了任务，该工具调用未执行。"),
                     )
             raise
 
     def _run_single_call(
         self, call: ToolCallBlock, responded: set[str]
     ) -> Generator[AgentEvent, Any, StopReason | None]:
+        """处理一条工具调用：解析参数、鉴权、执行，并把结果写回会话。
+
+        任何出口都要 ``_respond``，保证下轮请求里每条 tool_call 都有对应回复。
+        返回非 ``None`` 的 ``StopReason`` 时，外层会结束整次任务。
+        """
         try:
             args = parse_tool_arguments(call.arguments, call.name)
         except InvalidToolArgumentsError as exc:
@@ -184,7 +199,7 @@ class AgentLoop:
 
         self._respond(call, responded, result, duration=duration)
         if result.ok and result.metadata.get("diff") not in (None, "(无变化)"):
-            self.session.record_progress()
+            self.session.reset_repeat_tracking()
         yield ToolFinished(call_id=call.id, name=call.name, result=result, duration=duration)
 
         return self._check_failure_threshold()
@@ -196,6 +211,11 @@ class AgentLoop:
         call: ToolCallBlock,
         responded: set[str],
     ) -> Generator[AgentEvent, Any, bool]:
+        """解析权限：放行、硬拒绝，或 yield 审批事件等人选择。
+
+        ``yield ApprovalRequired`` 会把 Loop 挂起；CLI ``stream.send(decision)``
+        的返回值就是用户的 ``ApprovalDecision``。类型不对时按拒绝处理。
+        """
         outcome = self.runtime.check_permission(
             tool,
             args,
@@ -224,24 +244,10 @@ class AgentLoop:
         return True
 
     def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolRunResult, *, duration: float = 0.0) -> None:
-        self._respond_text(
-            call,
-            result.to_model_text(),
-            ok=result.ok,
-            duration=duration,
-            error=result.error,
-        )
-        responded.add(call.id)
+        """把工具结果写入 tool_history 和 messages，并记入 ``responded``。
 
-    def _respond_text(
-        self,
-        call: ToolCallBlock,
-        text: str,
-        ok: bool,
-        *,
-        error: str | None = None,
-        duration: float = 0.0,
-    ) -> None:
+        未真正执行过的路径（参数错误、权限拒绝、中断）还没有 start 记录，这里补一条。
+        """
         if self.session.tool_history.get(call.id) is None:
             self.session.start_tool_execution(
                 call_id=call.id,
@@ -250,17 +256,20 @@ class AgentLoop:
             )
         self.session.finish_tool_execution(
             call_id=call.id,
-            ok=ok,
-            content=text,
-            error=error,
+            ok=result.ok,
+            content=result.to_model_text(),
+            error=result.error,
             duration=duration,
         )
         self.session.add(ToolMessage.of(call.id))
+        responded.add(call.id)  # 标记已闭环，中断补全时跳过这条
 
     def _check_failure_threshold(self) -> StopReason | None:
+        """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""
         if self.session.consecutive_tool_failures >= self.settings.loop.max_consecutive_tool_failures:
             return StopReason.TOOL_FAILURES
         return None
 
     def _finish(self, reason: StopReason, final_text: str) -> TaskFinished:
+        """组装任务结束事件，带上本次会话的用量统计。"""
         return TaskFinished(reason=reason, final_text=final_text, stats=self.session.stats())

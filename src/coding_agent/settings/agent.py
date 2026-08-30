@@ -1,7 +1,7 @@
 """一次运行的全部可调参数入口。
 
 优先级：命令行参数 > 环境变量 > 内置默认值。
-各域设置分见 ``LLMSettings`` / ``LoopLimits`` / ``ToolLimits`` / ``CliSettings``。
+各域设置分见 ``LLMSettings`` / ``LoopLimits`` / ``ToolLimits`` / ``CliSettings`` / ``CompactPolicy``。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Any
 
 from ..errors import ConfigError
 from .cli import CliSettings
+from .compact import CompactPolicy
 from .llm import LLMSettings
 from .loop import LoopLimits
 from .tools import ToolLimits
@@ -26,6 +27,7 @@ class AgentSettings:
     loop: LoopLimits = field(default_factory=LoopLimits)
     tools: ToolLimits = field(default_factory=ToolLimits)
     cli: CliSettings = field(default_factory=CliSettings)
+    compact: CompactPolicy = field(default_factory=CompactPolicy)
 
     def __post_init__(self) -> None:
         self.workspace = Path(self.workspace).expanduser().resolve()
@@ -38,6 +40,7 @@ class AgentSettings:
 
     @property
     def state_dir(self) -> Path:
+        """工作区内存放日志等运行时文件的目录。"""
         return self.workspace / self.cli.state_dirname
 
     @property
@@ -46,6 +49,7 @@ class AgentSettings:
 
     @classmethod
     def load(cls, **overrides: Any) -> AgentSettings:
+        """按 默认值 < 环境变量 < overrides 装配，见 ``settings.loader``。"""
         from .loader import load_settings
 
         return load_settings(**overrides)

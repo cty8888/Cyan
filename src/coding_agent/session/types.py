@@ -89,6 +89,7 @@ class SessionUsage:
     output_tokens: int = 0
     llm_calls: int = 0
     tool_calls: int = 0
+    last_prompt_tokens: int = 0  # 最近一次任务 LLM 调用的 prompt_tokens，供压缩触发；摘要请求不写入
 
     @property
     def total_tokens(self) -> int:

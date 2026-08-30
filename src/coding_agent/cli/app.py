@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from rich.console import Console
@@ -59,6 +60,7 @@ class App:
             registry=self.registry,
             permissions=self.permissions,
             session=self.session,
+            compact_policy=replace(settings.compact),
         )
 
     # ------------------------------------------------------------------ 入口
@@ -68,6 +70,7 @@ class App:
         return 0 if reason is StopReason.COMPLETED else 1
 
     def run_interactive(self) -> int:
+        """REPL：读一行任务或斜杠命令，直到 /exit 或 Ctrl-D。"""
         self.renderer.banner(
             self.settings,
             [tool.name for tool in self.registry],
@@ -92,6 +95,7 @@ class App:
 
     # ------------------------------------------------------------ 事件消费
     def _execute(self, task: str) -> StopReason:
+        """消费 Loop 事件流：普通事件只渲染；审批事件把用户选择 send 回去。"""
         logger.info("收到任务：%s", task)
         stream = self.runtime.run(task)
         reply: Any = None
@@ -119,6 +123,7 @@ class App:
         return reason
 
     def _render(self, event: Any) -> Any:
+        """把事件画到终端。只有 ``ApprovalRequired`` 会返回 ``ApprovalDecision``。"""
         if isinstance(event, TaskStarted):
             return None
         if isinstance(event, Thinking):

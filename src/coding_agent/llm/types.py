@@ -108,6 +108,7 @@ class Message(ABC):
 
     @property
     def tool_calls(self) -> list[ToolCallBlock]:
+        """从 blocks 里滤出模型发起的工具调用。"""
         return [b for b in self.blocks if isinstance(b, ToolCallBlock)]
 
     @property
@@ -141,6 +142,23 @@ class UserMessage(Message):
 
     @classmethod
     def of(cls, text: str) -> UserMessage:
+        return cls(blocks=[TextBlock(text=text)])
+
+    def to_api(self) -> dict[str, Any]:
+        return {"role": self.role.value, "content": self.text or ""}
+
+
+@dataclass
+class SummaryMessage(Message):
+    """被压缩掉的对话区间收成的摘要。wire 仍用 user 角色（厂商没有 summary 角色）。
+
+    与 ``UserMessage`` 平级，不算用户任务轮次；再压缩时会落入被压缩段。
+    """
+
+    role: ClassVar[Role] = Role.USER
+
+    @classmethod
+    def of(cls, text: str) -> SummaryMessage:
         return cls(blocks=[TextBlock(text=text)])
 
     def to_api(self) -> dict[str, Any]:
@@ -199,6 +217,8 @@ class ToolMessage(Message):
 
 @dataclass
 class Usage:
+    """一次模型调用的 token 用量，可累加。"""
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

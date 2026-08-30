@@ -9,7 +9,10 @@ from ..session.types import RenderMode
 
 @dataclass
 class ContextPolicy:
-    """Runtime 上的上下文呈现策略，与模型调用参数（model / temperature）无关。"""
+    """装配层策略：工具结果在发给模型时用摘要还是原文。
+
+    不决定何时压缩、压多少——那是 Runtime 上的 ``CompactPolicy``。
+    发给模型的内容来自 Session 的 messages + tool_history。
+    """
 
     tool_result_mode: RenderMode = "summary"
-    max_context_tokens: int = 128_000

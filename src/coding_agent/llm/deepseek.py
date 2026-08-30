@@ -47,6 +47,7 @@ class DeepSeekClient(LLMClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
+        """发起补全；可重试错误做指数退避，解析失败（``LLMResponseError``）不重试。"""
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -82,6 +83,7 @@ def _backoff_delay(attempt: int) -> float:
 
 
 def _map_exception(exc: Exception) -> LLMError:
+    """把 openai SDK 异常映射为内部 ``LLMError`` 家族，并标是否可重试。"""
     if isinstance(exc, openai.AuthenticationError):
         return LLMAuthError("API Key 无效或已过期，请检查 .env 中的 DEEPSEEK_API_KEY")
     if isinstance(exc, openai.PermissionDeniedError):

@@ -14,11 +14,11 @@ def test_alternating_loop_is_detected(tmp_path):
     assert max(counts) >= 3
 
 
-def test_progress_resets_repeat_counter(tmp_path):
+def test_reset_repeat_tracking_clears_counter(tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="")
     counts = []
     for _ in range(4):
         counts.append(session.record_call_fingerprint("bash", {"command": "pytest"}))
         session.record_call_fingerprint("edit_file", {"path": "x.py"})
-        session.record_progress()
+        session.reset_repeat_tracking()
     assert max(counts) == 1

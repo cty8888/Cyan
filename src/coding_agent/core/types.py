@@ -15,6 +15,8 @@ from ..tools.types import ToolRunResult
 
 
 class StopReason(Enum):
+    """一次任务结束的原因，供 CLI 展示与退出码判定。"""
+
     COMPLETED = "completed"
     MAX_ITERATIONS = "max_iterations"
     TOOL_FAILURES = "tool_failures"

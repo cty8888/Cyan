@@ -22,4 +22,5 @@ class ToolExecutor:
         *,
         validated: bool = False,
     ) -> ToolRunResult:
+        """转交给注册表执行。``validated=True`` 表示 Loop 已做过参数规范化。"""
         return self._registry.execute(name, args, ctx, validated=validated)

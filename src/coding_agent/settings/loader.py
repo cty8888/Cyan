@@ -13,6 +13,7 @@ from ..errors import ConfigError
 from ..security.types import PermissionMode
 from .agent import AgentSettings
 from .cli import CliSettings
+from .compact import CompactPolicy
 from .llm import LLMSettings
 from .loop import LoopLimits
 from .tools import ToolLimits
@@ -26,9 +27,13 @@ _ENV_MAPPING = {
     "CODING_AGENT_TEMPERATURE": "temperature",
     "CODING_AGENT_LOG_LEVEL": "log_level",
     "CODING_AGENT_MODE": "permission_mode",
+    "CODING_AGENT_MAX_CONTEXT_TOKENS": "max_context_tokens",
+    "CODING_AGENT_COMPACT_RESERVE_TOKENS": "reserve_tokens",
+    "CODING_AGENT_COMPACT_TRIGGER_RATIO": "trigger_ratio",
+    "CODING_AGENT_COMPACT_KEEP_TURNS": "keep_recent_turns",
 }
 
-_NESTED_KEYS = frozenset({"llm", "loop", "tools", "cli"})
+_NESTED_KEYS = frozenset({"llm", "loop", "tools", "cli", "compact"})
 
 
 def _field_names(cls: type) -> frozenset[str]:
@@ -40,7 +45,16 @@ _LLM_FIELDS = _field_names(LLMSettings)
 _LOOP_FIELDS = _field_names(LoopLimits)
 _CLI_FIELDS = _field_names(CliSettings)
 _TOOL_FIELDS = _field_names(ToolLimits)
-_KNOWN_FIELDS = {"workspace"} | _LLM_FIELDS | _LOOP_FIELDS | _CLI_FIELDS | _TOOL_FIELDS | _NESTED_KEYS
+_COMPACT_FIELDS = _field_names(CompactPolicy)
+_KNOWN_FIELDS = (
+    {"workspace"}
+    | _LLM_FIELDS
+    | _LOOP_FIELDS
+    | _CLI_FIELDS
+    | _TOOL_FIELDS
+    | _COMPACT_FIELDS
+    | _NESTED_KEYS
+)
 
 
 def load_settings(**overrides: Any) -> AgentSettings:
@@ -71,18 +85,31 @@ def load_settings(**overrides: Any) -> AgentSettings:
 
 
 def _assemble(flat: dict[str, Any], nested: dict[str, Any]) -> AgentSettings:
+    """把扁平字段拆进 llm/loop/tools/cli；调用方传入的嵌套对象优先。"""
     llm = nested.get("llm") or LLMSettings(**{k: flat[k] for k in _LLM_FIELDS if k in flat})
     loop = nested.get("loop") or LoopLimits(**{k: flat[k] for k in _LOOP_FIELDS if k in flat})
     tools = nested.get("tools") or ToolLimits(**{k: flat[k] for k in _TOOL_FIELDS if k in flat})
     cli = nested.get("cli") or CliSettings(**{k: flat[k] for k in _CLI_FIELDS if k in flat})
+    compact = nested.get("compact") or CompactPolicy(**{k: flat[k] for k in _COMPACT_FIELDS if k in flat})
     workspace = flat.get("workspace", Path.cwd())
-    return AgentSettings(workspace=workspace, llm=llm, loop=loop, tools=tools, cli=cli)
+    return AgentSettings(
+        workspace=workspace, llm=llm, loop=loop, tools=tools, cli=cli, compact=compact
+    )
 
 
 def _coerce_flat(field_name: str, raw: str, source: str) -> Any:
-    if field_name in {"max_iterations", "max_retries", "max_consecutive_tool_failures", "max_repeated_calls"}:
+    """把环境变量字符串转成对应字段类型。"""
+    if field_name in {
+        "max_iterations",
+        "max_retries",
+        "max_consecutive_tool_failures",
+        "max_repeated_calls",
+        "max_context_tokens",
+        "reserve_tokens",
+        "keep_recent_turns",
+    }:
         return _coerce_int(raw, source)
-    if field_name in {"temperature", "request_timeout"}:
+    if field_name in {"temperature", "request_timeout", "trigger_ratio"}:
         return _coerce_float(raw, source)
     if field_name == "verbose":
         return raw.strip().lower() in {"1", "true", "yes", "on"}

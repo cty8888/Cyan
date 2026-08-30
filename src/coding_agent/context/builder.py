@@ -13,16 +13,18 @@ from .types import ContextPolicy
 class ContextBuilder:
     """根据当前上下文需求，决定 Message / ToolHistory 如何呈现给模型。
 
-    压缩与 token 预算裁剪尚未接入，目前按 ``render_mode`` 渲染工具结果。
+    只负责装配，不决定何时压缩。压缩策略在 Runtime 的 ``CompactPolicy``。
     """
 
     render_mode: RenderMode = "summary"
 
     @classmethod
     def from_policy(cls, policy: ContextPolicy) -> ContextBuilder:
+        """从 Runtime 上的上下文策略构造 builder。"""
         return cls(render_mode=policy.tool_result_mode)
 
     def render_tool_result(self, execution: ToolExecution | None) -> str:
+        """按当前 render_mode 取出一次工具执行给模型看的文本。"""
         if execution is None or execution.result is None:
             return ""
         return execution.result.render(mode=self.render_mode)
@@ -32,6 +34,7 @@ class ContextBuilder:
         messages: list[Message],
         tool_history: ToolHistory,
     ) -> list[dict]:
+        """ToolMessage 只存 call id，正文从 tool_history 查出后再填进 API payload。"""
         payloads: list[dict] = []
         for message in messages:
             if isinstance(message, ToolMessage):

@@ -54,6 +54,37 @@ _WRITE_FLAG_EQ = {
     "wget": ("--output-document=",),
     "install": ("--target-directory=",),
 }
+# curl/wget 把本地文件当请求体：-d @.env、--data-binary @file、-T file
+_UPLOAD_AT_FLAGS = frozenset(
+    {
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--data-urlencode",
+        "-F",
+        "--form",
+    }
+)
+_UPLOAD_PATH_FLAGS = frozenset({"-T", "--upload-file", "--post-file"})
+_UPLOAD_FLAG_NEXT = {
+    "curl": _UPLOAD_AT_FLAGS | frozenset({"-T", "--upload-file"}),
+    "wget": frozenset({"--post-file"}),
+}
+_UPLOAD_FLAG_EQ = {
+    "curl": (
+        "--data=",
+        "--data-raw=",
+        "--data-binary=",
+        "--data-urlencode=",
+        "--form=",
+        "--upload-file=",
+    ),
+    "wget": ("--post-file=",),
+}
+_GIT_DIR_FLAGS = frozenset({"--git-dir", "--work-tree"})
+_GIT_DIR_EQ = ("--git-dir=", "--work-tree=")
+_OPAQUE_HEADS = frozenset({"xargs", "parallel", "awk"})
 _READ_ARGS = frozenset(
     {
         "cat",
@@ -245,7 +276,9 @@ def _segment_touches(segment: str) -> list[tuple[str, str]]:
         return touches
 
     touches.extend((path, "write") for path in _write_flag_paths(tokens))
-    touches.extend((path, "write") for path in _dd_write_paths(tokens))
+    touches.extend((path, kind) for path, kind in _dd_paths(tokens))
+    touches.extend((path, "write") for path in _git_dir_paths(tokens))
+    touches.extend((path, "read") for path in _upload_paths(tokens))
 
     paths = _path_args(tokens)
     if head in _WRITE_ALL:
@@ -262,17 +295,79 @@ def _segment_touches(segment: str) -> list[tuple[str, str]]:
     return touches
 
 
-def _dd_write_paths(tokens: list[str]) -> list[str]:
-    """抽出 ``dd of=FILE`` 的写目标。"""
+def _dd_paths(tokens: list[str]) -> list[tuple[str, str]]:
+    """抽出 ``dd if=`` / ``of=``。"""
     if not tokens or _executable_name(tokens[0]) != "dd":
         return []
-    paths: list[str] = []
+    paths: list[tuple[str, str]] = []
     for token in tokens[1:]:
-        if token.startswith("of="):
-            value = token[3:]
-            if value:
-                paths.append(value)
+        if token.startswith("of=") and token[3:]:
+            paths.append((token[3:], "write"))
+        elif token.startswith("if=") and token[3:]:
+            paths.append((token[3:], "read"))
     return paths
+
+
+def _git_dir_paths(tokens: list[str]) -> list[str]:
+    """抽出 ``git --git-dir`` / ``--work-tree``，避免写到工作区外。"""
+    if not tokens or tokens[0] != "git":
+        return []
+    paths: list[str] = []
+    skip_next = False
+    for index, token in enumerate(tokens[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _GIT_DIR_FLAGS:
+            if index + 1 < len(tokens):
+                paths.append(tokens[index + 1])
+                skip_next = True
+            continue
+        for prefix in _GIT_DIR_EQ:
+            if token.startswith(prefix):
+                value = token[len(prefix) :]
+                if value:
+                    paths.append(value)
+                break
+    return paths
+
+
+def _upload_paths(tokens: list[str]) -> list[str]:
+    """抽出 ``curl -d @file`` / ``wget --post-file`` 读到的本地文件。"""
+    if not tokens:
+        return []
+    next_flags = _UPLOAD_FLAG_NEXT.get(tokens[0])
+    eq_prefixes = _UPLOAD_FLAG_EQ.get(tokens[0], ())
+    if not next_flags and not eq_prefixes:
+        return []
+    paths: list[str] = []
+    skip_next = False
+    for index, token in enumerate(tokens[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if next_flags and token in next_flags:
+            if index + 1 < len(tokens):
+                paths.extend(_upload_target(tokens[index + 1], always_path=token in _UPLOAD_PATH_FLAGS))
+                skip_next = True
+            continue
+        for prefix in eq_prefixes:
+            if token.startswith(prefix):
+                flag = prefix.rstrip("=")
+                paths.extend(
+                    _upload_target(token[len(prefix) :], always_path=flag in _UPLOAD_PATH_FLAGS)
+                )
+                break
+    return paths
+
+
+def _upload_target(raw: str, *, always_path: bool) -> list[str]:
+    if not raw:
+        return []
+    if raw.startswith("@"):
+        path = raw[1:]
+        return [path] if path else []
+    return [raw] if always_path else []
 
 
 def _inplace_rewrite(tokens: list[str]) -> bool:
@@ -391,11 +486,12 @@ def _is_opaque(command: str) -> bool:
         return True
     for segment in split_command_segments(command):
         tokens = _tokenize(segment)
-        if (
-            tokens
-            and _executable_name(tokens[0]) in _INTERPRETER_NAMES
-            and not _is_pytest_module(tokens)
-        ):
+        if not tokens:
+            continue
+        head = _executable_name(tokens[0])
+        if head in _OPAQUE_HEADS:
+            return True
+        if head in _INTERPRETER_NAMES and not _is_pytest_module(tokens):
             return True
     return False
 

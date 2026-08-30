@@ -11,6 +11,7 @@ from coding_agent.cli.renderer import Renderer
 from coding_agent.settings.tools import DEFAULT_TOOL_RESULT_CHARS
 from coding_agent.session.compact import (
     CompactPolicy,
+    estimate_payload_tokens,
     find_keep_from,
     needs_compact,
     resolve_keep_from,
@@ -190,6 +191,30 @@ def test_compact_truncates_oversized_summary(tmp_path):
     assert len(text) < DEFAULT_TOOL_RESULT_CHARS + 50
 
 
+def test_compact_unmarks_dropped_write_file(tmp_path):
+    target = (tmp_path / "a.py").resolve()
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    session.mark_read(target)
+    session.add(
+        AssistantMessage.of(
+            tool_calls=[ToolCallBlock(id="w0", name="write_file", arguments='{"path": "a.py"}')]
+        )
+    )
+    session.start_tool_execution(call_id="w0", tool_name="write_file", arguments='{"path": "a.py"}')
+    session.finish_tool_execution(call_id="w0", ok=True, content="已写入")
+    session.add(ToolMessage.of("w0"))
+    _add_assistant_round(session, "c1", "kept-read")
+    assert session.has_read(target)
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert session.tool_history.get("w0") is None
+    assert not session.has_read(target)
+
+
 def test_compact_unmarks_dropped_read_file(tmp_path):
     target = (tmp_path / "a.py").resolve()
     target.write_text("x = 1\n", encoding="utf-8")
@@ -365,6 +390,12 @@ def test_needs_compact_when_tools_grew_session(tmp_path):
     policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
     session.usage.last_prompt_tokens = 100
     assert needs_compact(session, policy) is True
+
+
+def test_estimate_counts_cjk_heavier_than_ascii():
+    ascii_tokens = estimate_payload_tokens([{"role": "user", "content": "a" * 40}])
+    cjk_tokens = estimate_payload_tokens([{"role": "user", "content": "中" * 40}])
+    assert cjk_tokens > ascii_tokens
 
 
 def test_needs_compact_prefers_outgoing_wire_estimate(tmp_path):

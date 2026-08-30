@@ -14,3 +14,6 @@ class ToolLimits:
     # 必须 <= ContextPolicy.max_tool_result_chars，否则组窗会再截一刀。
     max_file_read_chars: int = DEFAULT_TOOL_RESULT_CHARS
     max_dir_entries: int = 400  # list_dir 树形列表的条目上限
+    max_file_bytes: int = 2_000_000  # read_file / write_file 单次进内存上限
+    max_bash_timeout_ms: int = 600_000  # bash timeout_ms 上限（10 分钟）
+    max_process_output_chars: int = 1_000_000  # 子进程 stdout 入内存上限，防止 OOM

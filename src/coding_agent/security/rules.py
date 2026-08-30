@@ -115,15 +115,17 @@ _SENSITIVE_PATH_NAMES: frozenset[str] = frozenset(
     {
         ".npmrc",
         ".netrc",
+        "credentials",
         "credentials.json",
         "id_rsa",
         "id_ed25519",
         "id_ecdsa",
+        "authorized_keys",
+        "kubeconfig",
     }
 )
-_SENSITIVE_PATH_PREFIXES: tuple[str, ...] = (".env",)  # .env / .env.local / .env.production ...
 _SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (".pem", ".key", ".p12", ".pfx")
-_SENSITIVE_PATH_DIRS: tuple[str, ...] = (".ssh/",)
+_SENSITIVE_PATH_DIRS: tuple[str, ...] = (".ssh/", ".aws/", ".kube/")
 
 
 def reject_restricted_write(relative_path: str) -> None:
@@ -149,7 +151,7 @@ def sensitive_path(relative_path: str) -> str | None:
 
     if name in _SENSITIVE_PATH_NAMES:
         return f"{relative_path} 可能包含密钥 / 凭据，每次写入都需要确认。"
-    if any(name.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIXES):
+    if _is_env_filename(name):
         return f"{relative_path} 是环境变量文件，可能包含密钥，每次写入都需要确认。"
     if any(name.endswith(suffix) for suffix in _SENSITIVE_PATH_SUFFIXES):
         return f"{relative_path} 看起来是私钥 / 证书文件，每次写入都需要确认。"
@@ -157,6 +159,11 @@ def sensitive_path(relative_path: str) -> str | None:
         if _contains_dir_segment(normalized, marker):
             return f"{relative_path} 位于 {marker} 目录下，每次写入都需要确认。"
     return None
+
+
+def _is_env_filename(name: str) -> bool:
+    """``.env`` / ``.env.local`` / ``.envrc``，不含 ``.envoy`` 这种碰巧的前缀。"""
+    return name == ".env" or name == ".envrc" or name.startswith(".env.") or name.startswith(".env_")
 
 
 def _normalize(relative_path: str) -> str:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .types import ProcessOutput
 
@@ -54,8 +55,12 @@ def run_process(
     shell: bool = False,
     env: dict[str, str] | None = None,
     merge_stderr: bool = False,
+    max_output_chars: int | None = None,
 ) -> ProcessOutput:
-    """启动子进程；超时时连同进程组一起终止。不继承宿主 API Key。"""
+    """启动子进程；超时时连同进程组一起终止。不继承宿主 API Key。
+
+    ``max_output_chars`` 限制读入内存的输出长度，超出则杀掉进程，避免 OOM。
+    """
     started = time.monotonic()
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
@@ -74,12 +79,22 @@ def run_process(
 
     process = subprocess.Popen(argv, **popen_kwargs)
     timed_out = False
+    output_capped = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        terminate(process)
-        stdout, stderr = process.communicate()
+        if max_output_chars is not None and os.name == "posix":
+            stdout, stderr, timed_out, output_capped = _communicate_limited(
+                process, timeout, max_output_chars
+            )
+        else:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                terminate(process)
+                stdout, stderr = process.communicate()
+            if max_output_chars is not None and len(stdout or "") > max_output_chars:
+                stdout = (stdout or "")[:max_output_chars]
+                output_capped = True
     except BaseException:
         # 子进程在独立进程组里，收不到终端 SIGINT；显式清理避免孤儿进程
         terminate(process)
@@ -91,7 +106,75 @@ def run_process(
         stderr="" if merge_stderr else (stderr or ""),
         timed_out=timed_out,
         duration=time.monotonic() - started,
+        output_capped=output_capped,
     )
+
+
+def _communicate_limited(
+    process: subprocess.Popen[str], timeout: float, max_output_chars: int
+) -> tuple[str, str, bool, bool]:
+    """按块读取 stdout/stderr，超限或超时就杀掉进程。"""
+    started = time.monotonic()
+    buckets: dict[TextIO, list[str]] = {}
+    streams: list[TextIO] = []
+    if process.stdout is not None:
+        buckets[process.stdout] = []
+        streams.append(process.stdout)
+    if process.stderr is not None:
+        buckets[process.stderr] = []
+        streams.append(process.stderr)
+
+    size = 0
+    timed_out = False
+    capped = False
+
+    while streams:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            timed_out = True
+            terminate(process)
+            break
+        ready, _, _ = select.select(streams, [], [], min(0.2, remaining))
+        if not ready:
+            if process.poll() is not None:
+                for stream in list(streams):
+                    leftover = stream.read()
+                    if leftover:
+                        if size + len(leftover) > max_output_chars:
+                            leftover = leftover[: max(0, max_output_chars - size)]
+                            capped = True
+                        buckets[stream].append(leftover)
+                        size += len(leftover)
+                    streams.remove(stream)
+                break
+            continue
+        for stream in ready:
+            chunk = stream.read(8192)
+            if chunk == "":
+                streams.remove(stream)
+                continue
+            if size + len(chunk) > max_output_chars:
+                chunk = chunk[: max(0, max_output_chars - size)]
+                capped = True
+            buckets[stream].append(chunk)
+            size += len(chunk)
+            if capped:
+                terminate(process)
+                streams.clear()
+                break
+
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        terminate(process)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+
+    stdout = "".join(buckets.get(process.stdout, [])) if process.stdout else ""
+    stderr = "".join(buckets.get(process.stderr, [])) if process.stderr else ""
+    return stdout, stderr, timed_out, capped
 
 
 def terminate(process: subprocess.Popen) -> None:

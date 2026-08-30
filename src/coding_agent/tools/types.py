@@ -90,3 +90,4 @@ class ProcessOutput:
     stderr: str
     timed_out: bool
     duration: float
+    output_capped: bool = False

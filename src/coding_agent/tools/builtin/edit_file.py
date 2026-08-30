@@ -10,6 +10,7 @@ from ...security.paths import display, resolve_path
 from ...security.rules import reject_restricted_write
 from ..base import Tool
 from ..diff import unified_diff
+from ..textnorm import detect_newline, from_lf, read_text, strip_read_line_prefixes, to_lf, write_text
 from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
 
 if TYPE_CHECKING:
@@ -18,8 +19,9 @@ if TYPE_CHECKING:
 EDIT_FILE_NAME = "edit_file"
 EDIT_FILE_DESCRIPTION = (
     "通过精确字符串替换修改文件的局部内容, 比整文件重写更省 token, 是修改已有文件的首选方式. "
-    "old_string 必须与文件中的内容逐字符完全一致 (含缩进), "
-    "且在文件中唯一——如果不唯一, 请多带几行上下文使其唯一, 或设置 replace_all=true. "
+    "old_string 必须与文件中的内容一致 (含缩进), 不要带上 read_file 返回的行号前缀 "
+    "(例如 `12 | `). 换行风格会按磁盘原文对齐, 用 LF 写 old_string 即可. "
+    "匹配必须唯一——如果不唯一, 请多带几行上下文使其唯一, 或设置 replace_all=true. "
     "编辑前必须先用 read_file 读过该文件, 否则会被拒绝."
 )
 EDIT_FILE_DEFAULT_REPLACE_ALL = False
@@ -89,7 +91,7 @@ class EditFileTool(Tool):
             replace_all,
             workspace_access=ctx.workspace_access,
         )
-        target.write_text(updated, encoding="utf-8")
+        write_text(target, updated)
         ctx.workspace_access.mark_read(target)
         ctx.workspace_access.mark_modified(target)
 
@@ -120,13 +122,20 @@ def _prepare_edit(
     if old_string == new_string:
         raise InvalidToolArgumentsError("old_string 与 new_string 相同，无需编辑")
 
-    original = target.read_text(encoding="utf-8")
-    occurrences = original.count(old_string)
+    original = read_text(target)
+    newline = detect_newline(original)
+    original_lf = to_lf(original)
+    old_lf = to_lf(strip_read_line_prefixes(old_string))
+    new_lf = to_lf(new_string)
+    if old_lf == new_lf:
+        raise InvalidToolArgumentsError("old_string 与 new_string 相同，无需编辑")
+
+    occurrences = original_lf.count(old_lf)
 
     if occurrences == 0:
         raise ToolError(
             f"在 {display(workspace, target)} 中找不到 old_string。"
-            "请先用 read_file 确认原文（注意缩进、空格和换行必须逐字符一致）。"
+            "请先用 read_file 确认原文（注意缩进、空格必须一致；不要带行号前缀）。"
         )
     if occurrences > 1 and not replace_all:
         raise ToolError(
@@ -134,5 +143,6 @@ def _prepare_edit(
             "请补充上下文让它唯一，或设置 replace_all=true 替换全部。"
         )
 
-    updated = original.replace(old_string, new_string, -1 if replace_all else 1)
+    updated_lf = original_lf.replace(old_lf, new_lf, -1 if replace_all else 1)
+    updated = from_lf(updated_lf, newline)
     return target, original, updated, occurrences

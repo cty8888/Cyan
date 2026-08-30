@@ -55,6 +55,22 @@ def test_string_offset_is_coerced(env, tmp_path):
     assert "2 |" in result.content
 
 
+def test_float_limit_is_coerced(env, tmp_path):
+    (tmp_path / "mod.py").write_text("a\nb\nc\n", encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "mod.py", "offset": 1, "limit": 1.0}, env.ctx)
+    assert result.ok
+    assert "1 | a" in result.content
+
+
+def test_huge_file_without_limit_is_rejected(make_env, tmp_path):
+    env = make_env(tools=ToolLimits(max_file_bytes=80))
+    (tmp_path / "big.txt").write_text("x" * 200, encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "big.txt"}, env.ctx)
+    assert not result.ok
+    assert "超过" in (result.error or "")
+    assert "分段" in (result.error or "")
+
+
 def test_missing_required_path(env):
     result = env.registry.execute("read_file", {}, env.ctx)
     assert not result.ok

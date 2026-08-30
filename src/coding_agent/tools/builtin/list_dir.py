@@ -46,6 +46,7 @@ LIST_DIR_SKIP_DIRS = {
     "build",
     ".idea",
     ".vscode",
+    ".coding_agent",
 }
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator
 
 from ..errors import AgentError, InvalidToolArgumentsError, LLMContextOverflowError, LLMError
@@ -14,7 +13,7 @@ from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
 from ..session import WorkspaceAccess
 from ..tools.types import ToolContext, ToolRunResult
-from .prompts import TRUNCATION_CONTINUE_MSG
+from .prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
 from .types import (
     AgentEvent,
     AgentStream,
@@ -67,7 +66,7 @@ class AgentLoop:
 
         final_text = ""
         schemas = self.runtime.schemas_for_mode()
-        truncated_replies = 0
+        incomplete_replies = 0
 
         try:
             for iteration in range(1, self.settings.loop.max_iterations + 1):
@@ -106,25 +105,31 @@ class AgentLoop:
 
                 tool_calls = response.message.tool_calls
                 if tool_calls:
-                    truncated_replies = 0
+                    incomplete_replies = 0
                     stop_reason = yield from self._run_tool_calls(tool_calls)
                     if stop_reason is not None:
                         yield self._finish(stop_reason, final_text)
                         return
                     continue
 
-                if _is_truncated_finish(response.finish_reason):
-                    truncated_replies += 1
+                if _is_truncated_finish(response.finish_reason) or not text:
+                    incomplete_replies += 1
                     limit = self.settings.loop.max_consecutive_tool_failures
-                    if truncated_replies >= limit:
+                    truncated = _is_truncated_finish(response.finish_reason)
+                    if incomplete_replies >= limit:
+                        kind = "输出被截断" if truncated else "空回复"
                         yield Notice(
-                            f"连续 {truncated_replies} 次输出被截断，已停止。",
+                            f"连续 {incomplete_replies} 次{kind}，已停止。",
                             level="warning",
                         )
                         yield self._finish(StopReason.MAX_ITERATIONS, final_text)
                         return
-                    self.session.add(ContinueMessage.of(TRUNCATION_CONTINUE_MSG))
-                    yield Notice("模型输出被截断，已要求继续。", level="warning")
+                    if truncated:
+                        self.session.add(ContinueMessage.of(TRUNCATION_CONTINUE_MSG))
+                        yield Notice("模型输出被截断，已要求继续。", level="warning")
+                    else:
+                        self.session.add(ContinueMessage.of(EMPTY_REPLY_CONTINUE_MSG))
+                        yield Notice("模型没有给出回复，已要求继续。", level="warning")
                     continue
 
                 yield self._finish(StopReason.COMPLETED, final_text)
@@ -146,12 +151,9 @@ class AgentLoop:
         # 已写回 tool 结果的 call id。本批每条 tool_call 都必须有对应回复，
         # 否则同一会话里下一次请求会带着残缺配对去打 API。
         responded: set[str] = set()
-        # 同批 tool_call 按并行语义：每条 bash 都从本批开始时的 cwd 起步，
-        # 避免第一条 cd 改掉后面几条的工作目录。
-        batch_cwd = self.session.bash_cwd
         try:
             for call in tool_calls:
-                stop_reason = yield from self._run_single_call(call, responded, batch_cwd=batch_cwd)
+                stop_reason = yield from self._run_single_call(call, responded)
                 if stop_reason is not None:
                     self._respond_unanswered(
                         tool_calls,
@@ -172,8 +174,6 @@ class AgentLoop:
         self,
         call: ToolCallBlock,
         responded: set[str],
-        *,
-        batch_cwd: Path | None = None,
     ) -> Generator[AgentEvent, Any, StopReason | None]:
         """处理一条工具调用：解析参数、鉴权、执行，并把结果写回会话。
 
@@ -207,6 +207,10 @@ class AgentLoop:
 
         allowed = yield from self._resolve_permission(tool, args, call, responded)
         if not allowed:
+            repeats = self.session.record_call_fingerprint(call.name, args)
+            if repeats >= self.settings.loop.max_repeated_calls:
+                yield Notice(f"重复调用 {call.name} 且无进展，已终止任务。", level="error")
+                return StopReason.REPEATED_CALLS
             return None
 
         repeats = self.session.record_call_fingerprint(call.name, args)
@@ -223,9 +227,6 @@ class AgentLoop:
             return StopReason.REPEATED_CALLS
         if repeats == self.settings.loop.max_repeated_calls - 1:
             yield Notice(f"{call.name} 已被重复调用 {repeats} 次，请换一种方式。", level="warning")
-
-        if call.name == "bash" and batch_cwd is not None:
-            self.session.bash_cwd = batch_cwd
 
         yield ToolStarted(call_id=call.id, name=call.name, args=args)
         self.session.start_tool_execution(
@@ -280,7 +281,8 @@ class AgentLoop:
 
         decision = yield ApprovalRequired(request=outcome.request)
         decision = decision if isinstance(decision, ApprovalDecision) else ApprovalDecision.DENY
-        if not self.runtime.apply_permission_decision(decision, tool, args):
+        force = bool(outcome.request and outcome.request.force)
+        if not self.runtime.apply_permission_decision(decision, tool, args, force=force):
             self._respond(
                 call,
                 responded,
@@ -288,6 +290,8 @@ class AgentLoop:
             )
             yield Notice(f"已拒绝 {tool.name}", level="warning")
             return False
+        # 刚批准的这次从 1 计，避免「拒绝两次再同意」被当成第三次空转。
+        self.session.reset_repeat_tracking()
         return True
 
     def _respond(self, call: ToolCallBlock, responded: set[str], result: ToolRunResult, *, duration: float = 0.0) -> None:

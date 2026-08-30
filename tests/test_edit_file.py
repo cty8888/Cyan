@@ -109,6 +109,40 @@ def test_missing_file(env):
     assert not result.ok
 
 
+def test_crlf_multiline_edit_matches_lf_old_string(env, tmp_path):
+    (tmp_path / "win.py").write_bytes(b"def add(a, b):\r\n    return a - b\r\n")
+    env.registry.execute("read_file", {"path": "win.py"}, env.ctx)
+    result = env.registry.execute(
+        "edit_file",
+        {
+            "path": "win.py",
+            "old_string": "def add(a, b):\n    return a - b",
+            "new_string": "def add(a, b):\n    return a + b",
+        },
+        env.ctx,
+    )
+    assert result.ok
+    raw = (tmp_path / "win.py").read_bytes()
+    assert b"\r\n" in raw
+    assert b"a + b" in raw
+
+
+def test_edit_strips_read_file_line_prefixes(env, tmp_path):
+    (tmp_path / "mod.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    env.registry.execute("read_file", {"path": "mod.py"}, env.ctx)
+    result = env.registry.execute(
+        "edit_file",
+        {
+            "path": "mod.py",
+            "old_string": "1 | def add(a, b):\n2 |     return a - b",
+            "new_string": "def add(a, b):\n    return a + b",
+        },
+        env.ctx,
+    )
+    assert result.ok
+    assert "a + b" in (tmp_path / "mod.py").read_text(encoding="utf-8")
+
+
 def test_bash_write_requires_reread_before_edit(env, tmp_path):
     (tmp_path / "mod.py").write_text("old\n", encoding="utf-8")
     env.registry.execute("read_file", {"path": "mod.py"}, env.ctx)

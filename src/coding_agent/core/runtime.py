@@ -106,10 +106,12 @@ class Runtime:
         return self.llm.chat(messages, tools=tools)
 
     def estimate_request_tokens(self) -> int:
-        """粗估下一轮任务请求的体积：组窗后的 wire，不是上一轮 usage。"""
+        """粗估下一轮任务请求的体积：组窗后的 wire + 本轮 tools schema。"""
         from ..session.compact import estimate_payload_tokens
 
-        return estimate_payload_tokens(self.messages_for_request())
+        return estimate_payload_tokens(self.messages_for_request()) + estimate_payload_tokens(
+            self.schemas_for_mode()
+        )
 
     def needs_compact(self) -> bool:
         """当前会话是否既有可压缩区间，又达到 token 阈值。"""
@@ -165,11 +167,18 @@ class Runtime:
         )
 
     def apply_permission_decision(
-        self, decision: ApprovalDecision, tool: Tool, args: dict[str, Any]
+        self,
+        decision: ApprovalDecision,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        force: bool = False,
     ) -> bool:
         """落实用户的审批选择：拒绝返回 False；允许返回 True。
 
         ``ALLOW_ALWAYS`` 还会把同类操作写入本会话 ``always_allowed``，
-        后续同目录写入 / 同命令执行可跳过审批。
+        后续同目录写入 / 同命令执行可跳过审批。``force=True`` 时只允许这一次。
         """
-        return self.permissions.apply_decision(decision, tool, args, self.session.always_allowed)
+        return self.permissions.apply_decision(
+            decision, tool, args, self.session.always_allowed, force=force
+        )

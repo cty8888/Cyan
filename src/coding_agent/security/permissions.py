@@ -122,9 +122,11 @@ class PermissionManager:
         tool: Tool,
         args: dict[str, Any],
         always_allowed: set[str],
+        *,
+        force: bool = False,
     ) -> bool:
-        """落实审批结果。``ALLOW_ALWAYS`` 写入白名单；``DENY`` 返回 False。"""
-        if decision is ApprovalDecision.ALLOW_ALWAYS:
+        """落实审批结果。``ALLOW_ALWAYS`` 写入白名单；``force`` 时只允许这一次。"""
+        if decision is ApprovalDecision.ALLOW_ALWAYS and not force:
             allowlist.remember(self.workspace, tool, args, always_allowed)
         return decision is not ApprovalDecision.DENY
 

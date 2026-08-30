@@ -34,6 +34,27 @@ def test_describe_unreads_existing_file(env, tmp_path):
     assert "还没有读取过" in (detail or "")
 
 
+def test_overwrite_preserves_crlf(env, tmp_path):
+    (tmp_path / "win.txt").write_bytes(b"old\r\n")
+    env.registry.execute("read_file", {"path": "win.txt"}, env.ctx)
+    result = env.registry.execute(
+        "write_file", {"path": "win.txt", "content": "new\nline\n"}, env.ctx
+    )
+    assert result.ok
+    assert (tmp_path / "win.txt").read_bytes() == b"new\r\nline\r\n"
+
+
+def test_write_rejects_oversized_content(make_env, tmp_path):
+    from coding_agent.settings import ToolLimits
+
+    env = make_env(tools=ToolLimits(max_file_bytes=20))
+    result = env.registry.execute(
+        "write_file", {"path": "big.txt", "content": "x" * 50}, env.ctx
+    )
+    assert not result.ok
+    assert "超过" in (result.error or "")
+
+
 def test_overwrite_after_read(env, tmp_path):
     (tmp_path / "guarded.py").write_text("x = 1\n", encoding="utf-8")
     assert env.registry.execute("read_file", {"path": "guarded.py"}, env.ctx).ok

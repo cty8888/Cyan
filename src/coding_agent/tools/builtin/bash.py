@@ -67,10 +67,17 @@ class BashTool(Tool):
             ctx.workspace_access.bash_cwd = None
         reject_unsafe_paths(ctx.workspace, command, cwd)
 
-        timeout_seconds = max(0.001, int(timeout_ms) / 1000)
+        timeout_ms = min(max(1, int(timeout_ms)), ctx.tool_limits.max_bash_timeout_ms)
+        timeout_seconds = max(0.001, timeout_ms / 1000)
         wrapped = command + _state_trailer()
 
-        result = run_process(["bash", "-c", wrapped], cwd, timeout_seconds, merge_stderr=True)
+        result = run_process(
+            ["bash", "-c", wrapped],
+            cwd,
+            timeout_seconds,
+            merge_stderr=True,
+            max_output_chars=ctx.tool_limits.max_process_output_chars,
+        )
         self._invalidate_reads(ctx, command, cwd)
 
         visible, cwd_text = _extract_cwd(result.stdout)
@@ -82,6 +89,8 @@ class BashTool(Tool):
         lines = [f"退出码：{result.exit_code}", f"目录：{display_cwd}"]
         if result.timed_out:
             lines.append(f"执行超时（超过 {timeout_ms}ms），进程已被终止。")
+        if result.output_capped:
+            lines.append("输出超过内存上限，进程已被终止，仅保留已捕获的开头。")
         if cwd_note:
             lines.append(cwd_note)
         lines.append(f"\n{output}")

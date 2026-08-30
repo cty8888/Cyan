@@ -46,6 +46,18 @@ def test_subprocess_does_not_inherit_api_key(tmp_path, monkeypatch):
     assert "sk-secret-test" not in result.stdout
 
 
+def test_output_cap_stops_before_oom(tmp_path):
+    result = run_process(
+        ["bash", "-c", "yes x | head -c 200000"],
+        tmp_path,
+        timeout=5,
+        merge_stderr=True,
+        max_output_chars=200,
+    )
+    assert result.output_capped is True
+    assert len(result.stdout) <= 200
+
+
 def test_timeout_does_not_leave_orphan(tmp_path):
     marker = "ca_timeout_marker_8821"
     result = run_process(f"sleep 60 # {marker}", tmp_path, timeout=0.2, shell=True)

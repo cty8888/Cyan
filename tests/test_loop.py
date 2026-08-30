@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
-from coding_agent.core.prompts import TRUNCATION_CONTINUE_MSG
+from coding_agent.core.prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
 from coding_agent.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
 from coding_agent.llm.types import (
     AssistantMessage,
@@ -312,7 +312,7 @@ def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):
     assert names == {"list_dir", "read_file", "bash"}
 
 
-def test_repeated_denials_of_same_write_do_not_trip_repeats(make_env):
+def test_repeated_denials_of_same_write_trip_repeats(make_env):
     env = make_env(loop=LoopLimits(max_repeated_calls=3, max_iterations=10))
     llm = FakeLLM(
         [tool_call("write_file", '{"path": "same.py", "content": "x"}', f"d{i}") for i in range(4)]
@@ -320,13 +320,13 @@ def test_repeated_denials_of_same_write_do_not_trip_repeats(make_env):
     )
     runtime = make_runtime(env, llm)
     _, reason = drive(runtime, "连拒同一文件", decision=ApprovalDecision.DENY)
-    assert reason is StopReason.COMPLETED
+    assert reason is StopReason.REPEATED_CALLS
 
 
-def test_same_batch_bash_starts_from_shared_cwd(env, tmp_path):
-    """同批两条 bash 都从本批开始时的 cwd 起步，第一条 cd 不影响第二条。"""
+def test_same_batch_bash_cwd_is_sequential(env, tmp_path):
+    """同批两条 bash 按顺序执行，第一条 cd 会影响第二条。"""
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "here.txt").write_text("root\n", encoding="utf-8")
+    (tmp_path / "pkg" / "here.txt").write_text("nested\n", encoding="utf-8")
     calls = [
         ToolCallBlock(id="b1", name="bash", arguments='{"command": "cd pkg && pwd"}'),
         ToolCallBlock(id="b2", name="bash", arguments='{"command": "cat here.txt"}'),
@@ -335,9 +335,26 @@ def test_same_batch_bash_starts_from_shared_cwd(env, tmp_path):
         env,
         FakeLLM([AssistantMessage.of(tool_calls=calls), AssistantMessage.of("好了")]),
     )
-    _, reason = drive(runtime, "并行两条")
+    _, reason = drive(runtime, "顺序两条")
     assert reason is StopReason.COMPLETED
     second = runtime.session.tool_history.get("b2")
     assert second is not None and second.result is not None
-    assert "root" in (second.result.content or "")
-    assert "No such file" not in (second.result.content or "")
+    assert "nested" in (second.result.content or "")
+
+
+def test_empty_reply_continues_instead_of_completing(env):
+    llm = FakeLLM(
+        [
+            LLMResponse(message=AssistantMessage.of(""), finish_reason="stop", usage=Usage(10, 0, 10)),
+            AssistantMessage.of("这回有内容了。"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "继续")
+    assert reason is StopReason.COMPLETED
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("没有给出回复" in m for m in notices)
+    assert any(
+        isinstance(m, ContinueMessage) and m.text == EMPTY_REPLY_CONTINUE_MSG
+        for m in runtime.session.messages
+    )

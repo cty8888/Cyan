@@ -10,6 +10,7 @@ from ...security.paths import display, resolve_path
 from ...security.rules import reject_restricted_write
 from ..base import Tool
 from ..diff import unified_diff
+from ..textnorm import apply_existing_newline, read_text, write_text
 from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
 
 if TYPE_CHECKING:
@@ -56,6 +57,8 @@ class WriteFileTool(Tool):
             return f"写入 {raw_path}", None, "text"
 
         new_content = str(args.get("content", ""))
+        if existed:
+            new_content = apply_existing_newline(new_content, old_content)
         action = "覆写" if existed else "新建"
         return (
             f"{action}文件 {display(workspace, target)}",
@@ -67,9 +70,14 @@ class WriteFileTool(Tool):
         target, existed, old_content = _prepare_write(
             ctx.workspace, path, workspace_access=ctx.workspace_access
         )
+        max_bytes = ctx.tool_limits.max_file_bytes
+        if len(content.encode("utf-8")) > max_bytes:
+            raise ToolError(f"写入内容超过 {max_bytes} 字节上限，请改用 edit_file 分段修改，或缩小内容。")
+        if existed:
+            content = apply_existing_newline(content, old_content)
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        write_text(target, content)
         ctx.workspace_access.mark_read(target)
         ctx.workspace_access.mark_modified(target)
 
@@ -102,5 +110,5 @@ def _snapshot(workspace: Path, path: str) -> tuple[Path, bool, str]:
     """解析目标路径并读出当前内容，供 describe / run 共用。"""
     target = resolve_path(workspace, path)
     existed = target.is_file()
-    old_content = target.read_text(encoding="utf-8", errors="replace") if existed else ""
+    old_content = read_text(target) if existed else ""
     return target, existed, old_content

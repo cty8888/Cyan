@@ -106,6 +106,8 @@ def _check_type(key: str, value: Any, spec: dict[str, Any], tool_name: str) -> A
         # bool 是 int 子类，需单独排除
         if expected in {"integer", "number"} and isinstance(value, bool):
             raise InvalidToolArgumentsError(f"工具 {tool_name} 的参数 {key} 应为 {expected}，收到 boolean")
+        if expected == "integer" and isinstance(value, float) and value.is_integer():
+            value = int(value)
         if not isinstance(value, JSON_SCHEMA_TYPE_MAP[expected]):
             # 模型常把数字写成字符串，尝试宽松转换
             coerced = _coerce_scalar(value, expected)
@@ -130,7 +132,12 @@ def _coerce_scalar(value: Any, expected: str) -> Any:
     text = value.strip()
     try:
         if expected == "integer":
-            return int(text)
+            number = float(text) if "." in text or "e" in text.lower() else int(text)
+            if isinstance(number, float):
+                if not number.is_integer():
+                    return None
+                return int(number)
+            return number
         if expected == "number":
             return float(text)
         if expected == "boolean":

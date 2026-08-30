@@ -119,8 +119,33 @@ def needs_compact(
 
 
 def estimate_payload_tokens(payloads: list[dict]) -> int:
-    """用 JSON 字符数 / 4 粗估一组 API payload 的 token 数。"""
-    return max(0, len(json.dumps(payloads, ensure_ascii=False)) // 4)
+    """粗估一组 API payload 的 token 数。
+
+    ASCII 按 4 字符 ≈ 1 token；中日韩等按 1 字符 ≈ 1 token，避免 chars/4 把中文估低。
+    """
+    return _estimate_text_tokens(json.dumps(payloads, ensure_ascii=False))
+
+
+_CJK_RANGES = (
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xF900, 0xFAFF),
+    (0x20000, 0x2A6DF),
+    (0x3040, 0x30FF),
+    (0xAC00, 0xD7AF),
+)
+
+
+def _is_cjk(char: str) -> bool:
+    code = ord(char)
+    return any(start <= code <= end for start, end in _CJK_RANGES)
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    cjk = sum(1 for char in text if _is_cjk(char))
+    return max(0, cjk + (len(text) - cjk) // 4)
 
 
 def estimate_session_tokens(session: Session) -> int:
@@ -220,12 +245,12 @@ def _truncate_preserved_user(message: UserMessage, limit: int = DEFAULT_TOOL_RES
 
 
 def _forget_dropped_reads(session: Session, call_ids: list[str]) -> None:
-    """被压掉的完整 read_file 结果不再在上下文里，已读标记作废。"""
+    """被压掉的读写结果不再在上下文里，对应文件的已读标记作废。"""
     from ..security.paths import resolve_path
 
     for call_id in call_ids:
         execution = session.tool_history.get(call_id)
-        if execution is None or execution.tool_name != "read_file":
+        if execution is None or execution.tool_name not in {"read_file", "write_file", "edit_file"}:
             continue
         try:
             args = json.loads(execution.arguments or "{}")

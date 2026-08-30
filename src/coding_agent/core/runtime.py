@@ -105,11 +105,21 @@ class Runtime:
     def call_llm(self, messages: list[dict], tools: list[dict] | None = None) -> LLMResponse:
         return self.llm.chat(messages, tools=tools)
 
+    def estimate_request_tokens(self) -> int:
+        """粗估下一轮任务请求的体积：组窗后的 wire，不是上一轮 usage。"""
+        from ..session.compact import estimate_payload_tokens
+
+        return estimate_payload_tokens(self.messages_for_request())
+
     def needs_compact(self) -> bool:
         """当前会话是否既有可压缩区间，又达到 token 阈值。"""
         from ..session.compact import needs_compact
 
-        return needs_compact(self.session, self.compact_policy)
+        return needs_compact(
+            self.session,
+            self.compact_policy,
+            estimated_tokens=self.estimate_request_tokens(),
+        )
 
     def compact(self) -> bool:
         """压缩较早对话。无可切区间或 LLM 失败时返回 False，Session 保持原样。"""

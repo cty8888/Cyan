@@ -107,8 +107,7 @@ class App:
             except StopIteration:
                 break
             except KeyboardInterrupt:
-                self.renderer.notice("已中断", level="warning")
-                reason = StopReason.USER_ABORT
+                reason = self._abort(stream)
                 break
 
             reply = None

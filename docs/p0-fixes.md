@@ -1,6 +1,6 @@
 # P0 修复记录（2026-08-30）
 
-三处会在真实编码任务里破坏会话或误杀任务的逻辑问题。分层和事件流骨架未改。
+会在真实编码任务里破坏会话或误杀任务的逻辑问题。分层和事件流骨架未改。
 
 ---
 
@@ -69,3 +69,39 @@
 **改动**：`src/coding_agent/tools/builtin/read_file.py`
 
 **测试**：`tests/test_read_file.py`、`tests/test_context.py` — `test_read_budget_does_not_exceed_context_truncation`
+
+---
+
+## 4. 压缩看上一轮尺寸，不看即将发出的整包
+
+**现象**：第一轮上下文还很小，模型读了几个大文件、跑了几条输出很长的命令。这些结果已经进 Session，下一轮马上要再问模型。系统仍觉得「上一轮不大，不用压」，带着刚膨胀的上下文打 API。窗口一超就是 `FATAL_ERROR`，压缩根本没机会跑。
+
+**原因**：`needs_compact` 主判断是 `last_prompt_tokens`（上一轮任务请求的 `usage.prompt_tokens`）。工具结果是问完模型之后才写入的，所以「上一问有多大」和「这一问马上要发出去有多大」不是同一个数。`last_prompt_tokens == 0` 时才会 `estimate_session_tokens`；一旦有过上一轮数字，估算被跳过，整体被忽略。
+
+**修复**：
+
+- 主判断改为当前整体：Loop 用量过组窗的 wire（`ContextBuilder.build_messages`）做 JSON 字符数 / 4 粗估，超阈值就压。
+- `last_prompt_tokens` 只作补充：上一轮 API 回报已经超阈值，这轮出门前也先压。
+- 直接调用 `needs_compact`、未传入估算值时，仍用 Session 粗估兜底。
+
+**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/core/runtime.py`
+
+**测试**：`tests/test_compact.py` — `test_needs_compact_when_tools_grew_session`、`test_needs_compact_prefers_outgoing_wire_estimate`、`test_loop_compacts_when_session_grew_after_last_call`
+
+---
+
+## 5. Ctrl-C 落在 AssistantReply 时不补齐 tool 回复
+
+**现象**：模型先说一句话，再带上 `tool_calls`。Loop 把这条 assistant 写入会话并 `yield AssistantReply` 给界面显示，此时工具还没跑。用户按 Ctrl-C，任务结束，会话里留下「下了单没回执」的 tool_call。交互模式不重置，下一句用户输入带着残缺配对打 API，典型结果是请求失败。审批面板里的 Ctrl-C 还会被吃成「拒绝这一次」，任务继续跑。
+
+**原因**：OpenAI 兼容协议要求每条 `tool_call` 都有对应 tool 回复。`_run_tool_calls` 里提前终止 / 其中的 Ctrl-C 会补齐；中断若落在更前面的 `yield AssistantReply`（或 `_run_tool_calls` 还没进），最外层直接 `_finish(USER_ABORT)`，不走 `_respond_unanswered`。CLI 在 `stream.send()` 上接到中断时也曾只 `break`、不把中断 throw 回 generator。
+
+**修复**：
+
+- `_finish` 离开前检查最近一条带 `tool_calls` 的 assistant，尚未回复的 call 补一条失败结果。
+- CLI 消费事件流时，`send()` 上的 Ctrl-C 也走 `_abort`，把中断抛回 Loop。
+- 审批时 Ctrl-C 不再当成 DENY，向上抛出以中断整次任务；EOF 仍视为拒绝本次。
+
+**改动**：`src/coding_agent/core/loop.py`（`_pair_pending_tool_calls`）、`src/coding_agent/cli/app.py`、`src/coding_agent/cli/renderer.py`
+
+**测试**：`tests/test_loop.py` — `test_interrupt_after_assistant_reply_pairs_tool_calls`

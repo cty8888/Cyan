@@ -134,6 +134,25 @@ def test_needs_compact_uses_last_prompt_tokens(tmp_path):
     assert needs_compact(session, policy) is True
 
 
+def test_needs_compact_when_tools_grew_session(tmp_path):
+    """上一轮 prompt 很小，但工具结果已经把当前会话撑过阈值，仍应压缩。"""
+    session = _three_turns(tmp_path)
+    execution = session.tool_history.get("cc")
+    assert execution is not None and execution.result is not None
+    execution.result.content = "x" * 8000
+    policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
+    session.usage.last_prompt_tokens = 100
+    assert needs_compact(session, policy) is True
+
+
+def test_needs_compact_prefers_outgoing_wire_estimate(tmp_path):
+    session = _three_turns(tmp_path)
+    policy = CompactPolicy(max_context_tokens=1000, reserve_tokens=100, trigger_ratio=0.9)
+    session.usage.last_prompt_tokens = 100
+    assert needs_compact(session, policy, estimated_tokens=50) is False
+    assert needs_compact(session, policy, estimated_tokens=900) is True
+
+
 def test_loop_compacts_before_task_llm(env, tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="sys")
     _add_turn(session, "任务A", "ca", "output-A-unique")
@@ -153,6 +172,25 @@ def test_loop_compacts_before_task_llm(env, tmp_path):
     notices = [e.message for e in events if isinstance(e, Notice)]
     assert any("正在压缩" in m for m in notices)
     assert any("已压缩" in m for m in notices)
+
+
+def test_loop_compacts_when_session_grew_after_last_call(env, tmp_path):
+    """工具结果把会话撑大后，即使上一轮 prompt_tokens 很小，下一轮出门前也要压。"""
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    _add_turn(session, "任务A", "ca", "output-A-unique")
+    _add_turn(session, "任务B", "cb", "x" * 20_000)
+    session.usage.last_prompt_tokens = 50
+    llm = FakeLLM([AssistantMessage.of("本轮完成。")])
+    runtime = make_runtime(env, llm, session)
+    runtime.compact_policy.max_context_tokens = 2_000
+    runtime.compact_policy.reserve_tokens = 100
+    runtime.compact_policy.trigger_ratio = 0.9
+    events, reason = drive(runtime, "任务C")
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    assert isinstance(session.messages[1], SummaryMessage)
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("正在压缩" in m for m in notices)
 
 
 def test_slash_compact_command(env, tmp_path):

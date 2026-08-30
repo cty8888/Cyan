@@ -256,7 +256,7 @@ MVP 工具集：
 
 ## 6. 上下文管理与 Memory
 
-- Token 记账：以 API 返回的 `usage.prompt_tokens` 为准（写入 `SessionUsage.last_prompt_tokens`），尚无 usage 时用 JSON 字符数 / 4 做预判
+- Token 记账：压缩触发看「即将发出的整包」——组窗后的 wire 用 JSON 字符数 / 4 粗估；上一轮 API 的 `usage.prompt_tokens`（`last_prompt_tokens`）只作补充，那次已经超阈值则这轮出门前先压
 - 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；保留最近 `keep_recent_turns` 轮原文。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
 - 不做滑动窗口：对话变瘦只靠 compact。组窗仍送出当前全部 messages；``ContextBuilder`` 对每条工具正文按 ``max_tool_result_chars``（默认 30000）截尾，不写回 Session。压缩那次 chat 仍用 history 全文。
 - Memory 两层（未做）：项目级 `AGENTS.md` + 会话级持久化与 `--continue`

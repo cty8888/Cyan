@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
-from coding_agent.core.types import ApprovalRequired, StopReason, ToolFinished
+from coding_agent.core.types import ApprovalRequired, AssistantReply, StopReason, TaskFinished, ToolFinished
 from coding_agent.llm.types import AssistantMessage, ToolCallBlock, ToolMessage
 from coding_agent.security.types import ApprovalDecision, PermissionMode
 from coding_agent.session import Session
@@ -143,6 +143,36 @@ def test_early_stop_pairs_remaining_tool_calls(make_env):
     assert leftover is not None
     assert leftover.result is not None
     assert "任务已终止" in (leftover.result.content or "")
+
+
+def test_interrupt_after_assistant_reply_pairs_tool_calls(env):
+    """assistant 已入会话、工具还没跑时中断，仍要补齐 tool 回复。"""
+    calls = [
+        ToolCallBlock(id="c1", name="read_file", arguments='{"path": "a.py"}'),
+        ToolCallBlock(id="c2", name="list_dir", arguments='{"path": "."}'),
+    ]
+    runtime = make_runtime(
+        env,
+        FakeLLM([AssistantMessage.of("我先读文件。", tool_calls=calls)]),
+    )
+    stream = runtime.run("读一下")
+    reply = None
+    while True:
+        event = stream.send(reply)
+        reply = None
+        if isinstance(event, AssistantReply):
+            try:
+                thrown = stream.throw(KeyboardInterrupt())
+            except (StopIteration, KeyboardInterrupt):
+                thrown = None
+            if isinstance(thrown, TaskFinished):
+                assert thrown.reason is StopReason.USER_ABORT
+                stream.close()
+            break
+    _assert_tool_calls_paired(runtime.session)
+    leftover = runtime.session.tool_history.get("c1")
+    assert leftover is not None and leftover.result is not None
+    assert "用户中断" in (leftover.result.content or "")
 
 
 def test_repeated_calls_pair_remaining_in_batch(env):

@@ -47,22 +47,36 @@ def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | Non
     return keep_from
 
 
-def needs_compact(session: Session, policy: CompactPolicy) -> bool:
-    """是否既有可压缩区间，又达到 token 阈值。"""
+def needs_compact(
+    session: Session,
+    policy: CompactPolicy,
+    *,
+    estimated_tokens: int | None = None,
+) -> bool:
+    """是否既有可压缩区间，又达到 token 阈值。
+
+    主判断是「当前整体有多大」：优先用调用方量过的即将出门的 wire
+    （``estimated_tokens``），否则粗估 Session。上一轮 API 回报的
+    ``last_prompt_tokens`` 只作补充——那次已经超阈值，这轮出门前先压。
+    """
     if find_keep_from(session.messages, policy.keep_recent_turns) is None:
         return False
     threshold = compact_threshold(policy)
-    if session.usage.last_prompt_tokens >= threshold:
+    current = estimated_tokens if estimated_tokens is not None else estimate_session_tokens(session)
+    if current >= threshold:
         return True
-    if session.usage.last_prompt_tokens == 0:
-        return estimate_session_tokens(session) >= threshold
-    return False
+    return session.usage.last_prompt_tokens >= threshold
+
+
+def estimate_payload_tokens(payloads: list[dict]) -> int:
+    """用 JSON 字符数 / 4 粗估一组 API payload 的 token 数。"""
+    return max(0, len(json.dumps(payloads, ensure_ascii=False)) // 4)
 
 
 def estimate_session_tokens(session: Session) -> int:
-    """用 JSON 字符数 / 4 粗估当前会话体积，供尚无 API usage 时预判。"""
+    """粗估当前会话体积（工具正文不截断）。Loop 应改用量过组窗后的 wire。"""
     payloads = [_message_to_wire(message, session.tool_history) for message in session.messages]
-    return max(0, len(json.dumps(payloads, ensure_ascii=False)) // 4)
+    return estimate_payload_tokens(payloads)
 
 
 def try_compact(session: Session, call_llm: CallLLM, policy: CompactPolicy) -> bool:

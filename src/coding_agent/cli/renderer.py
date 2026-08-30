@@ -130,7 +130,7 @@ class Renderer:
     def ask_approval(self, request: ApprovalRequest) -> ApprovalDecision:
         """弹出审批面板，读取 y/n/a，返回对应的 ``ApprovalDecision``。
 
-        ``force=True`` 时没有「始终允许」。Ctrl-C / EOF 视为拒绝。
+        ``force=True`` 时没有「始终允许」。EOF 视为拒绝；Ctrl-C 向上抛，由 CLI 中断整次任务。
         """
         capability = _CAPABILITY_LABEL.get(request.capability, request.capability)
         risk = _RISK_LABEL.get(request.risk, request.risk)
@@ -165,10 +165,14 @@ class Renderer:
 
         try:
             answer = Prompt.ask("是否执行", choices=choices, default="n", console=self.console)
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
             self.console.print("\n[yellow]已取消[/]\n")
             logger.warning("审批已取消")
             return ApprovalDecision.DENY
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]已中断[/]\n")
+            logger.warning("审批时用户中断任务")
+            raise
         self.console.print()
         decision = _DECISION_BY_KEY.get(answer, ApprovalDecision.DENY)
         logger.info("审批结果：%s", decision.value)

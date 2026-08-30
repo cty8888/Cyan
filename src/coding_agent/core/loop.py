@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Generator
 
 from ..errors import AgentError, InvalidToolArgumentsError, LLMError
 from ..llm.parser import parse_tool_arguments
-from ..llm.types import ToolCallBlock, ToolMessage, UserMessage
+from ..llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
 from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
 from ..session import WorkspaceAccess
@@ -278,6 +278,31 @@ class AgentLoop:
             if call.id not in responded:
                 self._respond(call, responded, ToolRunResult.failure(error))
 
+    def _pair_pending_tool_calls(self, error: str) -> None:
+        """最近一条带 tool_calls 的 assistant，若还有未回复的 call，补上失败结果。
+
+        覆盖 ``_run_tool_calls`` 进不去的窗口：assistant 已入会话、
+        正在 ``yield AssistantReply`` 时被中断。
+        """
+        assistant = next(
+            (
+                message
+                for message in reversed(self.session.messages)
+                if isinstance(message, AssistantMessage) and message.tool_calls
+            ),
+            None,
+        )
+        if assistant is None:
+            return
+        responded: set[str] = set()
+        for message in self.session.messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            block = message.tool_result
+            if block and block.tool_call_id:
+                responded.add(block.tool_call_id)
+        self._respond_unanswered(assistant.tool_calls, responded, error)
+
     def _check_failure_threshold(self) -> StopReason | None:
         """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""
         if self.session.consecutive_tool_failures >= self.settings.loop.max_consecutive_tool_failures:
@@ -285,5 +310,11 @@ class AgentLoop:
         return None
 
     def _finish(self, reason: StopReason, final_text: str) -> TaskFinished:
-        """组装任务结束事件，带上本次会话的用量统计。"""
+        """组装任务结束事件；离开前补齐尚未回复的 tool_call。"""
+        error = (
+            "用户中断了任务，该工具调用未执行。"
+            if reason is StopReason.USER_ABORT
+            else "任务已终止，该工具调用未执行。"
+        )
+        self._pair_pending_tool_calls(error)
         return TaskFinished(reason=reason, final_text=final_text, stats=self.session.stats())

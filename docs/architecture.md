@@ -40,8 +40,8 @@ src/coding_agent/
     compact.py           # 对话压缩（区间 → 额外 chat → SummaryMessage）
     workspace_access.py  # 工具能触达的受控工作区视图
   context/
-    types.py             # ContextPolicy（工具结果 summary / full）
-    builder.py           # ContextBuilder：装配 wire 格式，决定工具结果展示策略
+    types.py             # ContextPolicy（装配期工具结果截断）
+    builder.py           # ContextBuilder：装配 wire 格式，工具正文按上限截尾
   llm/
     types.py             # Role / Block(...) / Message 继承体系 / LLMResponse
     base.py              # LLMClient 抽象
@@ -125,12 +125,12 @@ Block (ABC：type: ClassVar[BlockType])
 └── CodeBlock        # 独立代码片段（language / code）
 
 session.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保存与查询）
-├── ToolResult      # content / summary / ref —— 只存数据，提供 has_summary / content_removed / render()
+├── ToolResult      # content —— 工具输出原文
 ├── ToolExecution   # id / tool_name / arguments / status / result / started_at / finished_at / duration / error
 └── ToolHistory     # dict[call_id, ToolExecution]，record() / get()
 
-context.builder.ContextBuilder（展示策略层，由 Runtime 持有）
-└── build_messages()  # 反查 ToolHistory，按 render_mode 调用 result.render("summary"|"full")
+context.builder.ContextBuilder（装配层，由 Runtime 持有）
+└── build_messages()  # 反查 ToolHistory，取出 content，按 max_tool_result_chars 截尾
 ```
 
 ### Session 与 Runtime
@@ -155,7 +155,7 @@ Session
  └── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
 
 ContextPolicy（装配，不属于 Session）
- └── tool_result_mode
+ └── max_tool_result_chars
 
 CompactPolicy（压缩：默认值在 ``AgentSettings.compact``，App 拷一份注入 Runtime）
  └── max_context_tokens / reserve_tokens / trigger_ratio / keep_recent_turns
@@ -169,7 +169,7 @@ CompactPolicy（压缩：默认值在 ``AgentSettings.compact``，App 拷一份�
 - **会话状态**（`permission_mode`、`always_allowed`）：继续挂在 Session；`/mode` 已是这个模式。
 - **本会话行为策略**（compact / loop / tools / context）：默认值只住 `settings/`，App 拷一份注入 Runtime，Loop 只读 Runtime 上的副本。会话中途用斜杠命令改副本，不写回 `AgentSettings`。
 
-Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtime.settings.*`，`ContextPolicy` 还在 `Runtime.create` 里直接 `ContextPolicy()`，回头一起收齐。同时丰富 `/` 命令：除现有 `/compact`、`/mode` 外，补查看与修改阈值、保留轮数、轮次上限、工具截断、工具结果展示等（改 `runtime.compact_policy` / 将来的 `loop` / `tools` / `context`）。
+Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtime.settings.*`，`ContextPolicy` 还在 `Runtime.create` 里直接 `ContextPolicy()`，回头一起收齐。同时丰富 `/` 命令：除现有 `/compact`、`/mode` 外，补查看与修改阈值、保留轮数、轮次上限、工具结果截断等（改 `runtime.compact_policy` / 将来的 `loop` / `tools` / `context`）。
 
 模型参数（`model` / `temperature`）留在 ``LLMSettings``，不属于 Session。
 
@@ -177,9 +177,9 @@ Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtim
 
 关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起存在于 `tool_history` 里，不属于 Message。对话压缩（[`session/compact.py`](src/coding_agent/session/compact.py)）会把较早的消息区间额外 `chat` 一次收成 `SummaryMessage` 写回列表，并删除该区间对应的 `tool_history` 条目；失败则两者都不改。
 
-`ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存数据（`content` / `summary` / `ref`），提供 `has_summary`、`content_removed` 等基础状态视图，以及 `render(mode="summary"|"full")` 基础渲染——不参与压缩策略判断。`ContextBuilder.render_mode` 决定调用哪种渲染模式；调试或深入分析时可设为 `"full"`。
+`ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存 ``content``。发给模型时由 ``ContextBuilder`` 按 ``max_tool_result_chars`` 截尾，不写回 Session。
 
-`Runtime.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它读取 Session 的 `messages` 和 `tool_history`，是唯一能把两者拼起来并决定展示策略的地方；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
+`Runtime.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它读取 Session 的 `messages` 和 `tool_history`，把两者拼成 wire 并按上限截工具正文；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
 
 ## 4. 工具系统
 
@@ -256,7 +256,7 @@ MVP 工具集：
 
 - Token 记账：以 API 返回的 `usage.prompt_tokens` 为准（写入 `SessionUsage.last_prompt_tokens`），尚无 usage 时用 JSON 字符数 / 4 做预判
 - 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；保留最近 `keep_recent_turns` 轮原文。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
-- 工具结果单条过长时仍由各工具自己截断（如 bash 的 `max_tool_output_chars`）
+- 不做滑动窗口：对话变瘦只靠 compact。组窗仍送出当前全部 messages；``ContextBuilder`` 对每条工具正文按 ``max_tool_result_chars``（默认 30000）截尾，不写回 Session。压缩那次 chat 仍用 history 全文。
 - Memory 两层（未做）：项目级 `AGENTS.md` + 会话级持久化与 `--continue`
 
 ## 7. 开发排期

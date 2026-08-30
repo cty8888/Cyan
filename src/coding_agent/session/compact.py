@@ -132,8 +132,6 @@ def _tool_text(tool_history: ToolHistory, message: ToolMessage) -> str:
     execution = tool_history.get(block.tool_call_id)
     if execution is None:
         return ""
-    if execution.result is not None:
-        rendered = execution.result.render("full")
-        if rendered:
-            return rendered
+    if execution.result is not None and execution.result.content:
+        return execution.result.content
     return execution.error or ""

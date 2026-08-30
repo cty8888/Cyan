@@ -4,7 +4,6 @@ from .compact import CompactPolicy
 from .session import Session
 from .types import (
     RECENT_CALL_WINDOW,
-    RenderMode,
     SessionMetadata,
     SessionPermissions,
     SessionState,
@@ -19,7 +18,6 @@ from .workspace_access import WorkspaceAccess
 
 __all__ = [
     "RECENT_CALL_WINDOW",
-    "RenderMode",
     "CompactPolicy",
     "Session",
     "SessionMetadata",

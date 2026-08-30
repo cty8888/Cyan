@@ -8,7 +8,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Literal
 
 from ..security.types import PermissionMode
 
@@ -104,43 +103,11 @@ class ToolResultStatus(Enum):
     ERROR = "error"
 
 
-RenderMode = Literal["summary", "full"]
-
-
 @dataclass
 class ToolResult:
-    """一次工具执行的输出数据，供压缩与展示策略读取。"""
+    """一次工具执行的输出正文。组窗时由 ContextBuilder 按需截尾，不在这里存摘要。"""
 
     content: str | None = None
-    summary: str | None = None
-    ref: str | None = None
-
-    @property
-    def has_summary(self) -> bool:
-        return self.summary is not None
-
-    @property
-    def content_removed(self) -> bool:
-        return self.content is None and self.ref is not None
-
-    def render(self, mode: RenderMode = "summary") -> str:
-        """按指定模式渲染给模型看的文本。
-
-        ``mode="summary"``：优先返回 ``summary``，没有则返回 ``content``。
-        ``mode="full"``：若 ``content`` 存在则返回原文；若原文已删除但有 ``ref`` 则返回引用提示；
-        否则退回 ``summary``。
-        """
-        if mode == "summary":
-            if self.summary is not None:
-                return self.summary
-            return self.content or ""
-
-        if self.content is not None:
-            return self.content
-        if self.ref is not None:
-            hint = f"[完整结果已移除，存储引用：{self.ref}]"
-            return f"{self.summary}\n{hint}" if self.summary else hint
-        return self.summary or ""
 
 
 @dataclass

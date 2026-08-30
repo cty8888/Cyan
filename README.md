@@ -1,4 +1,4 @@
-# Coding Agent
+# Cyan
 
 一个命令行编程智能体：接到自然语言任务后，自主读取目录、读写文件、执行命令，直到任务完成。
 
@@ -13,10 +13,10 @@ uv sync
 echo "DEEPSEEK_API_KEY=sk-..." > .env
 
 # 交互模式
-uv run coding-agent
+uv run cyan
 
 # 单任务模式
-uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
+uv run cyan -p "给 utils.py 加上类型标注并跑一遍测试"
 ```
 
 常用参数：
@@ -26,12 +26,14 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 | `-p, --prompt` | 执行单个任务后退出。写入/执行仍会弹出审批（`y`/`n`/`a`）；无人值守请加 `--mode bypass`（黑名单与敏感操作仍生效） |
 | `-w, --workspace` | 工作目录，默认当前目录；Agent 只能访问该目录内的文件 |
 | `-m, --model` | 模型名称，默认 `deepseek-chat` |
+| `-c, --continue` | 恢复本工作区最近一次会话（`~/.cyan/projects/.../last`） |
+| `--resume` | 列出或指定会话 id 恢复 |
 | `--max-iterations` | 单任务最大轮次，默认 30 |
 | `--verbose` | 额外把日志打到 stderr（默认只写文件，不干扰 rich 界面） |
 
-终端界面用 rich 渲染（Markdown、diff、审批面板）。完整运行记录同时写入工作目录的 `.coding_agent/logs/agent.log`。
+终端界面用 rich 渲染（Markdown、diff、审批面板）。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/compact`、`/clear`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
 
 ## 工具
 
@@ -39,6 +41,8 @@ uv run coding-agent -p "给 utils.py 加上类型标注并跑一遍测试"
 | --- | --- | --- | --- |
 | `list_dir` | 只读 | 极低 | 树形列出目录，自动跳过 `.git`、`node_modules` 等 |
 | `read_file` | 只读 | 低 | 带行号读取，支持 offset/limit 分段 |
+| `glob` | 只读 | 低 | 按文件名 glob 查找，支持 `**` 与一层花括号，按 mtime 最多 100 条 |
+| `grep` | 只读 | 低 | 基于 ripgrep 搜内容；默认只返回路径，遵守 `.gitignore` |
 | `write_file` | 写入 | 中 | 整文件写入，自动创建父目录 |
 | `edit_file` | 写入 | 中 | 精确字符串替换，要求匹配唯一 |
 | `bash` | 执行 | 高 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
@@ -99,5 +103,4 @@ uv run pytest
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。后续：流式输出与富渲染打磨、上下文压缩与 Memory、
-任务规划与搜索工具。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork 已落地。后续：流式输出、AGENTS.md Memory、任务规划。

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from coding_agent.session import Session
+from cyan.session import Session
 
 
 def test_consecutive_identical_calls_increment(tmp_path):

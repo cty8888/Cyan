@@ -1,4 +1,4 @@
-# Coding Agent 架构设计与开发规划
+# Cyan 架构设计与开发规划
 
 从零设计一个不依赖任何 Agent 框架的 CLI 编程智能体：分层模块化架构（LLM 层 / 工具层 / 安全层 / 上下文层 / Agent Loop / CLI 层）。先交付最小可用闭环，架构接口一次性按完整版切好，后续分阶段填充流式渲染、上下文压缩、Memory 与任务规划。
 
@@ -12,7 +12,7 @@
 ## 2. 目录结构
 
 ```
-src/coding_agent/
+src/cyan/
   __main__.py            # 入口，参数解析
   errors.py              # 异常体系
   logutil.py             # logging 配置（默认只写文件，不抢 rich 界面）
@@ -37,7 +37,12 @@ src/coding_agent/
   session/               # Session 数据层（Loop 只通过 Runtime 读写）
     types.py             # 会话字段、工具执行历史
     session.py           # Session 门面
-    compact.py           # 对话压缩（区间 → 额外 chat → SummaryMessage）
+    compact.py           # 对话压缩（区间 → 额外 chat → compact overlay）
+    events.py            # SessionEvent
+    paths.py             # ~/.cyan 与路径编码
+    store.py             # jsonl + sidecar + last
+    view.py              # 事件表 → 组窗视图
+    branch.py            # load / continue / fork
     workspace_access.py  # 工具能触达的受控工作区视图
   context/
     types.py             # ContextPolicy（装配期工具结果截断）
@@ -52,13 +57,15 @@ src/coding_agent/
     base.py              # Tool 抽象基类 + 参数校验
     registry.py          # 注册表：schema 导出 + 名称分发 + 执行封装
     diff.py              # write_file / edit_file 共用的 diff 生成
-    process.py           # bash 工具共用的子进程执行
+    process.py           # bash / grep 共用的子进程执行
     builtin/             # 每个内置工具一个文件：schema 常量 + 行为实现
       list_dir.py
       read_file.py
       write_file.py
       edit_file.py
       bash.py
+      glob.py
+      grep.py
   security/
     types.py             # PermissionMode / 审批协议 / PermissionOutcome
     permissions.py       # PermissionManager：判定链入口
@@ -178,7 +185,7 @@ Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtim
 
 核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 
-关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起存在于 `tool_history` 里，不属于 Message。对话压缩（[`session/compact.py`](src/coding_agent/session/compact.py)）会把较早的消息区间额外 `chat` 一次收成 `SummaryMessage` 写回列表，并删除该区间对应的 `tool_history` 条目；失败则两者都不改。
+关键约束：**`Message` 子类自己不额外开业务字段，也不直接持有工具执行的真实内容**。`ToolMessage` 只知道「这条消息对应哪个 call id」（`ToolResultBlock.tool_call_id`），一次工具调用真正的输出内容、成功与否、执行耗时，属于 Agent 执行工具的事实记录，跟 Session 一起存在于 `tool_history` 里，不属于 Message。对话压缩（[`session/compact.py`](src/cyan/session/compact.py)）会把较早的消息区间额外 `chat` 一次收成 `SummaryMessage` 写回列表，并删除该区间对应的 `tool_history` 条目；失败则两者都不改。
 
 `ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存 ``content``。发给模型时由 ``ContextBuilder`` 按 ``max_tool_result_chars`` 截尾，不写回 Session。
 
@@ -207,6 +214,8 @@ MVP 工具集：
 - `read_file`：带行号返回，支持 offset/limit，大文件截断并提示
 - `write_file`：整文件写入/新建
 - `edit_file`：精确字符串替换（old_string 必须唯一，否则报错让模型补上下文）—— 比整文件重写省 token，是 Claude Code 的关键设计
+- `glob`：按文件名模式找文件（Python 实现，支持 `**` 与一层花括号），按 mtime 新→旧最多 100 条；不尊重 `.gitignore`，跳过 `.git/`
+- `grep`：子进程调用 `rg` 搜内容；`files_with_matches` / `content` / `count` 三种输出；遵守 `.gitignore`，显式 `path` 可搜被 ignore 的文件
 - `bash`：唯一的 shell 执行入口，测试、构建、git、脚本都走它。学习 Claude Code 的 Bash 工具设计：
   - 接口只有 `command`（必填）与 `timeout_ms`（默认 120000）
   - 每条命令都在独立新进程里跑，没有持久 shell；不保留环境变量或别名，`export` 不影响下一次调用
@@ -218,7 +227,7 @@ MVP 工具集：
 
 ## 5. 安全模型
 
-两轴 + 四级规则，由 [`PermissionManager.evaluate()`](src/coding_agent/security/permissions.py) 一次判定：
+两轴 + 四级规则，由 [`PermissionManager.evaluate()`](src/cyan/security/permissions.py) 一次判定：
 
 **两轴**（写在每个 `Tool` 上，正交）：
 
@@ -227,7 +236,7 @@ MVP 工具集：
 | `ToolCapability`（READ / WRITE / EXEC） | 这是读、写还是执行？ | Plan 拒写；AcceptEdits 放行普通写；Bypass 放行普通写/执行 |
 | `RiskLevel`（MINIMAL … CRITICAL） | 这次操作有多危险？ | **CRITICAL 强制逐次确认**，不受模式 / 「始终允许」影响；其余级别用于审批面板展示 |
 
-**四级规则**（[`rules.py`](src/coding_agent/security/rules.py)，write 与 exec 统一；工具 `run()` 里对 Blocked / Restricted 再拦一次，防止有人绕过权限层直接 `execute`）：
+**四级规则**（[`rules.py`](src/cyan/security/rules.py)，write 与 exec 统一；工具 `run()` 里对 Blocked / Restricted 再拦一次，防止有人绕过权限层直接 `execute`）：
 
 | 级别 | 处置 | 例子 |
 |------|------|------|
@@ -259,9 +268,9 @@ MVP 工具集：
 ## 6. 上下文管理与 Memory
 
 - Token 记账：压缩触发看「即将发出的整包」——组窗后的 wire 用 JSON 字符数 / 4 粗估；上一轮 API 的 `usage.prompt_tokens`（`last_prompt_tokens`）只作补充，那次已经超阈值则这轮出门前先压。默认窗口按 deepseek-chat 常见 64k 计。优先保留 `keep_recent_turns` 轮；不够切或仍超窗时降到 1 轮乃至全部压进摘要。API 报超窗则紧急压缩后重试一次。
-- 压缩策略默认值在 ``settings.compact``（``CompactPolicy``），启动时 App 拷一份注入 ``Runtime.compact_policy``。会话中途改 Runtime 上的副本（后续斜杠命令 / 配置）不影响 ``AgentSettings``。超过阈值 `(max_context_tokens - reserve_tokens) * trigger_ratio` 时，在下一轮任务 `call_llm` 之前压；优先保留最近 `keep_recent_turns` 轮原文，切不到或仍超窗则降档。被压缩段另一次不带 tools 的 `chat` 收成 `SummaryMessage`，成功后再删该段 `tool_history`。发给模型的上下文仍只来自 Session 的 messages + tool_history，由 ContextBuilder 装配。REPL `/compact` 走同一入口
-- 不做滑动窗口：对话变瘦只靠 compact。组窗仍送出当前全部 messages；``ContextBuilder`` 对每条工具正文按 ``max_tool_result_chars``（默认 30000）截尾，不写回 Session。压缩那次 chat 仍用 history 全文。
-- Memory 两层（未做）：项目级 `AGENTS.md` + 会话级持久化与 `--continue`
+- 压缩成功后往事件表追加 `summary` + `compact`，再投影成视图；**不删除** jsonl 里的原文与 `tool_history` 事实。组窗仍只看 Session.messages + 视图内的 tool_history。REPL `/compact` 走同一入口。详见 [session-store.md](session-store.md)。
+- 不做滑动窗口：对话变瘦只靠 compact overlay。
+- 会话持久化：`~/.cyan/projects/<编码>/<id>.jsonl`；`--continue` / `--resume`；rewind 为 fork。项目级 `AGENTS.md` 仍未做。
 
 ## 7. 开发排期
 
@@ -271,13 +280,13 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 - [x] 搭建目录骨架、`settings/`（按域拆分的三级覆盖）、`errors.py` 异常体系
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
-- [x] tools 层：Tool 基类 + ToolRunResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`
+- [x] tools 层：Tool 基类 + ToolRunResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`/`bash`/`glob`/`grep`
 - [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
 - [x] security 层：路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`shell.py`）
 - [x] `core/runtime` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环
 - [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线测试 `tests/`（pytest）
-- [x] 标准库 logging：事件写入 `.coding_agent/logs/agent.log`（默认不打 stderr）
+- [x] 标准库 logging：事件写入 `.cyan/logs/agent.log`（默认不打 stderr）
 
 ### Phase 2：交互体验
 
@@ -288,13 +297,14 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 ### Phase 3：上下文与记忆
 
-- [x] 上下文 token 预算与历史摘要压缩（改写 Session.messages 为 SummaryMessage，不落盘）
-- [ ] Memory：`AGENTS.md` 注入、会话持久化与 `--continue` 恢复
+- [x] 上下文 token 预算与历史摘要压缩（compact overlay，事件表保留原文）
+- [x] 会话持久化与 `--continue` / `--resume` / rewind fork
+- [ ] Memory：`AGENTS.md` 注入
 
 ### Phase 4：规划与检索
 
 - [ ] 任务规划工具 `todo_write`
-- [ ] `grep` / `glob` 搜索工具
+- [x] `grep` / `glob` 搜索工具
 
 ### Phase 5：工程收尾
 

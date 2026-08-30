@@ -3,7 +3,7 @@
 > 记录日期：2026-08-29。这是对**现状**的说明，不是改造清单。
 > 先把这套协议吃透再动；现在改形态会把「内核零 I/O + 审批卡循环」搅乱，影响对 Agent Loop 的理解。
 
-相关代码：[`src/coding_agent/core/types.py`](../src/coding_agent/core/types.py)、[`src/coding_agent/core/loop.py`](../src/coding_agent/core/loop.py)、[`src/coding_agent/cli/app.py`](../src/coding_agent/cli/app.py)。
+相关代码：[`src/cyan/core/types.py`](../src/cyan/core/types.py)、[`src/cyan/core/loop.py`](../src/cyan/core/loop.py)、[`src/cyan/cli/app.py`](../src/cyan/cli/app.py)。
 
 ## 现在用的是什么
 

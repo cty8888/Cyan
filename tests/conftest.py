@@ -6,17 +6,17 @@ from dataclasses import dataclass
 
 import pytest
 
-from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT
-from coding_agent.core.runtime import Runtime
-from coding_agent.core.types import ApprovalRequired, TaskFinished
-from coding_agent.llm.base import LLMClient
-from coding_agent.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, Usage
-from coding_agent.security.permissions import PermissionManager
-from coding_agent.security.types import ApprovalDecision, PermissionMode
-from coding_agent.session import Session, WorkspaceAccess
-from coding_agent.settings import AgentSettings, LLMSettings
-from coding_agent.tools.registry import ToolRegistry, build_default_registry
-from coding_agent.tools.types import ToolContext
+from cyan.core.prompts import COMPACT_SYSTEM_PROMPT
+from cyan.core.runtime import Runtime
+from cyan.core.types import ApprovalRequired, TaskFinished
+from cyan.llm.base import LLMClient
+from cyan.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, Usage
+from cyan.security.permissions import PermissionManager
+from cyan.security.types import ApprovalDecision, PermissionMode
+from cyan.session import Session, WorkspaceAccess
+from cyan.settings import AgentSettings, LLMSettings
+from cyan.tools.registry import ToolRegistry, build_default_registry
+from cyan.tools.types import ToolContext
 
 
 @dataclass

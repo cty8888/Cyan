@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from coding_agent.errors import PathOutsideWorkspaceError
-from coding_agent.security.paths import resolve_path
+from cyan.errors import PathOutsideWorkspaceError
+from cyan.security.paths import resolve_path
 
 
 def test_relative_escape_is_rejected(tmp_path):

@@ -45,7 +45,7 @@ def test_overwrite_preserves_crlf(env, tmp_path):
 
 
 def test_write_rejects_oversized_content(make_env, tmp_path):
-    from coding_agent.settings import ToolLimits
+    from cyan.settings import ToolLimits
 
     env = make_env(tools=ToolLimits(max_file_bytes=20))
     result = env.registry.execute(

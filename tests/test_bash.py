@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from coding_agent.settings import ToolLimits
+from cyan.settings import ToolLimits
 
 
 def test_echo(env):
@@ -77,7 +77,7 @@ def test_opaque_cd_outside_still_resets_cwd(env, tmp_path):
 
 
 def test_redirect_outside_is_rejected(env):
-    result = env.registry.execute("bash", {"command": "echo x > /tmp/coding-agent-escape.txt"}, env.ctx)
+    result = env.registry.execute("bash", {"command": "echo x > /tmp/cyan-escape.txt"}, env.ctx)
     assert not result.ok
 
 

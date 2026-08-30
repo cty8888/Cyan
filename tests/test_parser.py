@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from coding_agent.errors import InvalidToolArgumentsError
-from coding_agent.llm.parser import parse_tool_arguments
+from cyan.errors import InvalidToolArgumentsError
+from cyan.llm.parser import parse_tool_arguments
 
 
 def test_plain_json():

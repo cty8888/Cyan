@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from coding_agent.context.builder import ContextBuilder
-from coding_agent.context.types import ContextPolicy
-from coding_agent.llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
-from coding_agent.session import Session
-from coding_agent.settings.tools import DEFAULT_TOOL_RESULT_CHARS, ToolLimits
+from cyan.context.builder import ContextBuilder
+from cyan.context.types import ContextPolicy
+from cyan.llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
+from cyan.session import Session
+from cyan.settings.tools import DEFAULT_TOOL_RESULT_CHARS, ToolLimits
+
+from .conftest import FakeLLM, make_runtime
 
 
 def _session_with_tool(tmp_path, content: str) -> Session:
@@ -36,7 +38,8 @@ def test_long_tool_result_truncated_in_wire_only(tmp_path):
     builder = ContextBuilder.from_policy(ContextPolicy(max_tool_result_chars=20))
     payloads = builder.build_messages(session.messages, session.tool_history)
     tool = next(p for p in payloads if p["role"] == "tool")
-    assert tool["content"] == "x" * 20 + "...[truncated]"
+    assert tool["content"] == "x" * 6 + "...[truncated]"
+    assert len(tool["content"]) == 20
     assert session.tool_history.get("c1").result.content == raw
 
 
@@ -54,3 +57,10 @@ def test_zero_limit_does_not_truncate(tmp_path):
     tool = next(p for p in payloads if p["role"] == "tool")
     assert tool["content"] == raw
     assert session.tool_history.get("c1").result.content == raw
+
+
+def test_runtime_context_policy_follows_tool_limits(make_env):
+    env = make_env(tools=ToolLimits(max_file_read_chars=1234))
+    runtime = make_runtime(env, FakeLLM([]))
+    assert runtime.context_policy.max_tool_result_chars == 1234
+    assert runtime.context_builder.max_tool_result_chars == 1234

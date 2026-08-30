@@ -6,10 +6,10 @@ from io import StringIO
 
 from rich.console import Console
 
-from coding_agent.cli.commands import build_default_commands
-from coding_agent.cli.renderer import Renderer
-from coding_agent.settings.tools import DEFAULT_TOOL_RESULT_CHARS
-from coding_agent.session.compact import (
+from cyan.cli.commands import build_default_commands
+from cyan.cli.renderer import Renderer
+from cyan.settings.tools import DEFAULT_TOOL_RESULT_CHARS
+from cyan.session.compact import (
     CompactPolicy,
     estimate_payload_tokens,
     find_keep_from,
@@ -17,10 +17,10 @@ from coding_agent.session.compact import (
     resolve_keep_from,
     try_compact,
 )
-from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT, TRUNCATION_CONTINUE_MSG
-from coding_agent.core.types import Notice, StopReason
-from coding_agent.errors import LLMContextOverflowError, LLMError
-from coding_agent.llm.types import (
+from cyan.core.prompts import COMPACT_SYSTEM_PROMPT, TRUNCATION_CONTINUE_MSG
+from cyan.core.types import Notice, StopReason
+from cyan.errors import LLMContextOverflowError, LLMError
+from cyan.llm.types import (
     AssistantMessage,
     ContinueMessage,
     LLMResponse,
@@ -31,7 +31,7 @@ from coding_agent.llm.types import (
     Usage,
     UserMessage,
 )
-from coding_agent.session import Session
+from cyan.session import Session
 
 from .conftest import FakeLLM, drive, make_runtime, tool_call
 
@@ -154,7 +154,8 @@ def test_emergency_cut_without_assistant_when_user_is_huge(tmp_path):
     assert len(users) == 1
     assert users[0].text is not None
     assert users[0].text.endswith("...[truncated]")
-    assert len(users[0].text) < len(huge)
+    assert len(users[0].text) <= DEFAULT_TOOL_RESULT_CHARS
+    assert find_keep_from(session.messages, keep_recent_turns=0) is None
 
 
 def test_emergency_compact_preserves_task_not_continue_prompt(tmp_path):
@@ -169,7 +170,23 @@ def test_emergency_compact_preserves_task_not_continue_prompt(tmp_path):
     assert try_compact(session, call_llm, CompactPolicy(), max_keep=0) is True
     users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
     assert [m.text for m in users] == ["给 utils.py 加类型标注"]
-    assert not any(isinstance(m, ContinueMessage) for m in session.messages)
+    continues = [m for m in session.messages if isinstance(m, ContinueMessage)]
+    assert [m.text for m in continues] == [TRUNCATION_CONTINUE_MSG]
+    assert not any(isinstance(m, AssistantMessage) for m in session.messages)
+
+
+def test_compact_keeps_refreshed_system_prompt(tmp_path):
+    session = _three_turns(tmp_path)
+    from cyan.session.view import apply_system_prompt
+
+    apply_system_prompt(session, "新系统提示 2026-08-30")
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("摘要"), usage=Usage(8, 4, 12))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert isinstance(session.messages[0], SystemMessage)
+    assert session.messages[0].text == "新系统提示 2026-08-30"
 
 
 def test_compact_truncates_oversized_summary(tmp_path):
@@ -188,7 +205,7 @@ def test_compact_truncates_oversized_summary(tmp_path):
     assert isinstance(session.messages[1], SummaryMessage)
     text = session.messages[1].text or ""
     assert text.endswith("...[truncated]")
-    assert len(text) < DEFAULT_TOOL_RESULT_CHARS + 50
+    assert len(text) <= DEFAULT_TOOL_RESULT_CHARS
 
 
 def test_compact_unmarks_dropped_write_file(tmp_path):
@@ -230,6 +247,31 @@ def test_compact_unmarks_dropped_read_file(tmp_path):
 
     assert try_compact(session, call_llm, CompactPolicy()) is True
     assert session.tool_history.get("c0") is None
+    assert not session.has_read(target)
+
+
+def test_compact_unmarks_trailing_comma_arguments(tmp_path):
+    target = (tmp_path / "a.py").resolve()
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    session.mark_read(target)
+    session.add(
+        AssistantMessage.of(
+            tool_calls=[ToolCallBlock(id="c0", name="read_file", arguments='{"path": "a.py",}')]
+        )
+    )
+    session.start_tool_execution(
+        call_id="c0", tool_name="read_file", arguments='{"path": "a.py",}'
+    )
+    session.finish_tool_execution(call_id="c0", ok=True, content="old-read")
+    session.add(ToolMessage.of("c0"))
+    _add_assistant_round(session, "c1", "kept-read")
+    assert session.has_read(target)
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
     assert not session.has_read(target)
 
 
@@ -325,6 +367,7 @@ def test_compact_replaces_dropped_and_deletes_history(tmp_path):
     assert session.tool_history.get("cc") is not None
     assert any(m.text == "任务B" for m in session.messages if isinstance(m, UserMessage))
     assert not any(m.text == "任务A" for m in session.messages if isinstance(m, UserMessage))
+    assert any(event.type == "user" and event.payload.get("text") == "任务A" for event in session.events)
 
     request, tools = captured[0]
     assert tools is None
@@ -414,7 +457,8 @@ def test_loop_compacts_before_task_llm(env, tmp_path):
     llm = FakeLLM([AssistantMessage.of("本轮完成。")])
     runtime = make_runtime(env, llm, session)
     # 默认窗口下 200_000 已高于触发线；这里收紧副本，专门测「出门前先压」。
-    runtime.compact_policy.max_context_tokens = 2_000
+    # 须高于工具 schema（含 glob/grep），否则压一轮后仍超阈值会把应保留的轮也吃掉。
+    runtime.compact_policy.max_context_tokens = 8_000
     runtime.compact_policy.reserve_tokens = 100
     runtime.compact_policy.trigger_ratio = 0.9
     events, reason = drive(runtime, "任务C")

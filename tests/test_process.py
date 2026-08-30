@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import time
 
-from coding_agent.tools.process import (
+from cyan.tools.process import (
     build_subprocess_env,
     is_secret_env_name,
     run_process,
@@ -17,17 +17,20 @@ def test_api_key_env_names_are_secret():
     assert is_secret_env_name("DEEPSEEK_API_KEY")
     assert is_secret_env_name("OPENAI_API_KEY")
     assert is_secret_env_name("MY_CUSTOM_API_KEY")
+    assert is_secret_env_name("SECRET_KEY")
+    assert is_secret_env_name("DATABASE_URL")
+    assert is_secret_env_name("MYSQL_PASSWORD")
+    assert is_secret_env_name("APP_SECRET")
     assert not is_secret_env_name("PATH")
     assert not is_secret_env_name("HOME")
-    assert not is_secret_env_name("SECRET_KEY")
 
 
 def test_subprocess_env_drops_api_key(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-test")
-    monkeypatch.setenv("CODING_AGENT_TEST_VISIBLE", "keep-me")
+    monkeypatch.setenv("CYAN_TEST_VISIBLE", "keep-me")
     env = build_subprocess_env()
     assert "DEEPSEEK_API_KEY" not in env
-    assert env["CODING_AGENT_TEST_VISIBLE"] == "keep-me"
+    assert env["CYAN_TEST_VISIBLE"] == "keep-me"
 
 
 def test_subprocess_stdin_is_devnull(tmp_path):

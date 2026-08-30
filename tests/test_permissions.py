@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from coding_agent.security.readonly import is_readonly_command
-from coding_agent.security.types import ApprovalDecision, PermissionMode
-from coding_agent.tools.builtin.write_file import WriteFileTool
-from coding_agent.tools.types import RiskLevel
+from cyan.security.readonly import is_readonly_command
+from cyan.security.types import ApprovalDecision, PermissionMode
+from cyan.tools.builtin.write_file import WriteFileTool
+from cyan.tools.types import RiskLevel
 
 from .conftest import eval_perm
 
@@ -665,3 +665,136 @@ def test_bypass_env_c_outside_is_denied(env):
         mode=PermissionMode.BYPASS,
     )
     assert outcome.kind == "deny"
+
+
+def test_grep_env_is_forced_in_plan(env):
+    outcome = eval_perm(
+        env, env.registry.get("grep"), {"pattern": "SECRET", "path": ".env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_grep_env_is_forced_in_bypass(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("grep"),
+        {"pattern": "SECRET", "path": ".env"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_glob_env_is_forced_in_plan(env):
+    outcome = eval_perm(
+        env, env.registry.get("glob"), {"pattern": "*", "path": ".env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_glob_env_is_forced_in_bypass(env):
+    outcome = eval_perm(
+        env, env.registry.get("glob"), {"pattern": "*", "path": ".env"}, mode=PermissionMode.BYPASS
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_grep_plain_pattern_is_allowed(env):
+    outcome = eval_perm(env, env.registry.get("grep"), {"pattern": "foo"})
+    assert outcome.kind == "allow"
+
+
+def test_glob_plain_pattern_is_allowed(env):
+    outcome = eval_perm(env, env.registry.get("glob"), {"pattern": "**/*.py"})
+    assert outcome.kind == "allow"
+
+
+def test_plan_allows_plain_grep(env):
+    outcome = eval_perm(
+        env, env.registry.get("grep"), {"pattern": "foo"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "allow"
+
+
+def test_plan_allows_plain_glob(env):
+    outcome = eval_perm(
+        env, env.registry.get("glob"), {"pattern": "**/*.py"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "allow"
+
+
+def test_plan_denies_process_substitution(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "cat <(cat .env)"},
+        mode=PermissionMode.PLAN,
+    )
+    assert outcome.kind == "deny"
+
+
+def test_process_substitution_is_forced_in_default(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "cat <(cat .env)"})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_source_cannot_be_always_allowed(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "source setup.sh"},
+        remembered,
+    )
+    assert remembered == set()
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "source setup.sh"}, always_allowed=remembered
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+    assert outcome.request.always_label is None
+
+
+def test_cp_cannot_be_always_allowed(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "cp a.py b.py"},
+        remembered,
+    )
+    assert remembered == set()
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "cp a.py b.py"}, always_allowed=remembered
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.always_label is None
+
+
+def test_make_cannot_be_always_allowed(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "make"},
+        remembered,
+    )
+    assert remembered == set()
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "make"})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_quoted_commit_message_is_single_head(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "git commit -m 'fix; extra'"},
+        remembered,
+    )
+    assert remembered == {"exec:git commit"}

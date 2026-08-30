@@ -1,0 +1,279 @@
+"""交互式 REPL 的斜杠命令。
+
+设计上与 ``tools/registry.py`` 保持一致：新增一个命令 = 写一个 handler 函数 + 在
+``build_default_commands()`` 里注册一行，不需要再去改一条 if/elif 链，``/help`` 的
+文本也会跟着自动列出新命令，不需要手动同步一份 ``HELP_TEXT`` 字符串。
+
+回头要丰富命令：会话里改行为策略（压缩阈值、保留轮数、轮次上限、工具截断等）
+只写 ``app.runtime`` 上的副本，不改 ``app.settings``。见 ``docs/architecture.md``
+「运行时策略与斜杠命令」。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Callable, Iterator
+
+from rich.prompt import Prompt
+
+from ..logutil import get_logger
+from ..security.types import PermissionMode
+from ..session.events import (
+    COMPACT_REASON_MANUAL,
+    COMPACT_REASON_SUMMARIZE_FROM,
+    COMPACT_REASON_SUMMARIZE_UP,
+)
+from .renderer import MODE_LABELS
+
+if TYPE_CHECKING:
+    from .app import App
+
+logger = get_logger("cli")
+
+# handler 返回 True 表示应当退出 REPL。
+CommandHandler = Callable[["App", list[str]], bool]
+
+
+@dataclass(frozen=True)
+class SlashCommand:
+    """一条斜杠命令的声明：名称、用法、说明、处理函数，以及可选别名。"""
+
+    name: str
+    usage: str
+    description: str
+    handler: CommandHandler
+    aliases: tuple[str, ...] = field(default_factory=tuple)
+
+
+class CommandRegistry:
+    """持有已注册的斜杠命令，按名称（含别名）分发。"""
+
+    def __init__(self) -> None:
+        self._commands: dict[str, SlashCommand] = {}
+        self._order: list[str] = []
+
+    def register(self, command: SlashCommand) -> SlashCommand:
+        """按主名和别名注册；名称冲突立即失败。"""
+        for name in (command.name, *command.aliases):
+            if name in self._commands:
+                raise ValueError(f"命令名重复：{name}")
+            self._commands[name] = command
+        self._order.append(command.name)
+        return command
+
+    def get(self, name: str) -> SlashCommand | None:
+        return self._commands.get(name)
+
+    def __iter__(self) -> Iterator[SlashCommand]:
+        """按注册顺序遍历，每个命令只出现一次（不重复展开别名）。"""
+        by_name = {c.name: c for c in self._commands.values()}
+        for name in self._order:
+            yield by_name[name]
+
+
+def build_help_text(registry: CommandRegistry) -> str:
+    """根据当前注册表生成 /help 文本，新增命令不必再手写一份列表。"""
+    lines = ["可用命令："]
+    for command in registry:
+        label = command.usage
+        if command.aliases:
+            label += f", {', '.join(command.aliases)}"
+        lines.append(f"  {label:<16} {command.description}")
+    lines.append("")
+    lines.append("直接输入自然语言即可下达任务。任务执行中按 Ctrl-C 可以中断。")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 内置命令 handler
+
+
+def _cmd_help(app: App, args: list[str]) -> bool:
+    app.renderer.console.print(build_help_text(app.commands))
+    return False
+
+
+def _cmd_tools(app: App, args: list[str]) -> bool:
+    for tool in app.registry:
+        app.renderer.console.print(
+            f"  [bold]{tool.name}[/] "
+            f"[dim]({tool.capability.value}/{tool.risk.value})[/] — {tool.description}"
+        )
+    return False
+
+
+def _cmd_mode(app: App, args: list[str]) -> bool:
+    console = app.renderer.console
+    if len(args) != 1:
+        console.print("[yellow]用法：/mode plan|default|accept_edits|bypass[/]")
+        return False
+    try:
+        mode = PermissionMode(args[0])
+    except ValueError:
+        console.print("[yellow]无效权限模式, 可选: plan / default / accept_edits / bypass[/]")
+        return False
+    app.session.permissions.permission_mode = mode
+    app.session.persist_head()
+    console.print(f"[dim]已切换至 {MODE_LABELS[mode]}[/]")
+    logger.info("切换权限模式：%s", mode.value)
+    return False
+
+
+def _cmd_usage(app: App, args: list[str]) -> bool:
+    stats = app.session.stats()
+    app.renderer.console.print(
+        f"  模型调用 {stats['llm_calls']} 次 · 工具调用 {stats['tool_calls']} 次\n"
+        f"  tokens：输入 {stats['prompt_tokens']} / 输出 {stats['completion_tokens']}"
+        f" / 合计 {stats['total_tokens']}\n"
+        f"  历史消息 {stats['messages']} 条"
+    )
+    return False
+
+
+def _cmd_compact(app: App, args: list[str]) -> bool:
+    from ..session.compact import resolve_keep_from
+
+    keep_from = resolve_keep_from(
+        app.session.messages, app.runtime.compact_policy.keep_recent_turns
+    )
+    if keep_from is None:
+        app.renderer.notice("消息太少，无需压缩。", level="warning")
+        return False
+    app.renderer.notice("正在压缩较早的对话历史…")
+    if app.runtime.compact(reason=COMPACT_REASON_MANUAL):
+        app.renderer.notice("已压缩较早的对话历史。")
+        logger.info("手动压缩会话历史")
+    else:
+        app.renderer.notice("压缩失败，对话历史未改动。", level="warning")
+    return False
+
+
+def _cmd_clear(app: App, args: list[str]) -> bool:
+    session = app.start_new_session()
+    short = session.metadata.session_id[:8]
+    app.renderer.console.print(f"[dim]已开始新会话 {short}（旧日志仍保留）[/]")
+    return False
+
+
+def _cmd_new(app: App, args: list[str]) -> bool:
+    return _cmd_clear(app, args)
+
+
+def _cmd_history(app: App, args: list[str]) -> bool:
+    from ..session.branch import user_event_entries
+
+    entries = user_event_entries(app.session)
+    if not entries:
+        app.renderer.console.print("[dim]还没有用户消息[/]")
+        return False
+    for number, event in entries:
+        preview = str(event.payload.get("text") or "").replace("\n", " ")[:60]
+        short = event.id[:12]
+        app.renderer.console.print(f"  [bold]{number}[/]  [dim]{short}[/]  {preview}")
+    return False
+
+
+def _cmd_sessions(app: App, args: list[str]) -> bool:
+    from ..session.store import list_sessions, read_last
+
+    home = app.session.store.home if app.session.store is not None else None
+    items = list_sessions(app.settings.workspace, home=home)
+    last = read_last(app.settings.workspace, home=home)
+    if not items:
+        app.renderer.console.print("[dim]这个工作区还没有已保存的会话[/]")
+        return False
+    current = app.session.metadata.session_id
+    for item in items:
+        mark = "●" if item.session_id == current else "○"
+        last_mark = " last" if item.session_id == last else ""
+        fork = f"  fork of {item.parent_id[:8]}" if item.parent_id else ""
+        title = item.title or "(无标题)"
+        app.renderer.console.print(
+            f"  {mark} [bold]{item.session_id[:8]}[/]  {title}{fork}[dim]{last_mark}[/]"
+        )
+    return False
+
+
+def _cmd_rewind(app: App, args: list[str]) -> bool:
+    from ..session.branch import fork_at_user, resolve_user_anchor, view_index_for_user_event
+
+    if not args:
+        app.renderer.console.print("[yellow]用法：/rewind <序号或id> [restore|summarize-up|summarize-from][/]")
+        return False
+    anchor = resolve_user_anchor(app.session, args[0])
+    if anchor is None:
+        app.renderer.console.print("[yellow]找不到这条用户消息，先 /history 查看[/]")
+        return False
+    action = args[1].lower() if len(args) > 1 else ""
+    if action not in {"restore", "summarize-up", "summarize-from"}:
+        action = Prompt.ask(
+            "选择操作",
+            choices=["restore", "summarize-up", "summarize-from"],
+            default="restore",
+        )
+    preview = str(anchor.payload.get("text") or "").replace("\n", " ")[:40]
+    if action == "restore":
+        session = fork_at_user(app.session, anchor.id)
+        app.attach_session(session)
+        app.renderer.console.print(
+            f"[dim]已从「{preview}」分叉新会话 {session.metadata.session_id[:8]}。"
+            "工作区文件保持现状，不会回滚。[/]"
+        )
+        logger.info("rewind restore fork=%s from=%s", session.metadata.session_id, anchor.id)
+        return False
+
+    index = view_index_for_user_event(app.session, anchor.id)
+    if index is None:
+        app.renderer.console.print(
+            "[yellow]这条消息已不在当前上下文里（可能已被压缩）。请先 restore 再 summarize。[/]"
+        )
+        return False
+    if action == "summarize-up":
+        ok = app.runtime.compact(keep_from=index + 1, reason=COMPACT_REASON_SUMMARIZE_UP)
+    else:
+        last = len(app.session.messages) - 1
+        ok = app.runtime.compact(
+            keep_from=index, drop_end=last, reason=COMPACT_REASON_SUMMARIZE_FROM
+        )
+    if ok:
+        app.renderer.notice("已按选择压缩这段历史（磁盘日志仍保留原文）。")
+    else:
+        app.renderer.notice("压缩失败，对话未改动。", level="warning")
+    return False
+
+
+def _cmd_cwd(app: App, args: list[str]) -> bool:
+    app.renderer.console.print(f"  {app.settings.workspace}")
+    return False
+
+
+def _cmd_exit(app: App, args: list[str]) -> bool:
+    app.renderer.console.print("[dim]再见[/]")
+    logger.info("再见")
+    return True
+
+
+def build_default_commands() -> CommandRegistry:
+    """注册默认斜杠命令。新增命令在此追加一行即可。"""
+    registry = CommandRegistry()
+    registry.register(SlashCommand("/help", "/help", "显示本帮助", _cmd_help))
+    registry.register(SlashCommand("/tools", "/tools", "列出已注册的工具", _cmd_tools))
+    registry.register(
+        SlashCommand("/mode", "/mode <模式>", "切换权限模式：plan / default / accept_edits / bypass", _cmd_mode)
+    )
+    registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
+    registry.register(SlashCommand("/compact", "/compact", "把较早的对话压缩成摘要", _cmd_compact))
+    registry.register(SlashCommand("/history", "/history", "列出用户消息（完整日志）", _cmd_history))
+    registry.register(
+        SlashCommand(
+            "/rewind",
+            "/rewind <n>",
+            "回退到某条用户消息：restore / summarize-up / summarize-from",
+            _cmd_rewind,
+        )
+    )
+    registry.register(SlashCommand("/sessions", "/sessions", "列出本工作区已保存的会话", _cmd_sessions))
+    registry.register(SlashCommand("/new", "/new", "开始新会话（旧日志保留）", _cmd_new))
+    registry.register(SlashCommand("/clear", "/clear", "同 /new，开始新会话", _cmd_clear))
+    registry.register(SlashCommand("/cwd", "/cwd", "显示当前工作目录", _cmd_cwd))
+    registry.register(SlashCommand("/exit", "/exit", "退出", _cmd_exit, aliases=("/quit",)))
+    return registry

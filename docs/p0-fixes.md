@@ -12,7 +12,7 @@
 
 **修复**：任何 `stop_reason` 离开 `_run_tool_calls` 之前，都按 Ctrl-C 同样给未响应的 call 补一条「任务已终止，该工具调用未执行」。
 
-**改动**：`src/coding_agent/core/loop.py`（`_respond_unanswered`）
+**改动**：`src/cyan/core/loop.py`（`_respond_unanswered`）
 
 **测试**：`tests/test_loop.py` — `test_early_stop_pairs_remaining_tool_calls`、`test_repeated_calls_pair_remaining_in_batch`
 
@@ -33,7 +33,7 @@
 - 任意一次工具**成功**（读到、命令成功、写入成功）都清空计数。
 - 仍会拦住：同一失败动作连做 3 次、中间没有任何成功进展。
 
-**改动**：`src/coding_agent/session/types.py`、`src/coding_agent/session/session.py`、`src/coding_agent/core/loop.py`
+**改动**：`src/cyan/session/types.py`、`src/cyan/session/session.py`、`src/cyan/core/loop.py`
 
 **测试**：`tests/test_session.py`、`tests/test_loop.py` — `test_successful_reread_does_not_count_as_repeat`、`test_alternating_failed_reads_are_not_repeated_calls`
 
@@ -56,7 +56,7 @@
 
 **修复**：两层默认都用 `DEFAULT_TOOL_RESULT_CHARS`（3 万）。对当前内置工具，第二层通常不再少给；它仍是组窗安全带（新工具忘了自己截、或以后只改组窗上限时还能兜住）。`tool_history` 存的仍是第一层之后的正文。
 
-**改动**：`src/coding_agent/settings/tools.py`、`src/coding_agent/context/types.py`
+**改动**：`src/cyan/settings/tools.py`、`src/cyan/context/types.py`
 
 ### 3.2 只读了开头，就被允许整份覆盖
 
@@ -66,7 +66,7 @@
 
 **修复**：只有一次就把文件从头到尾读完，才 `mark_read`。分段 `limit`、字符预算截断、从中间读，都不发证。
 
-**改动**：`src/coding_agent/tools/builtin/read_file.py`
+**改动**：`src/cyan/tools/builtin/read_file.py`
 
 **测试**：`tests/test_read_file.py`、`tests/test_context.py` — `test_read_budget_does_not_exceed_context_truncation`
 
@@ -84,7 +84,7 @@
 - `last_prompt_tokens` 只作补充：上一轮 API 回报已经超阈值，这轮出门前也先压。
 - 直接调用 `needs_compact`、未传入估算值时，仍用 Session 粗估兜底。
 
-**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/core/runtime.py`
+**改动**：`src/cyan/session/compact.py`、`src/cyan/core/runtime.py`
 
 **测试**：`tests/test_compact.py` — `test_needs_compact_when_tools_grew_session`、`test_needs_compact_prefers_outgoing_wire_estimate`、`test_loop_compacts_when_session_grew_after_last_call`
 
@@ -102,7 +102,7 @@
 - CLI 消费事件流时，`send()` 上的 Ctrl-C 也走 `_abort`，把中断抛回 Loop。
 - 审批时 Ctrl-C 不再当成 DENY，向上抛出以中断整次任务；EOF 仍视为拒绝本次。
 
-**改动**：`src/coding_agent/core/loop.py`（`_pair_pending_tool_calls`）、`src/coding_agent/cli/app.py`、`src/coding_agent/cli/renderer.py`
+**改动**：`src/cyan/core/loop.py`（`_pair_pending_tool_calls`）、`src/cyan/cli/app.py`、`src/cyan/cli/renderer.py`
 
 **测试**：`tests/test_loop.py` — `test_interrupt_after_assistant_reply_pairs_tool_calls`
 
@@ -121,7 +121,7 @@
 - 切在当前任务内部时，用户那句话会进摘要请求，写回时再插回保留段，避免丢掉当前任务原文。
 - 摘要请求的工具正文按 `DEFAULT_TOOL_RESULT_CHARS` 截尾，与组窗同一把尺子。
 
-**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/settings/compact.py`
+**改动**：`src/cyan/session/compact.py`、`src/cyan/settings/compact.py`
 
 **测试**：`tests/test_compact.py` — `test_find_keep_from_cuts_early_rounds_in_one_task`、`test_compact_single_task_keeps_user_and_recent_rounds`、`test_compact_request_truncates_tool_text`、`test_needs_compact_single_task_when_tools_grow`、`test_loop_compacts_during_single_task`
 
@@ -140,7 +140,7 @@
 - 连续失败只统计「工具没跑成」：读文件不存在、参数非法、权限拒绝、超时等。红灯测试不再清保险丝，也不再误杀任务。
 - CLI 仍按退出码显示红叉，避免界面看起来像命令成功了。
 
-**改动**：`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
+**改动**：`src/cyan/tools/builtin/bash.py`、`src/cyan/cli/renderer.py`
 
 **测试**：`tests/test_bash.py` — `test_nonzero_exit_is_still_ok`；`tests/test_loop.py` — `test_failing_commands_do_not_trip_tool_failures`
 
@@ -164,7 +164,7 @@
 - 厂商把超窗标成 400，识别为 `LLMContextOverflowError`：先做紧急压缩（`max_keep=0`）再重试一次；没有可压历史才 FATAL。
 - 摘要请求按窗口均分工具正文，降低总结那次自己先超窗的概率。
 
-**改动**：`src/coding_agent/session/compact.py`、`src/coding_agent/core/loop.py`、`src/coding_agent/core/runtime.py`、`src/coding_agent/settings/compact.py`、`src/coding_agent/llm/deepseek.py`、`src/coding_agent/errors.py`、`src/coding_agent/cli/commands.py`
+**改动**：`src/cyan/session/compact.py`、`src/cyan/core/loop.py`、`src/cyan/core/runtime.py`、`src/cyan/settings/compact.py`、`src/cyan/llm/deepseek.py`、`src/cyan/errors.py`、`src/cyan/cli/commands.py`
 
 **测试**：`tests/test_compact.py` — `test_fallback_compacts_two_assistant_rounds`、`test_emergency_cut_drops_all_assistant_rounds`、`test_needs_compact_when_only_two_assistant_rounds`、`test_loop_compacts_two_rounds_in_one_task`、`test_loop_retries_after_context_overflow`；`tests/test_deepseek_errors.py`
 
@@ -185,7 +185,7 @@
 - 白名单执行头改为 `git status` 而不是整条 `git`；`echo` / `python` / `env` / `bash` / `sh` / `tee` 等过宽命令头禁止写入「始终允许」。
 - `bash.run()` 对区外路径和写 `.git/` 再拦一遍。
 
-**改动**：`src/coding_agent/security/command_paths.py`、`src/coding_agent/security/permissions.py`、`src/coding_agent/security/allowlist.py`、`src/coding_agent/security/shell.py`、`src/coding_agent/security/paths.py`、`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
+**改动**：`src/cyan/security/command_paths.py`、`src/cyan/security/permissions.py`、`src/cyan/security/allowlist.py`、`src/cyan/security/shell.py`、`src/cyan/security/paths.py`、`src/cyan/tools/builtin/bash.py`、`src/cyan/cli/renderer.py`
 
 **测试**：`tests/test_command_paths.py`；`tests/test_permissions.py` — `test_bash_write_env_is_forced`、`test_bash_write_git_dir_is_restricted`、`test_bash_read_outside_is_denied`、`test_git_status_whitelist_does_not_cover_commit`；`tests/test_bash.py` — `test_leaving_workspace_is_rejected`、`test_redirect_outside_is_rejected`、`test_write_git_dir_is_rejected`
 
@@ -199,7 +199,7 @@
 
 **修复**：无 tool_calls 且 `finish_reason` 为 `length` / `max_tokens` 时，回喂一条「输出被截断，请继续」的用户消息再跑一轮；连续截断达到失败上限则按 `MAX_ITERATIONS` 停。带 tool_calls 的截断仍执行工具。
 
-**改动**：`src/coding_agent/core/loop.py`、`src/coding_agent/core/prompts.py`
+**改动**：`src/cyan/core/loop.py`、`src/cyan/core/prompts.py`
 
 **测试**：`tests/test_loop.py` — `test_truncated_reply_continues_instead_of_completing`、`test_repeated_truncation_stops_task`、`test_truncated_reply_with_tool_calls_still_runs`
 
@@ -213,7 +213,7 @@
 
 **修复**：没有 Assistant 但用户正文超过 `DEFAULT_TOOL_RESULT_CHARS` 时，紧急切点切在末尾。摘要请求按同一上限截用户/助手正文；写回保留段时超长 User 只留开头。短消息仍不压，避免误伤。
 
-**改动**：`src/coding_agent/session/compact.py`
+**改动**：`src/cyan/session/compact.py`
 
 **测试**：`tests/test_compact.py` — `test_emergency_cut_without_assistant_when_user_is_huge`、`test_loop_retries_after_overflow_on_huge_first_user`
 
@@ -227,7 +227,7 @@
 
 **修复**：`read_file` / `list_dir` 命中 `sensitive_path` 时 `force=True` 确认，Plan / Bypass 也不能跳过。普通源码读取仍自动放行。
 
-**改动**：`src/coding_agent/security/permissions.py`
+**改动**：`src/cyan/security/permissions.py`
 
 **测试**：`tests/test_permissions.py` — `test_read_env_is_forced_in_plan`、`test_read_env_is_forced_in_bypass`、`test_read_id_rsa_is_forced`
 
@@ -241,7 +241,7 @@
 
 **修复**：未加引号的 `*` / `?` / `[]`、带 `-r` 的 grep、以及 `rg` / `ag` 标成无界读取，强制确认且不能「始终允许」。引号里的 `*`（如 `echo '2 * 3'`）不算。
 
-**改动**：`src/coding_agent/security/command_paths.py`、`src/coding_agent/security/messages.py`
+**改动**：`src/cyan/security/command_paths.py`、`src/cyan/security/messages.py`
 
 **测试**：`tests/test_command_paths.py` — `test_recursive_grep_is_unbounded`、`test_rg_is_unbounded`、`test_glob_cat_is_unbounded`；`tests/test_permissions.py` — `test_plan_grep_recursive_is_forced`、`test_plan_rg_is_forced`、`test_plan_cat_glob_is_forced`
 
@@ -255,7 +255,7 @@
 
 **修复**：每条子进程都走 `build_subprocess_env()`：复制当前环境，去掉 `DEEPSEEK_API_KEY` 以及名字以 `_API_KEY` / `_ACCESS_TOKEN` 结尾的变量。
 
-**改动**：`src/coding_agent/tools/process.py`
+**改动**：`src/cyan/tools/process.py`
 
 **测试**：`tests/test_process.py` — `test_api_key_env_names_are_secret`、`test_subprocess_env_drops_api_key`、`test_subprocess_does_not_inherit_api_key`
 
@@ -281,6 +281,6 @@
 - `sort -o` / `--output` 记成写目标，Plan 不再当只读。
 - `git show` / `cat-file` / `blame` 抽出 `HEAD:.env` 这类路径；`git grep` 标成无界读取。
 
-**改动**：`src/coding_agent/security/shell.py`、`command_paths.py`、`allowlist.py`
+**改动**：`src/cyan/security/shell.py`、`command_paths.py`、`allowlist.py`
 
 **测试**：`tests/test_command_paths.py`、`tests/test_permissions.py`、`tests/test_bash.py` — 复合命令白名单、`sort -o`、`git -C`、`env cat`、`git show HEAD:.env`

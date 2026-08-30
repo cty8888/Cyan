@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from coding_agent.llm.deepseek import is_context_overflow
+from cyan.llm.deepseek import is_context_overflow
 
 
 class _Exc(Exception):
@@ -30,3 +30,26 @@ def test_overflow_by_message():
 
 def test_ordinary_bad_request_is_not_overflow():
     assert not is_context_overflow(_Exc("invalid json in tool call arguments"))
+
+
+def test_chat_sends_max_tokens():
+    from types import SimpleNamespace
+
+    from cyan.llm.deepseek import DeepSeekClient
+    from cyan.settings.llm import LLMSettings
+
+    captured: dict = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        message = SimpleNamespace(content="hi", tool_calls=None)
+        choice = SimpleNamespace(message=message, finish_reason="stop")
+        usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
+        return SimpleNamespace(choices=[choice], usage=usage)
+
+    client = DeepSeekClient(LLMSettings(api_key="k", max_tokens=2048))
+    client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+    )
+    client.chat([{"role": "user", "content": "hi"}])
+    assert captured["max_tokens"] == 2048

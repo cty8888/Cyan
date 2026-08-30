@@ -1,5 +1,5 @@
 [project]
-name = "coding-agent"
+name = "cyan"
 version = "0.1.0"
 description = "一个不依赖 Agent 框架、从零实现的命令行编程智能体"
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-coding-agent = "coding_agent:main"
+cyan = "cyan:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sys
 
-from coding_agent.core.prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
-from coding_agent.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
-from coding_agent.llm.types import (
+from cyan.core.prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
+from cyan.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
+from cyan.llm.types import (
     AssistantMessage,
     ContinueMessage,
     LLMResponse,
@@ -15,9 +15,9 @@ from coding_agent.llm.types import (
     ToolMessage,
     Usage,
 )
-from coding_agent.security.types import ApprovalDecision, PermissionMode
-from coding_agent.session import Session
-from coding_agent.settings import CliSettings, LoopLimits
+from cyan.security.types import ApprovalDecision, PermissionMode
+from cyan.session import Session
+from cyan.settings import CliSettings, LoopLimits
 
 from .conftest import FakeLLM, drive, make_runtime, tool_call
 
@@ -309,7 +309,7 @@ def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="", permission_mode=PermissionMode.PLAN)
     runtime = make_runtime(env, FakeLLM([AssistantMessage.of("ok")]), session)
     names = {s["function"]["name"] for s in runtime.schemas_for_mode()}
-    assert names == {"list_dir", "read_file", "bash"}
+    assert names == {"list_dir", "read_file", "bash", "glob", "grep"}
 
 
 def test_repeated_denials_of_same_write_trip_repeats(make_env):
@@ -358,3 +358,20 @@ def test_empty_reply_continues_instead_of_completing(env):
         isinstance(m, ContinueMessage) and m.text == EMPTY_REPLY_CONTINUE_MSG
         for m in runtime.session.messages
     )
+
+
+def test_loop_stores_validated_tool_arguments(env, tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    llm = FakeLLM(
+        [
+            tool_call("read_file", '{"path": "a.py",}', "c1"),
+            AssistantMessage.of("读完了。"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "读文件")
+    assert reason is StopReason.COMPLETED
+    execution = runtime.session.tool_history.get("c1")
+    assert execution is not None
+    parsed = json.loads(execution.arguments)
+    assert parsed["path"] == "a.py"

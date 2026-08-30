@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from coding_agent.settings import ToolLimits
+from cyan.settings import ToolLimits
 
 
 def test_reads_with_line_numbers(env, tmp_path):

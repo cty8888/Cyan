@@ -1,4 +1,4 @@
-我要设计并实现一个编程智能体（Coding Agent），能够自主地读写文件、执行命令，完成用户交给它的编程任务，类似一个简化版 Claude Code、Codex、OpenCode、DeepSeek Harness 等。
+我要设计并实现一个编程智能体（Cyan），能够自主地读写文件、执行命令，完成用户交给它的编程任务，类似一个简化版 Claude Code、Codex、OpenCode、DeepSeek Harness 等。
 
 要求：
 

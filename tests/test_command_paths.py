@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from coding_agent.security.command_paths import (
+from cyan.security.command_paths import (
     analyze_command,
     forced_exec_reason,
     outside_workspace_reason,
     restricted_write_reason,
 )
-from coding_agent.security.messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
-from coding_agent.security.paths import resolve_path
-from coding_agent.security.shell import command_head, is_readonly_command, split_command_segments
+from cyan.security.messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
+from cyan.security.paths import resolve_path
+from cyan.security.shell import command_head, is_readonly_command, split_command_segments
 
 
 def test_redirect_write_is_extracted():
@@ -337,3 +337,67 @@ def test_resolve_relative_to_base(tmp_path):
     (nested / "a.py").write_text("x\n", encoding="utf-8")
     resolved = resolve_path(tmp_path, "a.py", base=nested)
     assert resolved == (nested / "a.py").resolve()
+
+
+def test_process_substitution_is_opaque(tmp_path):
+    analysis = analyze_command("cat <(cat .env)")
+    assert analysis.opaque is True
+    assert is_readonly_command("cat <(cat .env)") is False
+    assert forced_exec_reason(tmp_path, "cat <(cat .env)") == OPAQUE_EXEC_MSG
+
+
+def test_process_substitution_write_is_opaque(tmp_path):
+    analysis = analyze_command("echo hi > >(tee .env)")
+    assert analysis.opaque is True
+    assert forced_exec_reason(tmp_path, "echo hi > >(tee .env)") == OPAQUE_EXEC_MSG
+
+
+def test_source_is_opaque(tmp_path):
+    analysis = analyze_command("source setup.sh")
+    assert analysis.opaque is True
+    assert forced_exec_reason(tmp_path, "source setup.sh") == OPAQUE_EXEC_MSG
+
+
+def test_dot_source_is_opaque(tmp_path):
+    analysis = analyze_command(". ./setup.sh")
+    assert analysis.opaque is True
+    assert forced_exec_reason(tmp_path, ". ./setup.sh") == OPAQUE_EXEC_MSG
+
+
+def test_bash_script_is_opaque(tmp_path):
+    analysis = analyze_command("bash install.sh")
+    assert analysis.opaque is True
+    assert forced_exec_reason(tmp_path, "bash install.sh") == OPAQUE_EXEC_MSG
+
+
+def test_quoted_and_does_not_split():
+    assert split_command_segments("echo 'hello && rm -rf /tmp/x'") == ["echo 'hello && rm -rf /tmp/x'"]
+    assert is_readonly_command("echo 'hello && rm -rf /tmp/x'") is True
+
+
+def test_quoted_semicolon_does_not_split():
+    segments = split_command_segments("git commit -m 'fix; extra'")
+    assert segments == ["git commit -m 'fix; extra'"]
+    assert command_head("git commit -m 'fix; extra'") == "git commit"
+
+
+def test_unquoted_and_still_splits():
+    assert split_command_segments("cd /tmp && echo x > a") == ["cd /tmp", "echo x > a"]
+
+
+def test_make_is_opaque(tmp_path):
+    analysis = analyze_command("make")
+    assert analysis.opaque is True
+    assert forced_exec_reason(tmp_path, "make") == OPAQUE_EXEC_MSG
+
+
+def test_tar_directory_outside_is_denied(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "tar -xf a.tar -C /tmp")
+    assert reason is not None
+    assert "之外" in reason
+
+
+def test_rsync_outside_is_denied(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "rsync -a src/ /tmp/out/")
+    assert reason is not None
+    assert "之外" in reason

@@ -47,14 +47,14 @@ def test_skips_noise_directories(env, tmp_path):
     assert "__pycache__" not in result.content
 
 
-def test_skips_coding_agent_state_dir(env, tmp_path):
-    (tmp_path / ".coding_agent").mkdir()
-    (tmp_path / ".coding_agent" / "agent.log").write_text("secret\n", encoding="utf-8")
+def test_skips_cyan_state_dir(env, tmp_path):
+    (tmp_path / ".cyan").mkdir()
+    (tmp_path / ".cyan" / "agent.log").write_text("secret\n", encoding="utf-8")
     (tmp_path / "src").mkdir()
     result = env.registry.execute("list_dir", {"path": ".", "depth": 3}, env.ctx)
     assert result.ok
     assert "src/" in result.content
-    assert ".coding_agent" not in result.content
+    assert ".cyan" not in result.content
     assert "agent.log" not in result.content
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..errors import PathOutsideWorkspaceError, SecurityError
 from . import rules
-from .messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG
+from .messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
 from .paths import display, resolve_path
 from .shell import split_command_segments
 
@@ -75,11 +75,15 @@ class CommandPathAnalysis:
     touches: list[PathTouch] = field(default_factory=list)
     opaque: bool = False
     dumps_env: bool = False
+    unbounded_read: bool = False
 
 
 def analyze_command(command: str) -> CommandPathAnalysis:
     """抽出路径、是否不透明、是否会倾倒环境变量。"""
-    analysis = CommandPathAnalysis(opaque=_is_opaque(command))
+    analysis = CommandPathAnalysis(
+        opaque=_is_opaque(command),
+        unbounded_read=_is_unbounded_read(command),
+    )
     for segment in split_command_segments(command):
         _analyze_segment(segment, analysis)
     return analysis
@@ -105,6 +109,8 @@ def forced_exec_reason(workspace: Path, command: str, cwd: Path | None = None) -
     analysis = analyze_command(command)
     if analysis.opaque:
         return OPAQUE_EXEC_MSG
+    if analysis.unbounded_read:
+        return UNBOUNDED_READ_MSG
     if analysis.dumps_env:
         return ENV_DUMP_MSG
     for relative, kind in _resolved_touches(workspace, command, cwd or workspace):
@@ -250,8 +256,49 @@ def _is_bare_env(tokens: list[str]) -> bool:
     return True
 
 
+_RECURSIVE_SEARCH_HEADS = frozenset({"rg", "ag"})
+_GREP_HEADS = frozenset({"grep", "egrep", "fgrep"})
+_RECURSIVE_GREP_FLAGS = frozenset({"-r", "-R", "--recursive"})
+
+
 def _is_opaque(command: str) -> bool:
     return any(pattern.search(command) for pattern in _OPAQUE_PATTERNS)
+
+
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _is_unbounded_read(command: str) -> bool:
+    """通配或递归搜索可能扫到 .env / 密钥，不能当「看清了路径的只读」。"""
+    for segment in split_command_segments(command):
+        tokens = _tokenize(segment)
+        if not tokens:
+            continue
+        head, *rest = tokens
+        if head in _RECURSIVE_SEARCH_HEADS:
+            return True
+        if head in _GREP_HEADS and _has_recursive_grep_flag(rest):
+            return True
+        unquoted = _QUOTED.sub(" ", segment)
+        unquoted_tokens = _tokenize(unquoted)
+        if any(_is_glob_token(token) for token in unquoted_tokens[1:]):
+            return True
+    return False
+
+
+def _has_recursive_grep_flag(tokens: list[str]) -> bool:
+    for token in tokens:
+        if token in _RECURSIVE_GREP_FLAGS:
+            return True
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") and any(flag in token for flag in ("r", "R")):
+            return True
+    return False
+
+
+def _is_glob_token(token: str) -> bool:
+    return any(char in token for char in "*?[]")
 
 
 def _unresolved(raw: str) -> bool:

@@ -13,6 +13,7 @@ from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
 from ..session import WorkspaceAccess
 from ..tools.types import ToolContext, ToolRunResult
+from .prompts import TRUNCATION_CONTINUE_MSG
 from .types import (
     AgentEvent,
     AgentStream,
@@ -65,6 +66,7 @@ class AgentLoop:
 
         final_text = ""
         schemas = self.runtime.schemas_for_mode()
+        truncated_replies = 0
 
         try:
             for iteration in range(1, self.settings.loop.max_iterations + 1):
@@ -102,14 +104,30 @@ class AgentLoop:
                     yield AssistantReply(text=text)
 
                 tool_calls = response.message.tool_calls
-                if not tool_calls:
-                    yield self._finish(StopReason.COMPLETED, final_text)
-                    return
+                if tool_calls:
+                    truncated_replies = 0
+                    stop_reason = yield from self._run_tool_calls(tool_calls)
+                    if stop_reason is not None:
+                        yield self._finish(stop_reason, final_text)
+                        return
+                    continue
 
-                stop_reason = yield from self._run_tool_calls(tool_calls)
-                if stop_reason is not None:
-                    yield self._finish(stop_reason, final_text)
-                    return
+                if _is_truncated_finish(response.finish_reason):
+                    truncated_replies += 1
+                    limit = self.settings.loop.max_consecutive_tool_failures
+                    if truncated_replies >= limit:
+                        yield Notice(
+                            f"连续 {truncated_replies} 次输出被截断，已停止。",
+                            level="warning",
+                        )
+                        yield self._finish(StopReason.MAX_ITERATIONS, final_text)
+                        return
+                    self.session.add(UserMessage.of(TRUNCATION_CONTINUE_MSG))
+                    yield Notice("模型输出被截断，已要求继续。", level="warning")
+                    continue
+
+                yield self._finish(StopReason.COMPLETED, final_text)
+                return
 
             yield Notice(
                 f"已达到最大轮次上限（{self.settings.loop.max_iterations}），任务可能尚未完成。",
@@ -359,3 +377,11 @@ class AgentLoop:
         )
         self._pair_pending_tool_calls(error)
         return TaskFinished(reason=reason, final_text=final_text, stats=self.session.stats())
+
+
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
+
+
+def _is_truncated_finish(reason: str | None) -> bool:
+    """厂商把补全打到 token 上限标成 length / max_tokens，不是任务完成。"""
+    return (reason or "").lower() in _TRUNCATED_FINISH_REASONS

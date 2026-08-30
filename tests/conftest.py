@@ -52,6 +52,8 @@ class FakeLLM(LLMClient):
         if self.task_errors:
             raise self.task_errors.pop(0)
         item = self.script.pop(0) if self.script else AssistantMessage.of("done")
+        if isinstance(item, LLMResponse):
+            return item
         return LLMResponse(message=item, usage=Usage(10, 5, 15))
 
 

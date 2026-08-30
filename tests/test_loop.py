@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import sys
 
-from coding_agent.core.types import ApprovalRequired, AssistantReply, StopReason, TaskFinished, ToolFinished
-from coding_agent.llm.types import AssistantMessage, ToolCallBlock, ToolMessage
+from coding_agent.core.prompts import TRUNCATION_CONTINUE_MSG
+from coding_agent.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
+from coding_agent.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, ToolMessage, Usage, UserMessage
 from coding_agent.security.types import ApprovalDecision, PermissionMode
 from coding_agent.session import Session
 from coding_agent.settings import CliSettings, LoopLimits
@@ -230,6 +231,66 @@ def test_failing_commands_do_not_trip_tool_failures(make_env):
     _, reason = drive(runtime, "跑测试")
     assert reason is StopReason.COMPLETED
     assert runtime.session.consecutive_tool_failures == 0
+
+
+def test_truncated_reply_continues_instead_of_completing(env):
+    llm = FakeLLM(
+        [
+            LLMResponse(
+                message=AssistantMessage.of("只写了一半"),
+                finish_reason="length",
+                usage=Usage(10, 5, 15),
+            ),
+            AssistantMessage.of("从断点补完了。"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "写长文")
+    assert reason is StopReason.COMPLETED
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("被截断" in m for m in notices)
+    assert any(
+        isinstance(m, UserMessage) and m.text == TRUNCATION_CONTINUE_MSG
+        for m in runtime.session.messages
+    )
+    assert llm.script == []
+
+
+def test_repeated_truncation_stops_task(make_env):
+    env = make_env(loop=LoopLimits(max_consecutive_tool_failures=3, max_iterations=10))
+    llm = FakeLLM(
+        [
+            LLMResponse(
+                message=AssistantMessage.of(f"截断{i}"),
+                finish_reason="length",
+                usage=Usage(10, 5, 15),
+            )
+            for i in range(5)
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "写长文")
+    assert reason is StopReason.MAX_ITERATIONS
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("连续" in m and "截断" in m for m in notices)
+
+
+def test_truncated_reply_with_tool_calls_still_runs(env, tmp_path):
+    (tmp_path / "a.py").write_text("print(1)\n", encoding="utf-8")
+    llm = FakeLLM(
+        [
+            LLMResponse(
+                message=tool_call("read_file", '{"path": "a.py"}'),
+                finish_reason="length",
+                usage=Usage(10, 5, 15),
+            ),
+            AssistantMessage.of("读完了"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "读文件")
+    assert reason is StopReason.COMPLETED
+    assert runtime.session.tool_history.get("c1") is not None
 
 
 def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):

@@ -4,7 +4,7 @@
 
 1. **Blocked**：永远 DENY，任何模式（包括 Bypass）都不能绕过。
 2. **Restricted / 路径沙箱**：DENY，不出审批 UI。bash 里能看清的区外路径、写 ``.git/`` 走这里。
-3. **READ / Plan**：只读直接放行；Plan 禁止写文件，bash 仅放行只读命令（读 ``.env`` / ``printenv`` 仍要确认）。
+3. **READ / Plan**：普通只读放行；读敏感路径仍要确认。Plan 禁止写文件，bash 仅放行只读命令（读 ``.env`` / ``printenv`` / 递归搜索仍要确认）。
 4. **Sensitive / CRITICAL**：NEED_APPROVAL 且 force=True，不受「始终允许」或
    AcceptEdits / Bypass 影响。
 5. **Normal**：由 PermissionMode 与本会话白名单处理。
@@ -69,6 +69,11 @@ class PermissionManager:
             return PermissionOutcome.deny(DenyReason.RESTRICTED, restricted_reason)
 
         if tool.capability is ToolCapability.READ:
+            forced = self._forced_confirmation_reason(tool, args, workspace_access)
+            if forced:
+                return self._need_approval(
+                    tool, args, force=True, reason=forced, workspace_access=workspace_access
+                )
             return PermissionOutcome.allow()
 
         if mode is PermissionMode.PLAN:
@@ -158,6 +163,10 @@ class PermissionManager:
             target = write_target_display(self.workspace, args)
             if target is not None:
                 return rules.sensitive_path(target)
+        if tool.capability is ToolCapability.READ:
+            target = write_target_display(self.workspace, args)
+            if target is not None and rules.sensitive_path(target):
+                return f"{target} 可能包含密钥 / 凭据，读取也需要确认。"
         return None
 
     def _need_approval(

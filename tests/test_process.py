@@ -5,7 +5,39 @@ from __future__ import annotations
 import subprocess
 import time
 
-from coding_agent.tools.process import run_process, terminate
+from coding_agent.tools.process import (
+    build_subprocess_env,
+    is_secret_env_name,
+    run_process,
+    terminate,
+)
+
+
+def test_api_key_env_names_are_secret():
+    assert is_secret_env_name("DEEPSEEK_API_KEY")
+    assert is_secret_env_name("OPENAI_API_KEY")
+    assert is_secret_env_name("MY_CUSTOM_API_KEY")
+    assert not is_secret_env_name("PATH")
+    assert not is_secret_env_name("HOME")
+    assert not is_secret_env_name("SECRET_KEY")
+
+
+def test_subprocess_env_drops_api_key(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-test")
+    monkeypatch.setenv("CODING_AGENT_TEST_VISIBLE", "keep-me")
+    env = build_subprocess_env()
+    assert "DEEPSEEK_API_KEY" not in env
+    assert env["CODING_AGENT_TEST_VISIBLE"] == "keep-me"
+
+
+def test_subprocess_does_not_inherit_api_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-test")
+    result = run_process(
+        ["bash", "-c", "printenv DEEPSEEK_API_KEY || true"],
+        tmp_path,
+        timeout=5,
+    )
+    assert "sk-secret-test" not in result.stdout
 
 
 def test_timeout_does_not_leave_orphan(tmp_path):

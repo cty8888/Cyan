@@ -22,6 +22,24 @@ def test_plan_allows_read(env):
     assert outcome.kind == "allow"
 
 
+def test_read_env_is_forced_in_plan(env):
+    outcome = eval_perm(env, env.registry.get("read_file"), {"path": ".env"}, mode=PermissionMode.PLAN)
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_read_env_is_forced_in_bypass(env):
+    outcome = eval_perm(env, env.registry.get("read_file"), {"path": ".env"}, mode=PermissionMode.BYPASS)
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_read_id_rsa_is_forced(env):
+    outcome = eval_perm(env, env.registry.get("read_file"), {"path": "id_rsa"})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
 def test_plan_allows_readonly_pytest(env):
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "pytest -q"}, mode=PermissionMode.PLAN
@@ -367,6 +385,30 @@ def test_bash_cd_outside_then_write_is_denied(env):
 def test_plan_cat_env_is_forced(env):
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "cat .env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_grep_recursive_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "grep -r SECRET ."}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_rg_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "rg API_KEY"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_cat_glob_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "cat *"}, mode=PermissionMode.PLAN
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True

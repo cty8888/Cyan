@@ -188,3 +188,73 @@
 **改动**：`src/coding_agent/security/command_paths.py`、`src/coding_agent/security/permissions.py`、`src/coding_agent/security/allowlist.py`、`src/coding_agent/security/shell.py`、`src/coding_agent/security/paths.py`、`src/coding_agent/tools/builtin/bash.py`、`src/coding_agent/cli/renderer.py`
 
 **测试**：`tests/test_command_paths.py`；`tests/test_permissions.py` — `test_bash_write_env_is_forced`、`test_bash_write_git_dir_is_restricted`、`test_bash_read_outside_is_denied`、`test_git_status_whitelist_does_not_cover_commit`；`tests/test_bash.py` — `test_leaving_workspace_is_rejected`、`test_redirect_outside_is_rejected`、`test_write_git_dir_is_rejected`
+
+---
+
+## 10. finish_reason=length 被当成任务完成
+
+**现象**：模型打到补全上限时厂商返回 `finish_reason=length`。Loop 只看「有没有 tool_calls」，没有就 `COMPLETED`。用户看到半截总结，会话当成功结束。
+
+**原因**：`parse_completion` 读了 `finish_reason`，`AgentLoop` 从未看它。
+
+**修复**：无 tool_calls 且 `finish_reason` 为 `length` / `max_tokens` 时，回喂一条「输出被截断，请继续」的用户消息再跑一轮；连续截断达到失败上限则按 `MAX_ITERATIONS` 停。带 tool_calls 的截断仍执行工具。
+
+**改动**：`src/coding_agent/core/loop.py`、`src/coding_agent/core/prompts.py`
+
+**测试**：`tests/test_loop.py` — `test_truncated_reply_continues_instead_of_completing`、`test_repeated_truncation_stops_task`、`test_truncated_reply_with_tool_calls_still_runs`
+
+---
+
+## 11. 首条用户消息超窗无法紧急压缩
+
+**现象**：第一句贴进大段代码，还没有 Assistant。`find_keep_from(keep<=0)` 没有切点，emergency compact 失败，直接 FATAL。即便压成了，把原文整段插回窗口还是满的。
+
+**原因**：紧急切点只认 Assistant；摘要请求和写回都不截用户正文。
+
+**修复**：没有 Assistant 但用户正文超过 `DEFAULT_TOOL_RESULT_CHARS` 时，紧急切点切在末尾。摘要请求按同一上限截用户/助手正文；写回保留段时超长 User 只留开头。短消息仍不压，避免误伤。
+
+**改动**：`src/coding_agent/session/compact.py`
+
+**测试**：`tests/test_compact.py` — `test_emergency_cut_without_assistant_when_user_is_huge`、`test_loop_retries_after_overflow_on_huge_first_user`
+
+---
+
+## 12. read_file 读密钥文件自动放行
+
+**现象**：`READ` 在敏感路径检查之前直接 `allow()`。`read_file .env` / `id_rsa` 不询问；`bash cat .env` 却要强制确认。
+
+**原因**：判定链把「只读」当成一律安全。
+
+**修复**：`read_file` / `list_dir` 命中 `sensitive_path` 时 `force=True` 确认，Plan / Bypass 也不能跳过。普通源码读取仍自动放行。
+
+**改动**：`src/coding_agent/security/permissions.py`
+
+**测试**：`tests/test_permissions.py` — `test_read_env_is_forced_in_plan`、`test_read_env_is_forced_in_bypass`、`test_read_id_rsa_is_forced`
+
+---
+
+## 13. 通配 / 递归搜索绕过路径分析
+
+**现象**：Plan 下 `grep -r`、`rg`、`cat *` 算只读放行。解析器只看字面路径，`.env` 和私钥会被灌进上下文。
+
+**原因**：`command_paths` 抽不出通配展开后的目标；`rg` 默认递归。
+
+**修复**：未加引号的 `*` / `?` / `[]`、带 `-r` 的 grep、以及 `rg` / `ag` 标成无界读取，强制确认且不能「始终允许」。引号里的 `*`（如 `echo '2 * 3'`）不算。
+
+**改动**：`src/coding_agent/security/command_paths.py`、`src/coding_agent/security/messages.py`
+
+**测试**：`tests/test_command_paths.py` — `test_recursive_grep_is_unbounded`、`test_rg_is_unbounded`、`test_glob_cat_is_unbounded`；`tests/test_permissions.py` — `test_plan_grep_recursive_is_forced`、`test_plan_rg_is_forced`、`test_plan_cat_glob_is_forced`
+
+---
+
+## 14. bash 子进程继承宿主 API Key
+
+**现象**：`run_process` 在 `env is None` 时把完整 `os.environ` 传给子进程。审批过的脚本能 `printenv DEEPSEEK_API_KEY`。
+
+**原因**：子进程默认继承宿主环境，没有剥离调模型用的密钥。
+
+**修复**：每条子进程都走 `build_subprocess_env()`：复制当前环境，去掉 `DEEPSEEK_API_KEY` 以及名字以 `_API_KEY` / `_ACCESS_TOKEN` 结尾的变量。
+
+**改动**：`src/coding_agent/tools/process.py`
+
+**测试**：`tests/test_process.py` — `test_api_key_env_names_are_secret`、`test_subprocess_env_drops_api_key`、`test_subprocess_does_not_inherit_api_key`

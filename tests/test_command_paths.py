@@ -8,7 +8,7 @@ from coding_agent.security.command_paths import (
     outside_workspace_reason,
     restricted_write_reason,
 )
-from coding_agent.security.messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG
+from coding_agent.security.messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
 from coding_agent.security.paths import resolve_path
 from coding_agent.security.shell import command_head
 
@@ -67,6 +67,34 @@ def test_opaque_is_forced(tmp_path):
 
 def test_printenv_is_forced(tmp_path):
     assert forced_exec_reason(tmp_path, "printenv") == ENV_DUMP_MSG
+
+
+def test_recursive_grep_is_unbounded(tmp_path):
+    analysis = analyze_command("grep -rn SECRET .")
+    assert analysis.unbounded_read is True
+    assert forced_exec_reason(tmp_path, "grep -rn SECRET .") == UNBOUNDED_READ_MSG
+
+
+def test_rg_is_unbounded(tmp_path):
+    analysis = analyze_command("rg API_KEY src")
+    assert analysis.unbounded_read is True
+    assert forced_exec_reason(tmp_path, "rg API_KEY src") == UNBOUNDED_READ_MSG
+
+
+def test_glob_cat_is_unbounded(tmp_path):
+    analysis = analyze_command("cat *")
+    assert analysis.unbounded_read is True
+    assert forced_exec_reason(tmp_path, "cat *") == UNBOUNDED_READ_MSG
+
+
+def test_quoted_star_is_not_unbounded():
+    analysis = analyze_command("echo '2 * 3'")
+    assert analysis.unbounded_read is False
+
+
+def test_plain_grep_file_is_not_unbounded():
+    analysis = analyze_command("grep foo src/a.py")
+    assert analysis.unbounded_read is False
 
 
 def test_command_head_includes_git_subcommand():

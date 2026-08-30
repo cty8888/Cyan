@@ -8,6 +8,7 @@ from rich.console import Console
 
 from coding_agent.cli.commands import build_default_commands
 from coding_agent.cli.renderer import Renderer
+from coding_agent.settings.tools import DEFAULT_TOOL_RESULT_CHARS
 from coding_agent.session.compact import (
     CompactPolicy,
     find_keep_from,
@@ -130,6 +131,50 @@ def test_emergency_cut_drops_all_assistant_rounds(tmp_path):
     users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
     assert [m.text for m in users] == ["做任务"]
     assert not any(isinstance(m, AssistantMessage) for m in session.messages)
+
+
+def test_emergency_cut_without_assistant_when_user_is_huge(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    huge = "贴一段代码\n" + ("x" * (DEFAULT_TOOL_RESULT_CHARS + 100))
+    session.add(UserMessage.of(huge))
+    assert find_keep_from(session.messages, keep_recent_turns=2) is None
+    assert find_keep_from(session.messages, keep_recent_turns=0) == len(session.messages)
+
+    def call_llm(messages, tools=None):
+        blob = str(messages)
+        assert "...[truncated]" in blob
+        assert huge not in blob
+        return LLMResponse(message=AssistantMessage.of("超长任务摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy(), max_keep=0) is True
+    assert isinstance(session.messages[1], SummaryMessage)
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert len(users) == 1
+    assert users[0].text is not None
+    assert users[0].text.endswith("...[truncated]")
+    assert len(users[0].text) < len(huge)
+
+
+def test_loop_retries_after_overflow_on_huge_first_user(env, tmp_path):
+    huge = "请看这段代码\n" + ("y" * (DEFAULT_TOOL_RESULT_CHARS + 100))
+    llm = FakeLLM(
+        [AssistantMessage.of("压完后继续。")],
+        task_errors=[LLMContextOverflowError("This model's maximum context length is 65536 tokens")],
+    )
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, huge)
+    assert reason is StopReason.COMPLETED
+    assert llm.compact_requests
+    users = [
+        m
+        for m in runtime.session.messages
+        if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)
+    ]
+    assert users
+    assert users[0].text is not None
+    assert len(users[0].text) < len(huge)
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert any("超出模型窗口" in m for m in notices)
 
 
 def test_skip_when_no_assistant(tmp_path):

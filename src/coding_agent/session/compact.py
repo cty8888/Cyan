@@ -59,7 +59,11 @@ def find_keep_from(messages: list[Message], keep_recent_turns: int) -> int | Non
     ]
 
     if keep_recent_turns <= 0:
-        return len(messages) if assistant_indices else None
+        if assistant_indices:
+            return len(messages)
+        if any(_is_oversized_user(messages[index]) for index in user_indices):
+            return len(messages)
+        return None
 
     if len(assistant_indices) > keep_recent_turns:
         keep_from = assistant_indices[-keep_recent_turns]
@@ -180,7 +184,7 @@ def _apply_compact(session: Session, keep_from: int, summary: str, *, has_system
     call_ids = _tool_call_ids(dropped)
     kept: list[Message] = [*head, SummaryMessage.of(summary)]
     if preserved_user is not None:
-        kept.append(preserved_user)
+        kept.append(_truncate_preserved_user(preserved_user))
     kept.extend(session.messages[keep_from:])
     session.messages[:] = kept
     for call_id in call_ids:
@@ -199,6 +203,19 @@ def _user_to_preserve(messages: list[Message], dropped_start: int, keep_from: in
     if last_index is not None and dropped_start <= last_index < keep_from:
         return last_message
     return None
+
+
+def _is_oversized_user(message: Message, limit: int = DEFAULT_TOOL_RESULT_CHARS) -> bool:
+    """首条用户粘贴就能撑爆窗口：没有 Assistant 时也要能压。"""
+    return _is_real_user(message) and len(message.text or "") > limit
+
+
+def _truncate_preserved_user(message: UserMessage, limit: int = DEFAULT_TOOL_RESULT_CHARS) -> UserMessage:
+    """紧急压缩后若把原文整段插回，窗口还是满的。超限只留开头。"""
+    text = message.text or ""
+    if len(text) <= limit:
+        return message
+    return UserMessage.of(_truncate_tool_text(text, limit))
 
 
 def _tool_call_ids(messages: list[Message]) -> list[str]:
@@ -227,7 +244,11 @@ def _message_to_wire(
 ) -> dict:
     if isinstance(message, ToolMessage):
         return message.to_api(content=_tool_text(tool_history, message, tool_limit))
-    return message.to_api()
+    payload = message.to_api()
+    content = payload.get("content")
+    if isinstance(content, str):
+        payload["content"] = _truncate_tool_text(content, tool_limit)
+    return payload
 
 
 def _tool_text(tool_history: ToolHistory, message: ToolMessage, limit: int) -> str:

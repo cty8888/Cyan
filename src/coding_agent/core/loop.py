@@ -116,23 +116,26 @@ class AgentLoop:
             yield self._finish(StopReason.FATAL_ERROR, final_text)
 
     def _run_tool_calls(self, tool_calls: list[ToolCallBlock]) -> Generator[AgentEvent, Any, StopReason | None]:
-        # 已写回 tool 结果的 call id。下轮 LLM 要求本批每条 tool_call 都有对应回复；
-        # Ctrl-C 时用它区分「已经回过」和「还没执行」，只给后者补一条中断结果。
+        # 已写回 tool 结果的 call id。本批每条 tool_call 都必须有对应回复，
+        # 否则同一会话里下一次请求会带着残缺配对去打 API。
         responded: set[str] = set()
         try:
             for call in tool_calls:
                 stop_reason = yield from self._run_single_call(call, responded)
                 if stop_reason is not None:
+                    self._respond_unanswered(
+                        tool_calls,
+                        responded,
+                        "任务已终止，该工具调用未执行。",
+                    )
                     return stop_reason
             return None
         except KeyboardInterrupt:
-            for call in tool_calls:
-                if call.id not in responded:
-                    self._respond(
-                        call,
-                        responded,
-                        ToolRunResult.failure("用户中断了任务，该工具调用未执行。"),
-                    )
+            self._respond_unanswered(
+                tool_calls,
+                responded,
+                "用户中断了任务，该工具调用未执行。",
+            )
             raise
 
     def _run_single_call(
@@ -174,8 +177,8 @@ class AgentLoop:
                 call,
                 responded,
                 ToolRunResult.failure(
-                    f"最近若干次调用中，完全相同的 {call.name} 调用已出现 {repeats} 次，"
-                    "期间没有任何实质进展，已阻止以避免死循环。"
+                    f"连续 {repeats} 次调用完全相同的 {call.name} 且中间没有成功进展，"
+                    "已阻止以避免死循环。"
                 ),
             )
             yield Notice(f"重复调用 {call.name} 且无进展，已终止任务。", level="error")
@@ -198,7 +201,7 @@ class AgentLoop:
         duration = time.monotonic() - started
 
         self._respond(call, responded, result, duration=duration)
-        if result.ok and result.metadata.get("diff") not in (None, "(无变化)"):
+        if result.ok:
             self.session.reset_repeat_tracking()
         yield ToolFinished(call_id=call.id, name=call.name, result=result, duration=duration)
 
@@ -262,7 +265,18 @@ class AgentLoop:
             duration=duration,
         )
         self.session.add(ToolMessage.of(call.id))
-        responded.add(call.id)  # 标记已闭环，中断补全时跳过这条
+        responded.add(call.id)
+
+    def _respond_unanswered(
+        self,
+        tool_calls: list[ToolCallBlock],
+        responded: set[str],
+        error: str,
+    ) -> None:
+        """给本批尚未写回的 tool_call 补一条失败结果，保证会话配对完整。"""
+        for call in tool_calls:
+            if call.id not in responded:
+                self._respond(call, responded, ToolRunResult.failure(error))
 
     def _check_failure_threshold(self) -> StopReason | None:
         """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""

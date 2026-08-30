@@ -6,6 +6,7 @@ from coding_agent.context.builder import ContextBuilder
 from coding_agent.context.types import ContextPolicy
 from coding_agent.llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
 from coding_agent.session import Session
+from coding_agent.settings.tools import DEFAULT_TOOL_RESULT_CHARS, ToolLimits
 
 
 def _session_with_tool(tmp_path, content: str) -> Session:
@@ -37,6 +38,12 @@ def test_long_tool_result_truncated_in_wire_only(tmp_path):
     tool = next(p for p in payloads if p["role"] == "tool")
     assert tool["content"] == "x" * 20 + "...[truncated]"
     assert session.tool_history.get("c1").result.content == raw
+
+
+def test_read_budget_does_not_exceed_context_truncation():
+    assert ToolLimits().max_file_read_chars <= ContextPolicy().max_tool_result_chars
+    assert ToolLimits().max_file_read_chars == DEFAULT_TOOL_RESULT_CHARS
+    assert ContextPolicy().max_tool_result_chars == DEFAULT_TOOL_RESULT_CHARS
 
 
 def test_zero_limit_does_not_truncate(tmp_path):

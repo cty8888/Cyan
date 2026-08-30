@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from ..security.types import PermissionMode
-
-RECENT_CALL_WINDOW = 8
 
 
 def _new_session_id() -> str:
@@ -54,7 +51,7 @@ class SessionPermissions:
 class SessionWorkspace:
     root: Path = field(default_factory=Path.cwd)
     cwd: Path | None = None
-    # 已读文件：read_file 写入，write_file / edit_file 用 has_read 做前置检查。
+    # 已完整读过的文件：仅整篇读完才写入，write_file / edit_file 用 has_read 做前置检查。
     opened_files: set[Path] = field(default_factory=set, repr=False)
     # 本会话写过的文件，由 write_file / edit_file 维护。
     modified_files: set[Path] = field(default_factory=set, repr=False)
@@ -76,10 +73,9 @@ class SessionWorkspace:
 class SessionState:
     current_task: str | None = None
     consecutive_tool_failures: int = 0
-    # 最近若干次工具调用的指纹，用于检测「同工具 + 同参数」重复调用。
-    recent_calls: deque[str] = field(
-        default_factory=lambda: deque(maxlen=RECENT_CALL_WINDOW), repr=False
-    )
+    # 连续相同「工具 + 参数」的指纹与次数；中间换了调用或出现成功进展会清零。
+    last_call_fingerprint: str | None = None
+    consecutive_identical_calls: int = 0
 
 
 @dataclass

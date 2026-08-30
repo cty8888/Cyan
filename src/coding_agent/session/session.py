@@ -147,15 +147,24 @@ class Session:
     # ------------------------------------------------------------------ 循环控制
 
     def record_call_fingerprint(self, name: str, args: dict[str, Any]) -> int:
-        """记录「同工具 + 同参数」指纹，返回它在最近窗口里出现的次数。"""
+        """记录本次调用指纹，返回当前连续相同次数。
+
+        只统计连续重复：中间换成另一次调用会重新从 1 计。成功进展由
+        ``reset_repeat_tracking`` 清零，避免合法重试被窗口计数误杀。
+        """
         payload = json.dumps({"name": name, "args": args}, sort_keys=True, ensure_ascii=False, default=str)
         fingerprint = hashlib.sha1(payload.encode("utf-8")).hexdigest()
-        self.state.recent_calls.append(fingerprint)
-        return self.state.recent_calls.count(fingerprint)
+        if self.state.last_call_fingerprint == fingerprint:
+            self.state.consecutive_identical_calls += 1
+        else:
+            self.state.last_call_fingerprint = fingerprint
+            self.state.consecutive_identical_calls = 1
+        return self.state.consecutive_identical_calls
 
     def reset_repeat_tracking(self) -> None:
-        """有实质进展（例如文件被改动）时清空重复调用窗口。"""
-        self.state.recent_calls.clear()
+        """工具调用有进展（任意成功结果）时清空连续重复计数。"""
+        self.state.last_call_fingerprint = None
+        self.state.consecutive_identical_calls = 0
 
     # ------------------------------------------------------------------ 工作区
 
@@ -165,7 +174,7 @@ class Session:
         self.metadata.touch()
 
     def has_read(self, path: Path) -> bool:
-        """判断本会话是否已经完整读取过该文件。"""
+        """判断本会话是否已经整篇读取过该文件（分段 / 截断读取不算）。"""
         return path.resolve() in self.workspace.opened_files
 
     def mark_modified(self, path: Path) -> None:

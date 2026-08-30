@@ -1,5 +1,7 @@
 # Coding Agent 全项目代码评审
 
+> 2026-08-30：循环协议 / 重复检测 / 读文件截断与已读标记，见 [docs/p0-fixes.md](p0-fixes.md)。
+>
 > 后续结构整理（2026-08-29）：已删除 `constants/` 平行目录树（工具 schema 内联到 `tools/defs/`，权限文案迁入 `security/`）；`security_rules.py` 改名为 `rules.py`，`utils.py` 改名为 `readonly.py`；根目录调试脚本 `test_deepseek.py` / `test_env.py` 已删除。下文仍保留当时的问题记录。
 >
 > 评审范围：`src/coding_agent` 全部源码、`docs/architecture.md`、`README.md`、`需求.md`，并运行过 `tests/smoke.py`（79 项全部通过）。

@@ -6,7 +6,7 @@ import json
 import sys
 
 from coding_agent.core.types import ApprovalRequired, StopReason, ToolFinished
-from coding_agent.llm.types import AssistantMessage, ToolMessage
+from coding_agent.llm.types import AssistantMessage, ToolCallBlock, ToolMessage
 from coding_agent.security.types import ApprovalDecision, PermissionMode
 from coding_agent.session import Session
 from coding_agent.settings import CliSettings, LoopLimits
@@ -119,6 +119,71 @@ def test_every_tool_call_has_tool_message(env):
     )
     tool_replies = sum(1 for m in runtime.session.messages if isinstance(m, ToolMessage))
     assert assistant_calls == tool_replies
+
+
+def _assert_tool_calls_paired(session: Session) -> None:
+    assistant_calls = sum(
+        len(m.tool_calls) for m in session.messages if isinstance(m, AssistantMessage)
+    )
+    tool_replies = sum(1 for m in session.messages if isinstance(m, ToolMessage))
+    assert assistant_calls == tool_replies
+
+
+def test_early_stop_pairs_remaining_tool_calls(make_env):
+    env = make_env(loop=LoopLimits(max_consecutive_tool_failures=3, max_iterations=5))
+    calls = [
+        ToolCallBlock(id=f"f{i}", name="read_file", arguments='{"path": "miss%d.py"}' % i)
+        for i in range(5)
+    ]
+    runtime = make_runtime(env, FakeLLM([AssistantMessage.of(tool_calls=calls)]))
+    _, reason = drive(runtime, "一批失败")
+    assert reason is StopReason.TOOL_FAILURES
+    _assert_tool_calls_paired(runtime.session)
+    leftover = runtime.session.tool_history.get("f3")
+    assert leftover is not None
+    assert leftover.result is not None
+    assert "任务已终止" in (leftover.result.content or "")
+
+
+def test_repeated_calls_pair_remaining_in_batch(env):
+    calls = [
+        ToolCallBlock(id=f"r{i}", name="read_file", arguments='{"path": "nope.py"}')
+        for i in range(3)
+    ]
+    calls.append(ToolCallBlock(id="extra", name="list_dir", arguments='{"path": "."}'))
+    runtime = make_runtime(env, FakeLLM([AssistantMessage.of(tool_calls=calls)]))
+    _, reason = drive(runtime, "重复一批")
+    assert reason is StopReason.REPEATED_CALLS
+    _assert_tool_calls_paired(runtime.session)
+    extra = runtime.session.tool_history.get("extra")
+    assert extra is not None
+    assert extra.result is not None
+    assert "任务已终止" in (extra.result.content or "")
+
+
+def test_successful_reread_does_not_count_as_repeat(env, tmp_path):
+    (tmp_path / "a.py").write_text("print(1)\n", encoding="utf-8")
+    llm = FakeLLM([tool_call("read_file", '{"path": "a.py"}', f"r{i}") for i in range(5)])
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "反复读")
+    assert reason is StopReason.COMPLETED
+
+
+def test_alternating_failed_reads_are_not_repeated_calls(make_env):
+    env = make_env(loop=LoopLimits(max_repeated_calls=3, max_consecutive_tool_failures=20, max_iterations=10))
+    llm = FakeLLM(
+        [
+            tool_call("read_file", '{"path": "miss_a.py"}', "a1"),
+            tool_call("read_file", '{"path": "miss_b.py"}', "b1"),
+            tool_call("read_file", '{"path": "miss_a.py"}', "a2"),
+            tool_call("read_file", '{"path": "miss_b.py"}', "b2"),
+            tool_call("read_file", '{"path": "miss_a.py"}', "a3"),
+            AssistantMessage.of("换方案"),
+        ]
+    )
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "交替失败")
+    assert reason is StopReason.COMPLETED
 
 
 def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):

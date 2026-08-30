@@ -10,7 +10,8 @@ from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
 READ_FILE_NAME = "read_file"
 READ_FILE_DESCRIPTION = (
     "读取文本文件内容, 返回结果带行号 (格式为 `行号 | 内容`). "
-    "修改任何文件之前都必须先读取它, write_file/edit_file 会强制检查这一点. "
+    "修改任何文件之前都必须先完整读取它, write_file/edit_file 会检查本会话是否已经整篇读过；"
+    "分段 limit 或超出字符预算的截断读取不算。 "
     "不传 limit 时尝试整篇读取; 文件超过单次读取上限会返回 [PARTIAL VIEW] 提示, "
     "按提示传 offset 续读, 或显式传 limit 分段读取."
 )
@@ -85,8 +86,9 @@ class ReadFileTool(Tool):
                 "请调小 limit 分段读取。"
             )
 
-        # 本次读取请求已完整满足时，标记为已读，供 write_file/edit_file 前置检查
-        if not truncated_by_budget:
+        # 只有整篇都进了本次结果，才算「读过」，供 write_file/edit_file 前置检查。
+        entire_file_shown = offset == 1 and shown_to >= total and not truncated_by_budget
+        if entire_file_shown:
             ctx.workspace_access.mark_read(target)
 
         header = f"{display(ctx.workspace, target)}（共 {total} 行，当前展示 {offset}-{shown_to} 行）"

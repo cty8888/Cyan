@@ -10,6 +10,7 @@ def test_reads_with_line_numbers(env, tmp_path):
     result = env.registry.execute("read_file", {"path": "mod.py"}, env.ctx)
     assert result.ok
     assert "1 | def add" in result.content
+    assert env.ctx.workspace_access.has_read((tmp_path / "mod.py").resolve())
 
 
 def test_empty_file(env, tmp_path):
@@ -17,6 +18,7 @@ def test_empty_file(env, tmp_path):
     result = env.registry.execute("read_file", {"path": "empty.txt"}, env.ctx)
     assert result.ok
     assert "内容为空" in result.content
+    assert env.ctx.workspace_access.has_read((tmp_path / "empty.txt").resolve())
 
 
 def test_offset_past_end(env, tmp_path):
@@ -24,6 +26,7 @@ def test_offset_past_end(env, tmp_path):
     result = env.registry.execute("read_file", {"path": "mod.py", "offset": 999}, env.ctx)
     assert result.ok
     assert "共" in result.content and "没有内容" in result.content
+    assert not env.ctx.workspace_access.has_read((tmp_path / "mod.py").resolve())
 
 
 def test_missing_file(env):
@@ -79,7 +82,7 @@ def test_explicit_limit_over_budget_errors(make_env, tmp_path):
     assert "调小 limit" in (result.error or "")
 
 
-def test_small_explicit_limit_counts_as_read(make_env, tmp_path):
+def test_small_explicit_limit_does_not_count_as_read(make_env, tmp_path):
     big = "\n".join(f"line {i}" for i in range(2000))
     (tmp_path / "big.txt").write_text(big, encoding="utf-8")
     env = make_env(tools=ToolLimits(max_file_read_chars=200))
@@ -88,4 +91,20 @@ def test_small_explicit_limit_counts_as_read(make_env, tmp_path):
     )
     assert result.ok
     assert "PARTIAL" not in result.content
-    assert env.ctx.workspace_access.has_read((tmp_path / "big.txt").resolve())
+    assert not env.ctx.workspace_access.has_read((tmp_path / "big.txt").resolve())
+
+
+def test_offset_slice_does_not_count_as_read(env, tmp_path):
+    (tmp_path / "mod.py").write_text("a\nb\nc\n", encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "mod.py", "offset": 2}, env.ctx)
+    assert result.ok
+    assert not env.ctx.workspace_access.has_read((tmp_path / "mod.py").resolve())
+
+
+def test_explicit_limit_covering_whole_file_counts_as_read(env, tmp_path):
+    (tmp_path / "mod.py").write_text("a\nb\nc\n", encoding="utf-8")
+    result = env.registry.execute(
+        "read_file", {"path": "mod.py", "offset": 1, "limit": 10}, env.ctx
+    )
+    assert result.ok
+    assert env.ctx.workspace_access.has_read((tmp_path / "mod.py").resolve())

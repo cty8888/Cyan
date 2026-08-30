@@ -101,9 +101,11 @@ flowchart TD
 - 模型返回无 `tool_calls` 的完整回复
 - 达到 `max_iterations`（默认 30）
 - 用户 Ctrl-C 中断
-- 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」重复调用
+- 连续 N 次工具失败（默认 3）或检测到「同工具 + 同参数」**连续**重复且中间无成功进展
 
 token 预算触发压缩后任务继续，压缩失败不中断循环。
+
+2026-08-30 对循环协议、重复检测、读文件已读标记的修复见 [docs/p0-fixes.md](p0-fixes.md)。
 
 ### Message 继承体系 + Block 内容模型 + ToolHistory 事实记录
 
@@ -149,7 +151,7 @@ Session
  ├── metadata      # id / created_at / updated_at / title
  ├── messages        # list[Message]
  ├── tool_history    # ToolHistory
- ├── state           # current_task / consecutive_tool_failures / recent_calls
+ ├── state           # current_task / consecutive_tool_failures / last_call_fingerprint / consecutive_identical_calls
  ├── workspace       # root / cwd / opened_files / modified_files
  ├── permissions     # permission_mode / always_allowed（write:{目录} / exec:{命令名}）
  └── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pytest
 
 from cyan.core.prompts import COMPACT_SYSTEM_PROMPT
+from cyan.memory.extract import EXTRACT_SYSTEM_PROMPT
 from cyan.core.runtime import Runtime
 from cyan.core.types import ApprovalRequired, TaskFinished
 from cyan.llm.base import LLMClient
@@ -31,12 +32,14 @@ class Env:
 class FakeLLM(LLMClient):
     """按预设脚本依次返回响应。压缩用的 chat（专用 system prompt）不消耗 script。"""
 
-    def __init__(self, script, task_errors=None):
+    def __init__(self, script, task_errors=None, extract_script=None):
         self.model = "fake"
         self.script = list(script)
         self.task_errors = list(task_errors or [])
+        self.extract_script = list(extract_script or [])
         self.calls = 0
         self.compact_requests: list[list[dict]] = []
+        self.extract_requests: list[list[dict]] = []
 
     def chat(self, messages, tools=None):
         self.calls += 1
@@ -48,6 +51,22 @@ class FakeLLM(LLMClient):
                     "# 未完成待办\n无\n# 当前任务停在哪\n继续"
                 ),
                 usage=Usage(8, 4, 12),
+            )
+        if _is_extract_request(messages):
+            self.extract_requests.append(list(messages))
+            if self.extract_script:
+                item = self.extract_script.pop(0)
+                if isinstance(item, LLMResponse):
+                    return item
+                if isinstance(item, AssistantMessage):
+                    return LLMResponse(message=item, usage=Usage(4, 2, 6))
+                return LLMResponse(
+                    message=AssistantMessage.of(str(item)),
+                    usage=Usage(4, 2, 6),
+                )
+            return LLMResponse(
+                message=AssistantMessage.of('{"entries": []}'),
+                usage=Usage(4, 2, 6),
             )
         if self.task_errors:
             raise self.task_errors.pop(0)
@@ -62,6 +81,17 @@ def _is_compact_request(messages) -> bool:
         return False
     first = messages[0]
     return isinstance(first, dict) and first.get("role") == "system" and first.get("content") == COMPACT_SYSTEM_PROMPT
+
+
+def _is_extract_request(messages) -> bool:
+    if not messages:
+        return False
+    first = messages[0]
+    return (
+        isinstance(first, dict)
+        and first.get("role") == "system"
+        and first.get("content") == EXTRACT_SYSTEM_PROMPT
+    )
 
 
 def tool_call(name: str, args_json: str, cid: str = "c1") -> AssistantMessage:

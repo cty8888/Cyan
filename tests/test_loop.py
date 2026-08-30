@@ -309,7 +309,7 @@ def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="", permission_mode=PermissionMode.PLAN)
     runtime = make_runtime(env, FakeLLM([AssistantMessage.of("ok")]), session)
     names = {s["function"]["name"] for s in runtime.schemas_for_mode()}
-    assert names == {"list_dir", "read_file", "bash", "glob", "grep"}
+    assert names == {"list_dir", "read_file", "bash", "glob", "grep", "memory_list", "memory_read"}
 
 
 def test_repeated_denials_of_same_write_trip_repeats(make_env):

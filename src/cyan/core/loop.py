@@ -133,6 +133,7 @@ class AgentLoop:
                         yield Notice("模型没有给出回复，已要求继续。", level="warning")
                     continue
 
+                yield from self._persist_auto_memory()
                 yield self._finish(StopReason.COMPLETED, final_text)
                 return
 
@@ -389,6 +390,27 @@ class AgentLoop:
                 break
         yield Notice("已压缩较早的对话历史。")
         return True
+
+    def _persist_auto_memory(self) -> Generator[AgentEvent, Any, None]:
+        """任务成功结束后一次提取；失败只提示，不改变退出原因。"""
+        from ..memory.extract import persist_auto_memory
+        from ..memory.settings import auto_memory_enabled
+        from ..security.types import PermissionMode
+
+        if not self.runtime.prompt_stack.auto_memory:
+            return
+        if not auto_memory_enabled():
+            return
+        if self.session.permissions.permission_mode is PermissionMode.PLAN:
+            return
+        yield Notice("正在回顾是否有值得记住的内容…")
+        try:
+            written = persist_auto_memory(self.session, self.runtime.call_llm)
+        except Exception as exc:  # noqa: BLE001 — 提取失败不得拖垮任务
+            yield Notice(f"自动记忆提取失败，已跳过：{exc}", level="warning")
+            return
+        if written:
+            yield Notice(f"已写入 {written} 条自动记忆。")
 
     def _check_failure_threshold(self) -> StopReason | None:
         """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""

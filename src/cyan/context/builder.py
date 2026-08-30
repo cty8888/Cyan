@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..llm.types import Message, ToolMessage
+from ..llm.types import Message, SystemMessage, ToolMessage
+from ..prompt.stack import PromptStack
 from ..session.types import ToolExecution, ToolHistory
 from .types import ContextPolicy
 
@@ -34,9 +35,14 @@ class ContextBuilder:
         self,
         messages: list[Message],
         tool_history: ToolHistory,
+        stack: PromptStack | None = None,
     ) -> list[dict]:
-        """ToolMessage 只存 call id，正文从 tool_history 查出后再填进 API payload。"""
+        """ToolMessage 只存 call id，正文从 tool_history 查出后再填进 API payload。
+
+        ``stack`` 只改第一条 system 的 **wire** 正文（叠 Prompt Layer），不改 Session。
+        """
         payloads: list[dict] = []
+        used_stack = False
         for message in messages:
             if isinstance(message, ToolMessage):
                 block = message.tool_result
@@ -44,6 +50,11 @@ class ContextBuilder:
                 execution = tool_history.get(call_id)
                 content = self.render_tool_result(execution)
                 payloads.append(message.to_api(content=content))
+            elif stack is not None and isinstance(message, SystemMessage) and not used_stack:
+                used_stack = True
+                payloads.append(
+                    {"role": "system", "content": stack.render_system(message.text or "")}
+                )
             else:
                 payloads.append(message.to_api())
         return payloads

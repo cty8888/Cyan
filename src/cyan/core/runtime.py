@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..context.builder import ContextBuilder
 from ..context.types import ContextPolicy
 from ..llm.base import LLMClient
+from ..prompt.stack import PromptStack
 from ..security.permissions import PermissionManager
 from ..security.types import PermissionMode
 from ..session import Session, WorkspaceAccess
@@ -38,6 +39,7 @@ class Runtime:
     registry: ToolRegistry
     tool_executor: ToolExecutor
     permissions: PermissionManager
+    prompt_stack: PromptStack
     loop: AgentLoop = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -52,6 +54,7 @@ class Runtime:
         permissions: PermissionManager,
         session: Session,
         compact_policy: CompactPolicy | None = None,
+        prompt_stack: PromptStack | None = None,
     ) -> Runtime:
         """装配默认的上下文策略与工具执行器，再构造 Runtime。
 
@@ -59,10 +62,16 @@ class Runtime:
         省略时（测试）也拷一份，避免改 Runtime 时写回启动配置。
         组窗截断与 ``ToolLimits.max_file_read_chars`` 用同一把尺子，避免工具声称读完、
         模型却只看到前半段。
+        ``prompt_stack`` 省略时只加载工作区 ``cyan.md``（不读用户主目录，避免测试误伤）。
         """
         context_policy = ContextPolicy(max_tool_result_chars=settings.tools.max_file_read_chars)
         context_builder = ContextBuilder.from_policy(context_policy)
         policy = replace(compact_policy if compact_policy is not None else settings.compact)
+        stack = prompt_stack if prompt_stack is not None else PromptStack(
+            workspace=settings.workspace,
+            home=None,
+            auto_memory=False,
+        )
         return cls(
             session=session,
             settings=settings,
@@ -73,6 +82,7 @@ class Runtime:
             registry=registry,
             tool_executor=ToolExecutor(registry),
             permissions=permissions,
+            prompt_stack=stack,
         )
 
     def run(self, task: str) -> AgentStream:
@@ -94,10 +104,14 @@ class Runtime:
         return self.registry.schemas()
 
     def messages_for_request(self) -> list[dict]:
-        """把会话消息与工具历史渲染成发给模型的 wire 格式。"""
+        """把会话消息与工具历史渲染成发给模型的 wire 格式。
+
+        每次组窗都把 PromptStack 叠到第一条 system 上，并从磁盘重读 cyan.md。
+        """
         return self.context_builder.build_messages(
             self.session.messages,
             self.session.tool_history,
+            stack=self.prompt_stack,
         )
 
     # ------------------------------------------------------------ 行为方法

@@ -33,7 +33,33 @@ uv run cyan -p "给 utils.py 加上类型标注并跑一遍测试"
 
 终端界面用 rich 渲染（Markdown、diff、审批面板）。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/instructions`、`/memory`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+
+## 指令层（cyan.md）
+
+开发者维护的持久化规则，组窗时作为独立 Prompt Layer 叠进 system 角色，**不写入会话日志**。从宽到窄：
+
+| 位置 | 作用 |
+| --- | --- |
+| `~/.cyan/cyan.md` | 个人偏好（所有项目）；`CYAN_HOME` 可覆盖根目录 |
+| `{workspace}/.cyan/cyan.md` | 本仓库的团队规范，可提交进 git |
+| `{workspace}/cyan.md` | 仅当 `.cyan/cyan.md` 不存在时的过渡位置 |
+
+缺文件则跳过。改完下一轮模型调用即生效。用 `/instructions` 查看当前加载了哪些层。
+
+## 自动记忆
+
+项目级笔记写在 `{workspace}/.cyan/memory/`（git 忽略，不共享）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `MEMORY.md` | 索引，每条一行，组窗时加载 |
+| `user.md` | 协作者偏好、角色（按需 `memory_read`） |
+| `feedback.md` | 纠错、被确认的做法 |
+| `project.md` | 代码 / git 看不出的进度与决策 |
+| `reference.md` | 仓库外入口 |
+
+任务中可用 `memory_write` 即时写入；任务 **成功结束** 后会再提取一次。中断或失败不沉淀。`CYAN_DISABLE_AUTO_MEMORY=1` 可关闭。用 `/memory` 查看文件。cyan.md 是人写的规则，memory 是 Agent 写的笔记。
 
 ## 工具
 
@@ -43,6 +69,9 @@ uv run cyan -p "给 utils.py 加上类型标注并跑一遍测试"
 | `read_file` | 只读 | 低 | 带行号读取，支持 offset/limit 分段 |
 | `glob` | 只读 | 低 | 按文件名 glob 查找，支持 `**` 与一层花括号，按 mtime 最多 100 条 |
 | `grep` | 只读 | 低 | 基于 ripgrep 搜内容；默认只返回路径，遵守 `.gitignore` |
+| `memory_list` | 只读 | 极低 | 列出 `.cyan/memory/` 中的记忆文件 |
+| `memory_read` | 只读 | 低 | 读取某一个记忆 md |
+| `memory_write` | 写入 | 极低 | 写入四类笔记之一并更新索引；非 Plan 下免审批 |
 | `write_file` | 写入 | 中 | 整文件写入，自动创建父目录 |
 | `edit_file` | 写入 | 中 | 精确字符串替换，要求匹配唯一 |
 | `bash` | 执行 | 高 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
@@ -69,9 +98,11 @@ system prompt 里会给出本机 Python 解释器的绝对路径，避免模型�
 
 ```
 cli/        REPL 与 rich 渲染，消费事件流、处理审批交互
-core/       Agent Loop（Runtime + AgentLoop）、事件定义、system prompt
+core/       Agent Loop（Runtime + AgentLoop）、事件定义、identity system prompt
 session/    会话状态、工具执行历史、工作区视图
-context/    把消息历史与工具结果装配成发给模型的格式
+context/    把消息历史与工具结果装配成发给模型的格式（叠 Prompt Layer）
+prompt/     Prompt Layer：identity + cyan.md + MEMORY.md 索引
+memory/     项目级 Auto Memory 存储与任务结束提取
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
 tools/      工具契约、注册表、文件系统与 bash 执行工具
 security/   路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议
@@ -103,4 +134,4 @@ uv run pytest
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork 已落地。后续：流式输出、AGENTS.md Memory、任务规划。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory 已落地。后续：流式输出、任务规划。

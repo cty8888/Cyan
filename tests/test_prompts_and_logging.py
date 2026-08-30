@@ -17,6 +17,8 @@ def test_system_prompt_includes_python_executable(tmp_path):
     assert "不跟 bash 的 cd 走" in prompt
     assert "glob / grep" in prompt
     assert "不要用 bash 的 find、grep、rg 代替" in prompt
+    assert "指令层" in prompt
+    assert "memory_write" in prompt
 
 
 def test_logging_writes_file_not_stderr(env):

@@ -37,8 +37,9 @@ dist/
 workspace/
 .demo/
 
-# Agent 运行时状态目录（会话、临时脚本）
-.cyan/
+# 工作区运行时（cyan.md 可提交；记忆与日志留在本机）
+.cyan/logs/
+.cyan/memory/
 
 # Temporary files
 *.tmp

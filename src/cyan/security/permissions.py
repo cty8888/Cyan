@@ -68,6 +68,11 @@ class PermissionManager:
         if restricted_reason:
             return PermissionOutcome.deny(DenyReason.RESTRICTED, restricted_reason)
 
+        if tool.name == "memory_write":
+            if mode is PermissionMode.PLAN:
+                return PermissionOutcome.deny(DenyReason.MODE_BLOCKED, PLAN_WRITE_MSG)
+            return PermissionOutcome.allow()
+
         if tool.capability is ToolCapability.READ:
             forced = self._forced_confirmation_reason(tool, args, workspace_access)
             if forced:

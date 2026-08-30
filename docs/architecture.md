@@ -33,7 +33,16 @@ src/cyan/
     runtime.py           # Runtime 组装 LLM / 工具 / 权限 / 上下文
     loop.py              # AgentLoop 驱动任务循环
     tool_executor.py     # ToolExecutor：实际执行工具（预留 hook 点）
-    prompts.py           # system prompt
+    prompts.py           # identity system prompt 与 compact 摘要提示
+  prompt/                # Prompt Layer（组窗时叠进 system，不进 Session）
+    types.py             # PromptLayerKind / PromptLayer
+    files.py             # 发现并读取 ~/.cyan/cyan.md 与 {workspace}/.cyan/cyan.md
+    stack.py             # PromptStack：顺序、按层截断、render_system()
+  memory/                # 项目级 Auto Memory（.cyan/memory/）
+    types.py             # MemoryKind / MEMORY.md 上限
+    settings.py          # CYAN_DISABLE_AUTO_MEMORY
+    store.py             # 合法文件名、读写索引
+    extract.py           # COMPLETED 后一次提取 chat
   session/               # Session 数据层（Loop 只通过 Runtime 读写）
     types.py             # 会话字段、工具执行历史
     session.py           # Session 门面
@@ -46,7 +55,7 @@ src/cyan/
     workspace_access.py  # 工具能触达的受控工作区视图
   context/
     types.py             # ContextPolicy（装配期工具结果截断）
-    builder.py           # ContextBuilder：装配 wire 格式，工具正文按上限截尾
+    builder.py           # ContextBuilder：装配 wire；第一条 system 叠 PromptStack
   llm/
     types.py             # Role / Block(...) / Message 继承体系 / LLMResponse
     base.py              # LLMClient 抽象
@@ -66,6 +75,9 @@ src/cyan/
       bash.py
       glob.py
       grep.py
+      memory_list.py
+      memory_read.py
+      memory_write.py
   security/
     types.py             # PermissionMode / 审批协议 / PermissionOutcome
     permissions.py       # PermissionManager：判定链入口
@@ -140,7 +152,7 @@ session.tool_history（与 Message 完全解耦，挂在 Session 上，只负责
 └── ToolHistory     # dict[call_id, ToolExecution]，record() / get()
 
 context.builder.ContextBuilder（装配层，由 Runtime 持有）
-└── build_messages()  # 反查 ToolHistory，取出 content，按 max_tool_result_chars 截尾
+└── build_messages()  # 反查 ToolHistory；第一条 system 叠 PromptStack；工具正文按上限截尾
 ```
 
 ### Session 与 Runtime
@@ -148,7 +160,8 @@ context.builder.ContextBuilder（装配层，由 Runtime 持有）
 ```
 Runtime（执行层，不保存长期状态）
  ├── LLMClient
- ├── ContextBuilder / ContextPolicy   # 只装配 messages + tool_history
+ ├── ContextBuilder / ContextPolicy   # 装配 wire；叠 PromptStack
+ ├── PromptStack                      # identity + cyan.md + MEMORY.md
  ├── CompactPolicy                    # 何时压、留几轮
  ├── ToolRegistry
  ├── ToolExecutor
@@ -189,7 +202,7 @@ Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtim
 
 `ToolHistory` 只提供 `record()` / `get()` / `remove()`，不承担展示职责。`ToolResult` 只保存 ``content``。发给模型时由 ``ContextBuilder`` 按 ``max_tool_result_chars`` 截尾，不写回 Session。
 
-`Runtime.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它读取 Session 的 `messages` 和 `tool_history`，把两者拼成 wire 并按上限截工具正文；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
+`Runtime.messages_for_request()` 委托给 `ContextBuilder.build_messages()`——它读取 Session 的 `messages` 和 `tool_history`，把 PromptStack 叠到第一条 system 的 **wire** 上（cyan.md 不写回 Session），并按上限截工具正文；`LLMClient.chat()` 因此直接接收装配好的 `list[dict]`，不需要认识 `Message` 这个内部类型。
 
 ## 4. 工具系统
 
@@ -270,7 +283,9 @@ MVP 工具集：
 - Token 记账：压缩触发看「即将发出的整包」——组窗后的 wire 用 JSON 字符数 / 4 粗估；上一轮 API 的 `usage.prompt_tokens`（`last_prompt_tokens`）只作补充，那次已经超阈值则这轮出门前先压。默认窗口按 deepseek-chat 常见 64k 计。优先保留 `keep_recent_turns` 轮；不够切或仍超窗时降到 1 轮乃至全部压进摘要。API 报超窗则紧急压缩后重试一次。
 - 压缩成功后往事件表追加 `summary` + `compact`，再投影成视图；**不删除** jsonl 里的原文与 `tool_history` 事实。组窗仍只看 Session.messages + 视图内的 tool_history。REPL `/compact` 走同一入口。详见 [session-store.md](session-store.md)。
 - 不做滑动窗口：对话变瘦只靠 compact overlay。
-- 会话持久化：`~/.cyan/projects/<编码>/<id>.jsonl`；`--continue` / `--resume`；rewind 为 fork。项目级 `AGENTS.md` 仍未做。
+- 会话持久化：`~/.cyan/projects/<编码>/<id>.jsonl`；`--continue` / `--resume`；rewind 为 fork。
+- **Prompt Layer**：identity（`build_system_prompt`）写入 `session_started`；用户级 `~/.cyan/cyan.md` 与项目级 `{workspace}/.cyan/cyan.md`（没有则回退根目录 `cyan.md`）是独立层。`MEMORY.md` 索引作为 `AUTO_MEMORY` 层叠进 wire，类型文件按需 `memory_read`。cyan.md / memory **不进 jsonl**。`/instructions` 看层，`/memory` 看记忆文件。
+- **Auto Memory**：只做项目级，目录 `{workspace}/.cyan/memory/`（gitignore）。任务中 `memory_write` 即时写（非 Plan 免审批）；`COMPLETED` 后再提取一次。`USER_ABORT` / `FATAL_ERROR` / 轮次上限 / 连续失败不沉淀。`CYAN_DISABLE_AUTO_MEMORY=1` 关闭。
 
 ## 7. 开发排期
 
@@ -299,7 +314,8 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 - [x] 上下文 token 预算与历史摘要压缩（compact overlay，事件表保留原文）
 - [x] 会话持久化与 `--continue` / `--resume` / rewind fork
-- [ ] Memory：`AGENTS.md` 注入
+- [x] Prompt Layer：用户级 / 项目级 `cyan.md`（组窗叠层，不进 Session）
+- [x] Auto Memory：项目级 `.cyan/memory/`（即时写入 + COMPLETED 提取）
 
 ### Phase 4：规划与检索
 

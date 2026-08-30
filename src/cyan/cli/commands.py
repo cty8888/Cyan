@@ -129,6 +129,48 @@ def _cmd_usage(app: App, args: list[str]) -> bool:
     return False
 
 
+def _cmd_instructions(app: App, args: list[str]) -> bool:
+    """列出当前 Prompt Layer（身份 + cyan.md + MEMORY.md），不含类型文件全文。"""
+    from ..llm.types import SystemMessage
+
+    stack = app.runtime.prompt_stack
+    identity_text = ""
+    if app.session.messages and isinstance(app.session.messages[0], SystemMessage):
+        identity_text = app.session.messages[0].text or ""
+    stack.set_identity(identity_text)
+    stack.refresh_files()
+    layers = stack.layers()
+    if not layers:
+        app.renderer.console.print("[dim]当前没有指令层[/]")
+        return False
+    for layer in layers:
+        source = str(layer.source) if layer.source is not None else "（内置）"
+        extra = "  [yellow]已截断[/]" if layer.truncated else ""
+        app.renderer.console.print(
+            f"  [bold]{layer.title}[/]  [dim]{source}[/]  {len(layer.text)} 字{extra}"
+        )
+    return False
+
+
+def _cmd_memory(app: App, args: list[str]) -> bool:
+    """列出磁盘上的自动记忆文件，与 /instructions 分开。"""
+    from ..memory.settings import auto_memory_enabled
+    from ..memory.store import list_memory_files, memory_dir
+
+    if not auto_memory_enabled():
+        app.renderer.console.print("[dim]自动记忆已关闭（CYAN_DISABLE_AUTO_MEMORY）[/]")
+        return False
+    directory = memory_dir(app.settings.workspace)
+    items = list_memory_files(app.settings.workspace)
+    app.renderer.console.print(f"  [dim]{directory}[/]")
+    if not items:
+        app.renderer.console.print("[dim]还没有自动记忆文件[/]")
+        return False
+    for name, size in items:
+        app.renderer.console.print(f"  [bold]{name}[/]  {size} 字节")
+    return False
+
+
 def _cmd_compact(app: App, args: list[str]) -> bool:
     from ..session.compact import resolve_keep_from
 
@@ -261,6 +303,8 @@ def build_default_commands() -> CommandRegistry:
         SlashCommand("/mode", "/mode <模式>", "切换权限模式：plan / default / accept_edits / bypass", _cmd_mode)
     )
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
+    registry.register(SlashCommand("/instructions", "/instructions", "列出已加载的指令层（cyan.md）", _cmd_instructions))
+    registry.register(SlashCommand("/memory", "/memory", "列出项目自动记忆文件", _cmd_memory))
     registry.register(SlashCommand("/compact", "/compact", "把较早的对话压缩成摘要", _cmd_compact))
     registry.register(SlashCommand("/history", "/history", "列出用户消息（完整日志）", _cmd_history))
     registry.register(

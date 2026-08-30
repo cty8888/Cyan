@@ -27,9 +27,12 @@ from ..core.runtime import Runtime
 from ..errors import ConfigError
 from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
+from ..memory.settings import auto_memory_enabled
+from ..prompt.stack import PromptStack
 from ..security.permissions import PermissionManager
 from ..security.types import PermissionMode
 from ..session import Session
+from ..session.paths import cyan_home
 from ..session.store import DiskStore
 from ..session.view import apply_system_prompt
 from ..settings import AgentSettings
@@ -63,6 +66,7 @@ class App:
         self._permission_mode_override = permission_mode_override
         self.session, warning = self._open_session(resume=resume, continue_last=continue_last)
         self.llm = DeepSeekClient(settings.llm, on_retry=self._on_llm_retry)
+        home = self.session.store.home if self.session.store is not None else cyan_home()
         self.runtime = Runtime.create(
             settings=settings,
             llm=self.llm,
@@ -70,6 +74,11 @@ class App:
             permissions=self.permissions,
             session=self.session,
             compact_policy=replace(settings.compact),
+            prompt_stack=PromptStack(
+                workspace=settings.workspace,
+                home=home,
+                auto_memory=auto_memory_enabled(),
+            ),
         )
         self._startup_warning = warning
 
@@ -138,6 +147,7 @@ class App:
             self.settings,
             [tool.name for tool in self.registry],
             self.session.permissions.permission_mode,
+            instruction_labels=self._instruction_labels(),
         )
         if self._startup_warning:
             self.renderer.notice(self._startup_warning, level="warning")
@@ -242,6 +252,11 @@ class App:
             self.renderer.console.print(f"[yellow]未知命令 {name}，输入 /help 查看可用命令[/]")
             return False
         return command.handler(self, parts[1:])
+
+    def _instruction_labels(self) -> list[str]:
+        """当前已加载的文件指令层标题，供 banner 使用。"""
+        self.runtime.prompt_stack.refresh_files()
+        return [layer.title for layer in self.runtime.prompt_stack.extra]
 
     def _on_llm_retry(self, attempt: int, delay: float, message: str) -> None:
         self.renderer.notice(f"模型调用失败（{message}），{delay:.1f}s 后第 {attempt} 次重试", level="warning")

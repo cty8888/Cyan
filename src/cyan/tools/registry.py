@@ -90,8 +90,13 @@ def build_default_registry() -> ToolRegistry:
     from .builtin.glob import GlobTool
     from .builtin.grep import GrepTool
     from .builtin.list_dir import ListDirTool
+    from .builtin.memory_list import MemoryListTool
+    from .builtin.memory_read import MemoryReadTool
+    from .builtin.memory_write import MemoryWriteTool
     from .builtin.read_file import ReadFileTool
     from .builtin.write_file import WriteFileTool
+
+    from ..memory.settings import auto_memory_enabled
 
     registry = ToolRegistry()
     registry.register(ListDirTool())
@@ -101,4 +106,8 @@ def build_default_registry() -> ToolRegistry:
     registry.register(BashTool())
     registry.register(GlobTool())
     registry.register(GrepTool())
+    registry.register(MemoryListTool())
+    registry.register(MemoryReadTool())
+    if auto_memory_enabled():
+        registry.register(MemoryWriteTool())
     return registry

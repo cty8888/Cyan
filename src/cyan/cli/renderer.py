@@ -68,6 +68,7 @@ class Renderer:
         settings: AgentSettings,
         tool_names: list[str],
         permission_mode: PermissionMode,
+        instruction_labels: list[str] | None = None,
     ) -> None:
         lines = [
             Text.from_markup(f"[bold cyan]Cyan[/]  模型 [green]{settings.llm.model}[/]"),
@@ -78,6 +79,10 @@ class Renderer:
             Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
             Text.from_markup(f"日志文件  [dim]{settings.log_dir / 'agent.log'}[/]"),
         ]
+        if instruction_labels:
+            lines.append(
+                Text.from_markup(f"指令层  [dim]{' · '.join(instruction_labels)}[/]")
+            )
         lines.append(Text.from_markup("[dim]输入任务开始，/help 查看命令，Ctrl-C 中断当前任务[/]"))
         self.console.print(Panel(Text("\n").join(lines), border_style="cyan", padding=(0, 1)))
         logger.info("启动 模型=%s workspace=%s tools=%s", settings.llm.model, settings.workspace, ", ".join(tool_names))

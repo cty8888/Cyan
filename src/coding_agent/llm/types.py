@@ -166,6 +166,23 @@ class SummaryMessage(Message):
 
 
 @dataclass
+class ContinueMessage(Message):
+    """模型输出被截断时插入的续写指令。wire 仍用 user 角色。
+
+    不是用户任务：压缩时不能当成当前问题原文保留。
+    """
+
+    role: ClassVar[Role] = Role.USER
+
+    @classmethod
+    def of(cls, text: str) -> ContinueMessage:
+        return cls(blocks=[TextBlock(text=text)])
+
+    def to_api(self) -> dict[str, Any]:
+        return {"role": self.role.value, "content": self.text or ""}
+
+
+@dataclass
 class AssistantMessage(Message):
     """模型回复：TextBlock + 若干 ToolCallBlock。"""
 

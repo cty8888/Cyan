@@ -59,3 +59,15 @@ def test_depth_one_hides_nested_files(env, tmp_path):
 def test_missing_directory(env):
     result = env.registry.execute("list_dir", {"path": "nope"}, env.ctx)
     assert not result.ok
+
+
+def test_symlink_outside_workspace_is_not_walked(env, tmp_path):
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir()
+    (outside / "id_rsa").write_text("PRIVATE\n", encoding="utf-8")
+    (tmp_path / "leak").symlink_to(outside)
+    result = env.registry.execute("list_dir", {"path": ".", "depth": 3}, env.ctx)
+    assert result.ok
+    assert "leak@" in result.content
+    assert "工作区外" in result.content
+    assert "id_rsa" not in result.content

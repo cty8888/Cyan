@@ -68,7 +68,14 @@ class ListDirTool(Tool):
 
         depth = max(1, min(int(depth), 6))
         lines: list[str] = [f"{display(ctx.workspace, target)}/"]
-        truncated = _walk(target, depth, ctx.tool_limits.max_dir_entries, lines, prefix="  ")
+        truncated = _walk(
+            target,
+            ctx.workspace,
+            depth,
+            ctx.tool_limits.max_dir_entries,
+            lines,
+            prefix="  ",
+        )
 
         if len(lines) == 1:
             lines.append("  (空目录)")
@@ -78,24 +85,57 @@ class ListDirTool(Tool):
         return ToolRunResult.success("\n".join(lines), entry_count=len(lines) - 1)
 
 
-def _walk(directory: Path, depth: int, budget: int, lines: list[str], prefix: str) -> bool:
-    """深度优先写入树形结构；条目超限时返回 True。"""
+def _walk(
+    directory: Path,
+    workspace: Path,
+    depth: int,
+    budget: int,
+    lines: list[str],
+    prefix: str,
+    seen: set[Path] | None = None,
+) -> bool:
+    """深度优先写入树形结构；条目超限时返回 True。不跟随指向工作区外的符号链接。"""
     if depth <= 0:
         return False
+    seen = seen if seen is not None else set()
     try:
-        entries = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        real = directory.resolve()
+    except OSError:
+        return False
+    if real in seen:
+        return False
+    seen.add(real)
+    try:
+        entries = sorted(directory.iterdir(), key=lambda p: (not p.is_symlink() and p.is_file(), p.name.lower()))
     except PermissionError:
         lines.append(f"{prefix}(无权限访问)")
         return False
 
+    root = workspace.resolve()
     for entry in entries:
         if len(lines) - 1 >= budget:
             return True
+        if entry.is_symlink():
+            try:
+                resolved = entry.resolve()
+            except OSError:
+                lines.append(f"{prefix}{entry.name}@ (无法解析)")
+                continue
+            if resolved != root and root not in resolved.parents:
+                lines.append(f"{prefix}{entry.name}@ -> (工作区外，已跳过)")
+                continue
+            if resolved.is_dir():
+                lines.append(f"{prefix}{entry.name}@/")
+                if _walk(resolved, workspace, depth - 1, budget, lines, prefix + "  ", seen):
+                    return True
+                continue
+            lines.append(f"{prefix}{entry.name}@  ({_human_size(resolved)})")
+            continue
         if entry.is_dir():
             if entry.name in LIST_DIR_SKIP_DIRS:
                 continue
             lines.append(f"{prefix}{entry.name}/")
-            if _walk(entry, depth - 1, budget, lines, prefix + "  "):
+            if _walk(entry, workspace, depth - 1, budget, lines, prefix + "  ", seen):
                 return True
         else:
             lines.append(f"{prefix}{entry.name}  ({_human_size(entry)})")

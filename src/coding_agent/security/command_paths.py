@@ -21,9 +21,39 @@ _REDIRECT = re.compile(r"(?<!&)(?:\d*)(>>?|<<?)(?!&)\s*([^\s|&;<>]+)")
 _UNRESOLVED = re.compile(r"^\$|/\$\{|\$\{")
 
 _WRITE_ALL = frozenset(
-    {"rm", "rmdir", "mkdir", "touch", "unlink", "chmod", "chown", "chgrp", "tee", "truncate"}
+    {
+        "rm",
+        "rmdir",
+        "mkdir",
+        "touch",
+        "unlink",
+        "chmod",
+        "chown",
+        "chgrp",
+        "tee",
+        "truncate",
+        "gzip",
+        "gunzip",
+        "bzip2",
+        "bunzip2",
+        "xz",
+        "unxz",
+    }
 )
+_INTERPRETER_NAMES = frozenset({"python", "python3", "node", "nodejs", "ruby", "perl", "php"})
+_INPLACE_INTERPRETERS = frozenset({"perl", "ruby", "php"})
 _WRITE_LAST = frozenset({"cp", "mv", "ln", "install"})
+# 写目标在 flag 的值里，不在位置参数末尾。-o 对 grep 是 --only-matching，必须按命令头分。
+_WRITE_FLAG_NEXT = {
+    "curl": frozenset({"-o", "--output"}),
+    "wget": frozenset({"-O", "--output-document"}),
+    "install": frozenset({"-t", "--target-directory"}),
+}
+_WRITE_FLAG_EQ = {
+    "curl": ("--output=",),
+    "wget": ("--output-document=",),
+    "install": ("--target-directory=",),
+}
 _READ_ARGS = frozenset(
     {
         "cat",
@@ -133,6 +163,25 @@ def reject_unsafe_paths(workspace: Path, command: str, cwd: Path | None = None) 
         raise SecurityError(restricted)
 
 
+def written_paths(workspace: Path, command: str, cwd: Path | None = None) -> list[Path]:
+    """命令里能看清的写目标，解析为工作区内的绝对路径。"""
+    tracked = cwd or workspace
+    found: list[Path] = []
+    for segment in split_command_segments(command):
+        for raw, kind in _segment_touches(segment):
+            if _unresolved(raw):
+                continue
+            try:
+                resolved = resolve_path(workspace, raw, base=tracked)
+            except Exception:
+                continue
+            if kind == "write":
+                found.append(resolved)
+            if _segment_is_cd(segment):
+                tracked = resolved
+    return found
+
+
 def _outside_with_cwd_tracking(workspace: Path, command: str, start: Path) -> str | None:
     cwd = start
     for segment in split_command_segments(command):
@@ -195,15 +244,87 @@ def _segment_touches(segment: str) -> list[tuple[str, str]]:
         touches.append((target, "read"))
         return touches
 
+    touches.extend((path, "write") for path in _write_flag_paths(tokens))
+    touches.extend((path, "write") for path in _dd_write_paths(tokens))
+
     paths = _path_args(tokens)
     if head in _WRITE_ALL:
         touches.extend((path, "write") for path in paths)
     elif head in _WRITE_LAST and paths:
         touches.extend((path, "read") for path in paths[:-1])
         touches.append((paths[-1], "write"))
+    elif head == "sed" and _sed_is_inplace(tokens):
+        touches.extend((path, "write") for path in paths)
+    elif _executable_name(head) in _INPLACE_INTERPRETERS and _inplace_rewrite(tokens):
+        touches.extend((path, "write") for path in paths)
     elif head in _READ_ARGS:
         touches.extend((path, "read") for path in paths)
     return touches
+
+
+def _dd_write_paths(tokens: list[str]) -> list[str]:
+    """抽出 ``dd of=FILE`` 的写目标。"""
+    if not tokens or _executable_name(tokens[0]) != "dd":
+        return []
+    paths: list[str] = []
+    for token in tokens[1:]:
+        if token.startswith("of="):
+            value = token[3:]
+            if value:
+                paths.append(value)
+    return paths
+
+
+def _inplace_rewrite(tokens: list[str]) -> bool:
+    """``perl -i`` / ``ruby -i`` / ``php -i`` 会原地改文件。"""
+    for token in tokens[1:]:
+        if token == "--":
+            break
+        if token in {"-i", "--inplace"} or token.startswith("-i") or token.startswith("--inplace="):
+            return True
+    return False
+
+
+def _executable_name(token: str) -> str:
+    return Path(token).name
+
+
+def _write_flag_paths(tokens: list[str]) -> list[str]:
+    """抽出 ``curl -o FILE`` / ``wget -O FILE`` / ``install -t DIR`` 的写目标。"""
+    if not tokens:
+        return []
+    next_flags = _WRITE_FLAG_NEXT.get(tokens[0])
+    eq_prefixes = _WRITE_FLAG_EQ.get(tokens[0], ())
+    if not next_flags and not eq_prefixes:
+        return []
+    paths: list[str] = []
+    skip_next = False
+    for index, token in enumerate(tokens[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if next_flags and token in next_flags:
+            if index + 1 < len(tokens):
+                paths.append(tokens[index + 1])
+                skip_next = True
+            continue
+        for prefix in eq_prefixes:
+            if token.startswith(prefix):
+                value = token[len(prefix) :]
+                if value:
+                    paths.append(value)
+                break
+    return paths
+
+
+def _sed_is_inplace(tokens: list[str]) -> bool:
+    """``sed -i`` / ``--in-place`` / ``-i.bak`` 会改文件；普通 sed 只往 stdout 打。"""
+    for token in tokens[1:]:
+        if token == "--":
+            break
+        if token in {"-i", "--in-place"} or token.startswith("-i") or token.startswith("--in-place="):
+            return True
+    return False
 
 
 def _path_args(tokens: list[str]) -> list[str]:
@@ -256,13 +377,27 @@ def _is_bare_env(tokens: list[str]) -> bool:
     return True
 
 
-_RECURSIVE_SEARCH_HEADS = frozenset({"rg", "ag"})
+_RECURSIVE_SEARCH_HEADS = frozenset({"rg", "ag", "find"})
 _GREP_HEADS = frozenset({"grep", "egrep", "fgrep"})
 _RECURSIVE_GREP_FLAGS = frozenset({"-r", "-R", "--recursive"})
 
 
+def _is_pytest_module(tokens: list[str]) -> bool:
+    return _executable_name(tokens[0]) in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]
+
+
 def _is_opaque(command: str) -> bool:
-    return any(pattern.search(command) for pattern in _OPAQUE_PATTERNS)
+    if any(pattern.search(command) for pattern in _OPAQUE_PATTERNS):
+        return True
+    for segment in split_command_segments(command):
+        tokens = _tokenize(segment)
+        if (
+            tokens
+            and _executable_name(tokens[0]) in _INTERPRETER_NAMES
+            and not _is_pytest_module(tokens)
+        ):
+            return True
+    return False
 
 
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -275,9 +410,9 @@ def _is_unbounded_read(command: str) -> bool:
         if not tokens:
             continue
         head, *rest = tokens
-        if head in _RECURSIVE_SEARCH_HEADS:
+        if _executable_name(head) in _RECURSIVE_SEARCH_HEADS:
             return True
-        if head in _GREP_HEADS and _has_recursive_grep_flag(rest):
+        if _executable_name(head) in _GREP_HEADS and _has_recursive_grep_flag(rest):
             return True
         unquoted = _QUOTED.sub(" ", segment)
         unquoted_tokens = _tokenize(unquoted)

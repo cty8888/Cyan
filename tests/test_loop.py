@@ -7,7 +7,14 @@ import sys
 
 from coding_agent.core.prompts import TRUNCATION_CONTINUE_MSG
 from coding_agent.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
-from coding_agent.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, ToolMessage, Usage, UserMessage
+from coding_agent.llm.types import (
+    AssistantMessage,
+    ContinueMessage,
+    LLMResponse,
+    ToolCallBlock,
+    ToolMessage,
+    Usage,
+)
 from coding_agent.security.types import ApprovalDecision, PermissionMode
 from coding_agent.session import Session
 from coding_agent.settings import CliSettings, LoopLimits
@@ -51,15 +58,19 @@ def test_stops_on_consecutive_failures(env):
     assert reason is StopReason.TOOL_FAILURES
 
 
-def test_consecutive_denials_count_as_failures(make_env):
+def test_consecutive_denials_do_not_count_as_failures(make_env):
     env = make_env(loop=LoopLimits(max_consecutive_tool_failures=3, max_iterations=20))
-    llm = FakeLLM([
-        tool_call("write_file", '{"path": "deny%d.py", "content": "x"}' % i, f"d{i}")
-        for i in range(10)
-    ])
+    llm = FakeLLM(
+        [
+            tool_call("write_file", '{"path": "deny%d.py", "content": "x"}' % i, f"d{i}")
+            for i in range(4)
+        ]
+        + [AssistantMessage.of("改方案，不再写这些文件。")]
+    )
     runtime = make_runtime(env, llm)
     _, reason = drive(runtime, "连拒", decision=ApprovalDecision.DENY)
-    assert reason is StopReason.TOOL_FAILURES
+    assert reason is StopReason.COMPLETED
+    assert runtime.session.consecutive_tool_failures == 0
 
 
 def test_invalid_arguments_feed_tool_message(env):
@@ -250,7 +261,7 @@ def test_truncated_reply_continues_instead_of_completing(env):
     notices = [e.message for e in events if isinstance(e, Notice)]
     assert any("被截断" in m for m in notices)
     assert any(
-        isinstance(m, UserMessage) and m.text == TRUNCATION_CONTINUE_MSG
+        isinstance(m, ContinueMessage) and m.text == TRUNCATION_CONTINUE_MSG
         for m in runtime.session.messages
     )
     assert llm.script == []
@@ -299,3 +310,34 @@ def test_plan_mode_exposes_read_and_bash(make_env, tmp_path):
     runtime = make_runtime(env, FakeLLM([AssistantMessage.of("ok")]), session)
     names = {s["function"]["name"] for s in runtime.schemas_for_mode()}
     assert names == {"list_dir", "read_file", "bash"}
+
+
+def test_repeated_denials_of_same_write_do_not_trip_repeats(make_env):
+    env = make_env(loop=LoopLimits(max_repeated_calls=3, max_iterations=10))
+    llm = FakeLLM(
+        [tool_call("write_file", '{"path": "same.py", "content": "x"}', f"d{i}") for i in range(4)]
+        + [AssistantMessage.of("不再重试。")]
+    )
+    runtime = make_runtime(env, llm)
+    _, reason = drive(runtime, "连拒同一文件", decision=ApprovalDecision.DENY)
+    assert reason is StopReason.COMPLETED
+
+
+def test_same_batch_bash_starts_from_shared_cwd(env, tmp_path):
+    """同批两条 bash 都从本批开始时的 cwd 起步，第一条 cd 不影响第二条。"""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "here.txt").write_text("root\n", encoding="utf-8")
+    calls = [
+        ToolCallBlock(id="b1", name="bash", arguments='{"command": "cd pkg && pwd"}'),
+        ToolCallBlock(id="b2", name="bash", arguments='{"command": "cat here.txt"}'),
+    ]
+    runtime = make_runtime(
+        env,
+        FakeLLM([AssistantMessage.of(tool_calls=calls), AssistantMessage.of("好了")]),
+    )
+    _, reason = drive(runtime, "并行两条")
+    assert reason is StopReason.COMPLETED
+    second = runtime.session.tool_history.get("b2")
+    assert second is not None and second.result is not None
+    assert "root" in (second.result.content or "")
+    assert "No such file" not in (second.result.content or "")

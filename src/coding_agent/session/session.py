@@ -108,8 +108,13 @@ class Session:
         content: str,
         error: str | None = None,
         duration: float | None = None,
+        counts_as_failure: bool = True,
     ) -> None:
-        """把工具调用标为完成，并更新连续失败计数。"""
+        """把工具调用标为完成，并按需更新连续失败计数。
+
+        ``counts_as_failure=False``：权限拒绝、任务中断补齐等——回喂模型即可，
+        不应当成「工具没跑成」去掐任务。
+        """
         execution = self.tool_history.get(call_id)
         if execution is None:
             raise RuntimeError(f"不存在对应的工具调用记录: {call_id}")
@@ -127,7 +132,7 @@ class Session:
         self.usage.tool_calls += 1
         if ok:
             self.state.consecutive_tool_failures = 0
-        else:
+        elif counts_as_failure:
             self.state.consecutive_tool_failures += 1
         self.metadata.touch()
 
@@ -171,6 +176,16 @@ class Session:
     def mark_read(self, path: Path) -> None:
         """标记文件已读，供 write_file / edit_file 做修改前检查。"""
         self.workspace.opened_files.add(path.resolve())
+        self.metadata.touch()
+
+    def unmark_read(self, path: Path) -> None:
+        """文件被其它途径改过（或读结果已被压缩丢掉）后，撤销已读标记。"""
+        self.workspace.opened_files.discard(path.resolve())
+        self.metadata.touch()
+
+    def clear_reads(self) -> None:
+        """看不清写了哪些文件时，保守清空全部已读标记。"""
+        self.workspace.opened_files.clear()
         self.metadata.touch()
 
     def has_read(self, path: Path) -> bool:

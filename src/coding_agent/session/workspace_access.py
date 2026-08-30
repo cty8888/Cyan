@@ -34,5 +34,11 @@ class WorkspaceAccess:
     def mark_read(self, path: Path) -> None:
         self._session.mark_read(path)
 
+    def unmark_read(self, path: Path) -> None:
+        self._session.unmark_read(path)
+
+    def clear_reads(self) -> None:
+        self._session.clear_reads()
+
     def mark_modified(self, path: Path) -> None:
         self._session.mark_modified(path)

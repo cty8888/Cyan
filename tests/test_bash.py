@@ -60,6 +60,12 @@ def test_leaving_workspace_is_rejected(env):
     assert "之外" in (result.error or result.content or "")
 
 
+def test_newline_cd_outside_then_write_is_rejected(env, tmp_path):
+    result = env.registry.execute("bash", {"command": "cd /tmp\necho x > escaped.txt"}, env.ctx)
+    assert not result.ok
+    assert not (tmp_path / "escaped.txt").exists()
+
+
 def test_opaque_cd_outside_still_resets_cwd(env, tmp_path):
     """``$HOME`` 解析不到真实路径，执行层拦不住；结束后仍把 cwd 拉回。"""
     result = env.registry.execute("bash", {"command": 'cd "$HOME" && pwd'}, env.ctx)
@@ -82,12 +88,40 @@ def test_write_git_dir_is_rejected(env, tmp_path):
     assert not (tmp_path / ".git" / "config").exists()
 
 
-def test_output_truncation(make_env, tmp_path):
-    env = make_env(tools=ToolLimits(max_tool_output_chars=50))
-    command = f'{sys.executable} -c "print(\'x\' * 500)"'
+def test_sed_inplace_git_is_rejected(env, tmp_path):
+    git = tmp_path / ".git"
+    git.mkdir(exist_ok=True)
+    (git / "config").write_text("old\n", encoding="utf-8")
+    result = env.registry.execute("bash", {"command": "sed -i 's/old/new/' .git/config"}, env.ctx)
+    assert not result.ok
+    assert (git / "config").read_text(encoding="utf-8") == "old\n"
+
+
+def test_output_truncation_keeps_head_and_tail(make_env, tmp_path):
+    env = make_env(tools=ToolLimits(max_tool_output_chars=80))
+    command = f'{sys.executable} -c "print(\'HEAD\'); print(\'x\' * 400); print(\'TAIL\')"'
     result = env.registry.execute("bash", {"command": command}, env.ctx)
     assert result.ok
-    assert result.content.rstrip().endswith("...[truncated]")
+    assert "HEAD" in result.content
+    assert "TAIL" in result.content
+    assert "...[truncated]" in result.content
+
+
+def test_bash_write_unmarks_read_file(env, tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("old\n", encoding="utf-8")
+    env.ctx.workspace_access.mark_read(target)
+    result = env.registry.execute("bash", {"command": "echo new > a.py"}, env.ctx)
+    assert result.ok
+    assert not env.ctx.workspace_access.has_read(target)
+
+
+def test_opaque_bash_clears_all_reads(env, tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("old\n", encoding="utf-8")
+    env.ctx.workspace_access.mark_read(target)
+    env.registry.execute("bash", {"command": "python rewrite.py"}, env.ctx)
+    assert not env.ctx.workspace_access.has_read(target)
 
 
 def test_env_does_not_persist(env):

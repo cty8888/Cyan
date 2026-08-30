@@ -16,11 +16,12 @@ from coding_agent.session.compact import (
     resolve_keep_from,
     try_compact,
 )
-from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT
+from coding_agent.core.prompts import COMPACT_SYSTEM_PROMPT, TRUNCATION_CONTINUE_MSG
 from coding_agent.core.types import Notice, StopReason
 from coding_agent.errors import LLMContextOverflowError, LLMError
 from coding_agent.llm.types import (
     AssistantMessage,
+    ContinueMessage,
     LLMResponse,
     SummaryMessage,
     SystemMessage,
@@ -153,6 +154,58 @@ def test_emergency_cut_without_assistant_when_user_is_huge(tmp_path):
     assert users[0].text is not None
     assert users[0].text.endswith("...[truncated]")
     assert len(users[0].text) < len(huge)
+
+
+def test_emergency_compact_preserves_task_not_continue_prompt(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("给 utils.py 加类型标注"))
+    session.add(AssistantMessage.of("只写了一半"))
+    session.add(ContinueMessage.of(TRUNCATION_CONTINUE_MSG))
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("半截回复的摘要"), usage=Usage(8, 4, 12))
+
+    assert try_compact(session, call_llm, CompactPolicy(), max_keep=0) is True
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert [m.text for m in users] == ["给 utils.py 加类型标注"]
+    assert not any(isinstance(m, ContinueMessage) for m in session.messages)
+
+
+def test_compact_truncates_oversized_summary(tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "round-0")
+    _add_assistant_round(session, "c1", "round-1")
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(
+            message=AssistantMessage.of("S" * (DEFAULT_TOOL_RESULT_CHARS + 200)),
+            usage=Usage(20, 5, 25),
+        )
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert isinstance(session.messages[1], SummaryMessage)
+    text = session.messages[1].text or ""
+    assert text.endswith("...[truncated]")
+    assert len(text) < DEFAULT_TOOL_RESULT_CHARS + 50
+
+
+def test_compact_unmarks_dropped_read_file(tmp_path):
+    target = (tmp_path / "a.py").resolve()
+    target.write_text("x = 1\n", encoding="utf-8")
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    session.mark_read(target)
+    _add_assistant_round(session, "c0", "old-read")
+    _add_assistant_round(session, "c1", "kept-read")
+    assert session.has_read(target)
+
+    def call_llm(messages, tools=None):
+        return LLMResponse(message=AssistantMessage.of("摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy()) is True
+    assert session.tool_history.get("c0") is None
+    assert not session.has_read(target)
 
 
 def test_loop_retries_after_overflow_on_huge_first_user(env, tmp_path):

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ...errors import BlockedCommandError, SecurityError
-from ...security.command_paths import reject_unsafe_paths
+from ...security.command_paths import analyze_command, reject_unsafe_paths, written_paths
 from ...security.paths import display
 from ...security.rules import blocked_command, restricted_command
 from ..base import Tool
@@ -71,11 +71,12 @@ class BashTool(Tool):
         wrapped = command + _state_trailer()
 
         result = run_process(["bash", "-c", wrapped], cwd, timeout_seconds, merge_stderr=True)
+        self._invalidate_reads(ctx, command, cwd)
 
         visible, cwd_text = _extract_cwd(result.stdout)
         cwd_note = self._update_cwd(ctx, cwd_text)
 
-        output = _truncate_tail(visible.strip(), ctx.tool_limits.max_tool_output_chars) or "(无输出)"
+        output = _truncate_head_tail(visible.strip(), ctx.tool_limits.max_tool_output_chars) or "(无输出)"
         display_cwd = display(ctx.workspace, ctx.workspace_access.bash_cwd or ctx.workspace)
 
         lines = [f"退出码：{result.exit_code}", f"目录：{display_cwd}"]
@@ -109,12 +110,27 @@ class BashTool(Tool):
             f"{display(ctx.workspace, ctx.workspace)}"
         )
 
+    def _invalidate_reads(self, ctx: ToolContext, command: str, cwd: Path) -> None:
+        """bash 写过的文件不再算「已读」；看不清目标时清空全部已读标记。"""
+        analysis = analyze_command(command)
+        if analysis.opaque:
+            ctx.workspace_access.clear_reads()
+            return
+        for path in written_paths(ctx.workspace, command, cwd):
+            ctx.workspace_access.unmark_read(path)
 
-def _truncate_tail(text: str, limit: int) -> str:
-    """保留开头 limit 个字符，超出部分截断。"""
+
+def _truncate_head_tail(text: str, limit: int) -> str:
+    """超限时保留头尾，中间打标记。pytest / 编译器把关键错误打在尾部。"""
     if len(text) <= limit:
         return text
-    return text[:limit] + "...[truncated]"
+    marker = "\n...[truncated]...\n"
+    keep = limit - len(marker)
+    if keep < 2:
+        return text[:limit] + "...[truncated]"
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[-tail:]
 
 
 def _state_trailer() -> str:

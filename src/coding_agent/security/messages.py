@@ -17,7 +17,7 @@ USER_DENIED_MSG = (
 NO_PERMISSION_RULE_MSG = "没有匹配到适用的权限规则。"
 
 OPAQUE_EXEC_MSG = (
-    "这条命令无法确认会碰哪些文件（例如 python -c、命令替换），每次都需要确认。"
+    "这条命令无法确认会碰哪些文件（例如 python 脚本、python -c、命令替换），每次都需要确认。"
 )
 
 ENV_DUMP_MSG = "会打印进程环境变量，可能包含 API Key，每次都需要确认。"

@@ -182,7 +182,8 @@ def _apply_compact(session: Session, keep_from: int, summary: str, *, has_system
     dropped = session.messages[dropped_start:keep_from]
     preserved_user = _user_to_preserve(session.messages, dropped_start, keep_from)
     call_ids = _tool_call_ids(dropped)
-    kept: list[Message] = [*head, SummaryMessage.of(summary)]
+    _forget_dropped_reads(session, call_ids)
+    kept: list[Message] = [*head, SummaryMessage.of(_truncate_tool_text(summary, DEFAULT_TOOL_RESULT_CHARS))]
     if preserved_user is not None:
         kept.append(_truncate_preserved_user(preserved_user))
     kept.extend(session.messages[keep_from:])
@@ -216,6 +217,24 @@ def _truncate_preserved_user(message: UserMessage, limit: int = DEFAULT_TOOL_RES
     if len(text) <= limit:
         return message
     return UserMessage.of(_truncate_tool_text(text, limit))
+
+
+def _forget_dropped_reads(session: Session, call_ids: list[str]) -> None:
+    """被压掉的完整 read_file 结果不再在上下文里，已读标记作废。"""
+    from ..security.paths import resolve_path
+
+    for call_id in call_ids:
+        execution = session.tool_history.get(call_id)
+        if execution is None or execution.tool_name != "read_file":
+            continue
+        try:
+            args = json.loads(execution.arguments or "{}")
+            raw = args.get("path")
+            if not raw:
+                continue
+            session.unmark_read(resolve_path(session.workspace.root, str(raw)))
+        except Exception:
+            continue
 
 
 def _tool_call_ids(messages: list[Message]) -> list[str]:

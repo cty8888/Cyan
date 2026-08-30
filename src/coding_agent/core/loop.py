@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator
 
 from ..errors import AgentError, InvalidToolArgumentsError, LLMContextOverflowError, LLMError
 from ..llm.parser import parse_tool_arguments
-from ..llm.types import AssistantMessage, ToolCallBlock, ToolMessage, UserMessage
+from ..llm.types import AssistantMessage, ContinueMessage, ToolCallBlock, ToolMessage, UserMessage
 from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
 from ..session import WorkspaceAccess
@@ -122,7 +123,7 @@ class AgentLoop:
                         )
                         yield self._finish(StopReason.MAX_ITERATIONS, final_text)
                         return
-                    self.session.add(UserMessage.of(TRUNCATION_CONTINUE_MSG))
+                    self.session.add(ContinueMessage.of(TRUNCATION_CONTINUE_MSG))
                     yield Notice("模型输出被截断，已要求继续。", level="warning")
                     continue
 
@@ -145,9 +146,12 @@ class AgentLoop:
         # 已写回 tool 结果的 call id。本批每条 tool_call 都必须有对应回复，
         # 否则同一会话里下一次请求会带着残缺配对去打 API。
         responded: set[str] = set()
+        # 同批 tool_call 按并行语义：每条 bash 都从本批开始时的 cwd 起步，
+        # 避免第一条 cd 改掉后面几条的工作目录。
+        batch_cwd = self.session.bash_cwd
         try:
             for call in tool_calls:
-                stop_reason = yield from self._run_single_call(call, responded)
+                stop_reason = yield from self._run_single_call(call, responded, batch_cwd=batch_cwd)
                 if stop_reason is not None:
                     self._respond_unanswered(
                         tool_calls,
@@ -165,7 +169,11 @@ class AgentLoop:
             raise
 
     def _run_single_call(
-        self, call: ToolCallBlock, responded: set[str]
+        self,
+        call: ToolCallBlock,
+        responded: set[str],
+        *,
+        batch_cwd: Path | None = None,
     ) -> Generator[AgentEvent, Any, StopReason | None]:
         """处理一条工具调用：解析参数、鉴权、执行，并把结果写回会话。
 
@@ -197,6 +205,10 @@ class AgentLoop:
             yield Notice(f"{call.name} 参数校验失败：{exc}", level="warning")
             return self._check_failure_threshold()
 
+        allowed = yield from self._resolve_permission(tool, args, call, responded)
+        if not allowed:
+            return None
+
         repeats = self.session.record_call_fingerprint(call.name, args)
         if repeats >= self.settings.loop.max_repeated_calls:
             self._respond(
@@ -212,9 +224,8 @@ class AgentLoop:
         if repeats == self.settings.loop.max_repeated_calls - 1:
             yield Notice(f"{call.name} 已被重复调用 {repeats} 次，请换一种方式。", level="warning")
 
-        allowed = yield from self._resolve_permission(tool, args, call, responded)
-        if not allowed:
-            return self._check_failure_threshold()
+        if call.name == "bash" and batch_cwd is not None:
+            self.session.bash_cwd = batch_cwd
 
         yield ToolStarted(call_id=call.id, name=call.name, args=args)
         self.session.start_tool_execution(
@@ -256,7 +267,14 @@ class AgentLoop:
             return True
 
         if outcome.kind == "deny":
-            self._respond(call, responded, ToolRunResult.failure(outcome.deny_message or "操作被拒绝。"))
+            self._respond(
+                call,
+                responded,
+                ToolRunResult.failure(
+                    outcome.deny_message or "操作被拒绝。",
+                    counts_as_failure=False,
+                ),
+            )
             yield Notice(f"已拒绝 {tool.name}", level="warning")
             return False
 
@@ -266,7 +284,7 @@ class AgentLoop:
             self._respond(
                 call,
                 responded,
-                ToolRunResult.failure(USER_DENIED_MSG),
+                ToolRunResult.failure(USER_DENIED_MSG, counts_as_failure=False),
             )
             yield Notice(f"已拒绝 {tool.name}", level="warning")
             return False
@@ -289,6 +307,7 @@ class AgentLoop:
             content=result.to_model_text(),
             error=result.error,
             duration=duration,
+            counts_as_failure=bool(not result.ok and result.counts_as_failure),
         )
         self.session.add(ToolMessage.of(call.id))
         responded.add(call.id)
@@ -302,7 +321,11 @@ class AgentLoop:
         """给本批尚未写回的 tool_call 补一条失败结果，保证会话配对完整。"""
         for call in tool_calls:
             if call.id not in responded:
-                self._respond(call, responded, ToolRunResult.failure(error))
+                self._respond(
+                    call,
+                    responded,
+                    ToolRunResult.failure(error, counts_as_failure=False),
+                )
 
     def _pair_pending_tool_calls(self, error: str) -> None:
         """最近一条带 tool_calls 的 assistant，若还有未回复的 call，补上失败结果。

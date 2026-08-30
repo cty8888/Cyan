@@ -59,6 +59,7 @@ def run_process(
     started = time.monotonic()
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
+        "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT if merge_stderr else subprocess.PIPE,
         "text": True,

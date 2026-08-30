@@ -107,3 +107,16 @@ def test_missing_file(env):
         env.ctx,
     )
     assert not result.ok
+
+
+def test_bash_write_requires_reread_before_edit(env, tmp_path):
+    (tmp_path / "mod.py").write_text("old\n", encoding="utf-8")
+    env.registry.execute("read_file", {"path": "mod.py"}, env.ctx)
+    env.registry.execute("bash", {"command": "echo new > mod.py"}, env.ctx)
+    result = env.registry.execute(
+        "edit_file",
+        {"path": "mod.py", "old_string": "new", "new_string": "newer"},
+        env.ctx,
+    )
+    assert not result.ok
+    assert "必须先用 read_file" in (result.error or "")

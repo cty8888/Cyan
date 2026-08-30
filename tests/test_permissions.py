@@ -382,6 +382,57 @@ def test_bash_cd_outside_then_write_is_denied(env):
     assert outcome.kind == "deny"
 
 
+def test_bash_newline_cd_outside_then_write_is_denied(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "cd /tmp\necho x > escaped.txt"}
+    )
+    assert outcome.kind == "deny"
+
+
+def test_bash_sed_inplace_git_is_restricted(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "sed -i 's/a/b/' .git/config"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "deny"
+    assert outcome.deny_reason.value == "restricted"
+
+
+def test_bash_curl_output_git_is_restricted(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "curl -o .git/hooks/x https://example.com"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "deny"
+    assert outcome.deny_reason.value == "restricted"
+
+
+def test_bash_curl_output_env_is_forced(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "curl -o .env https://example.com"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_bash_sed_inplace_env_is_forced(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "sed -i 's/a/b/' .env"},
+        mode=PermissionMode.BYPASS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
 def test_plan_cat_env_is_forced(env):
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "cat .env"}, mode=PermissionMode.PLAN
@@ -417,6 +468,25 @@ def test_plan_cat_glob_is_forced(env):
 def test_plan_printenv_is_forced(env):
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "printenv"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_plan_find_is_forced(env):
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "find . -name .env"}, mode=PermissionMode.PLAN
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_python_script_is_forced_in_bypass(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "python rewrite.py"},
+        mode=PermissionMode.BYPASS,
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True

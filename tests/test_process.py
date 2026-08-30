@@ -30,6 +30,12 @@ def test_subprocess_env_drops_api_key(monkeypatch):
     assert env["CODING_AGENT_TEST_VISIBLE"] == "keep-me"
 
 
+def test_subprocess_stdin_is_devnull(tmp_path):
+    result = run_process(["bash", "-c", "cat; echo AFTER"], tmp_path, timeout=2, merge_stderr=True)
+    assert result.timed_out is False
+    assert "AFTER" in result.stdout
+
+
 def test_subprocess_does_not_inherit_api_key(tmp_path, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-test")
     result = run_process(

@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 import shlex
 
-_SPLIT_OPERATORS = re.compile(r"(\|\||&&|;|\|)")
-_SEPARATOR_TOKENS = frozenset({"||", "&&", ";", "|"})
+# bash 把换行和 ; 同级当命令分隔符。只切 && || ; | 时，
+# ``cd /tmp\\necho x > a`` 会当成一段，相对路径按工作区解析，实际写到 /tmp。
+_SPLIT_OPERATORS = re.compile(r"(\|\||&&|;|\||\r\n|\n|\r)")
+_SEPARATOR_TOKENS = frozenset({"||", "&&", ";", "|", "\r\n", "\n", "\r"})
 
 # 不带子命令歧义、单看命令名就能判定"只读"的可执行文件。
 # pytest 显式列在其中：README/PLAN_EXEC_MSG 都拿它当"Plan 模式允许的典型例子"，
@@ -35,7 +37,7 @@ _GIT_READONLY_SUBCOMMANDS = frozenset(
 
 
 def split_command_segments(command: str) -> list[str]:
-    """按 ``&&`` / ``||`` / ``;`` / ``|`` 切开，去掉分隔符本身。"""
+    """按 ``&&`` / ``||`` / ``;`` / ``|`` / 换行切开，去掉分隔符本身。"""
     return [
         seg.strip()
         for seg in _SPLIT_OPERATORS.split(command)

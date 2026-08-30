@@ -49,6 +49,8 @@ class ToolRunResult:
     ok: bool
     content: str = ""
     error: str | None = None
+    # 权限拒绝、任务中断补的回复不算「工具没跑成」，不累加连续失败。
+    counts_as_failure: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -56,8 +58,8 @@ class ToolRunResult:
         return cls(ok=True, content=content, metadata=metadata)
 
     @classmethod
-    def failure(cls, error: str, **metadata: Any) -> ToolRunResult:
-        return cls(ok=False, error=error, metadata=metadata)
+    def failure(cls, error: str, *, counts_as_failure: bool = True, **metadata: Any) -> ToolRunResult:
+        return cls(ok=False, error=error, counts_as_failure=counts_as_failure, metadata=metadata)
 
     def to_model_text(self) -> str:
         """回喂模型的文本：成功用 content，失败带「错误：」前缀。"""

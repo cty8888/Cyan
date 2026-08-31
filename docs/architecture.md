@@ -181,7 +181,8 @@ Session
  ├── state           # current_task / consecutive_tool_failures / last_call_fingerprint / consecutive_identical_calls
  ├── workspace       # root / cwd / opened_files / modified_files
  ├── permissions     # permission_mode / always_allowed（write:{目录} / exec:{命令名}）
- └── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
+ ├── usage           # input_tokens / output_tokens / total_tokens / llm_calls / tool_calls
+ └── todos           # list[TodoItem]，todo_write 整体覆盖式维护，随 checkpoint / meta.json 持久化
 
 ContextPolicy（装配，不属于 Session）
  └── max_tool_result_chars
@@ -291,6 +292,7 @@ MVP 工具集：
 - 会话持久化：`~/.cyan/projects/<编码>/<id>.jsonl`；`--continue` / `--resume`；rewind 为 fork。
 - **Prompt Layer**：identity（`build_system_prompt`）写入 `session_started`；用户级 `~/.cyan/cyan.md` 与项目级 `{workspace}/.cyan/cyan.md`（没有则回退根目录 `cyan.md`）是独立层。`MEMORY.md` 索引作为 `AUTO_MEMORY` 层叠进 wire，类型文件按需 `memory_read`。cyan.md / memory **不进 jsonl**。`/instructions` 看层，`/memory` 看记忆文件。
 - **Auto Memory**：只做项目级，目录 `{workspace}/.cyan/memory/`（gitignore）。任务中 `memory_write` 即时写（非 Plan 免审批）；`COMPLETED` 后再提取一次。`USER_ABORT` / `FATAL_ERROR` / 轮次上限 / 连续失败不沉淀。`CYAN_DISABLE_AUTO_MEMORY=1` 关闭。
+- **任务规划（`todo_write`）**：对齐 Claude Code 的 TodoWrite——模型自己判断何时用（3 步以上/多文件），每次调用传入**完整**清单（覆盖式更新，不是增量 patch），同一时刻最多一项 `in_progress`。数据模型是 `Session.todos: list[TodoItem]`（`content` / `status: TodoStatus` / `active_form`），随 `checkpoint` 事件与 sidecar `meta.json` 走，不单独进事件表；`/rewind` 回溯时随 checkpoint 一起恢复到当时的清单状态。工具侧不直接拿 `Session`：`ToolContext.todos` 是 `TodoAccess`（跟 `WorkspaceAccess` 同构的最小包装，只转发 `items`/`set()`），在 `core/loop.py` 的 `tool_ctx` 里注入。权限上跟 `memory_write` 同构——`_family_for_tool` 对它返回 `None`（没有路径参数，走不了按路径匹配的 family 规则），`PermissionManager.evaluate()` 里特判成始终 `allow`（比 `memory_write` 更宽：不受 Plan 模式限制，因为规划本身就是 Plan 模式该干的事），`BARE_DENY_TOOLS["write"]` 仍收着它，用户配置裸 `deny: write` 时会把它从模型可见工具列表里摘掉（`hidden_tool_names()`）。CLI 侧 `tool_finished` 对 `todo_write` 特判，把 `ToolRunResult.metadata["todos"]` 渲成打勾清单（`cli/renderer.py` 的 `render_todo_lines()`），`/todos` 命令复用同一个渲染函数查看当前清单，`/todos clear` 手动清空。
 
 ## 7. 开发排期
 
@@ -325,7 +327,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 ### Phase 4：规划与检索
 
-- [ ] 任务规划工具 `todo_write`
+- [x] 任务规划工具 `todo_write`
 - [x] `grep` / `glob` 搜索工具
 
 ### Phase 5：工程收尾

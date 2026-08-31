@@ -28,7 +28,7 @@ from ..session.events import (
     COMPACT_REASON_SUMMARIZE_FROM,
     COMPACT_REASON_SUMMARIZE_UP,
 )
-from .renderer import MODE_LABELS
+from .renderer import MODE_LABELS, render_todo_lines
 
 if TYPE_CHECKING:
     from .app import App
@@ -359,6 +359,25 @@ def _cmd_status(app: App, args: list[str]) -> bool:
     return False
 
 
+def _cmd_todos(app: App, args: list[str]) -> bool:
+    """展示当前任务清单（模型通过 todo_write 维护）；``clear`` 手动清空。"""
+    console = app.renderer.console
+    if args and args[0] == "clear" and len(args) == 1:
+        app.session.set_todos([])
+        console.print("[dim]任务清单已清空[/]")
+        return False
+    if args:
+        console.print("[yellow]用法：/todos | /todos clear[/]")
+        return False
+    items = app.session.todos
+    if not items:
+        console.print("[dim]当前没有任务清单（模型规划多步任务时会用 todo_write 创建）[/]")
+        return False
+    for line in render_todo_lines([item.to_json() for item in items]):
+        console.print(line)
+    return False
+
+
 def _cmd_compact(app: App, args: list[str]) -> bool:
     """不带参数立即触发一次压缩（原有行为）；``show``/``set <字段> <值>`` 查看或改
     ``runtime.compact_policy``（会话中途的副本，不动 ``AgentSettings.compact``）。
@@ -585,6 +604,7 @@ def build_default_commands() -> CommandRegistry:
     registry.register(SlashCommand("/context", "/context [<字段> <值>]", "查看或修改上下文截断策略", _cmd_context))
     registry.register(SlashCommand("/model", "/model [<名字>]", "查看或切换模型", _cmd_model))
     registry.register(SlashCommand("/status", "/status", "一屏汇总模型/权限/流式/上下文/统计", _cmd_status))
+    registry.register(SlashCommand("/todos", "/todos [clear]", "查看当前任务清单（todo_write 维护）", _cmd_todos))
     registry.register(SlashCommand("/history", "/history", "列出用户消息（完整日志）", _cmd_history))
     registry.register(
         SlashCommand(

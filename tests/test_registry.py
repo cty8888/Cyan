@@ -11,4 +11,16 @@ def test_unknown_tool(env):
 
 def test_default_registry_includes_memory_tools(env):
     names = {tool.name for tool in env.registry}
-    assert names == {"list_dir", "read_file", "write_file", "edit_file", "bash", "glob", "grep", "memory_list", "memory_read", "memory_write"}
+    assert names == {
+        "list_dir",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "bash",
+        "glob",
+        "grep",
+        "memory_list",
+        "memory_read",
+        "memory_write",
+        "todo_write",
+    }

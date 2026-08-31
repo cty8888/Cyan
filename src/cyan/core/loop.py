@@ -12,7 +12,7 @@ from ..llm.parser import parse_tool_arguments
 from ..llm.types import AssistantMessage, ContinueMessage, ToolCallBlock, ToolMessage, UserMessage
 from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
-from ..session import WorkspaceAccess
+from ..session import TodoAccess, WorkspaceAccess
 from ..tools.types import ToolContext, ToolRunResult
 from .prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
 from .types import (
@@ -63,6 +63,7 @@ class AgentLoop:
             workspace=self.settings.workspace,
             tool_limits=self.runtime.tool_limits,
             workspace_access=WorkspaceAccess(self.session),
+            todos=TodoAccess(self.session),
         )
 
     def run(self, task: str) -> AgentStream:

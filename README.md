@@ -30,7 +30,7 @@ uv run cyan
 
 终端界面用 rich 渲染（Markdown、diff、审批面板）。助手回复默认按 SSE 流式打字机效果实时显示，`--no-stream` 可关闭退化成一次性显示。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/loop`、`/context`、`/model`、`/status`、`/history`、`/rewind`、`/sessions`、`/resume`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。`/compact`、`/loop`、`/tools`、`/context` 支持不带参数查看当前值，或 `<字段> <值>` 修改本会话的运行时策略（不影响下次启动的默认值）；`/model` 查看或切换模型；`/status` 一屏汇总模型、权限模式、流式开关、上下文占用与调用统计；`/resume [<id 或前缀>]`（别名 `/continue`）在 REPL 内部直接切到另一个已保存的会话，不带参数列出可选会话，切换后沿用当前会话的权限模式。全部命令的详细用法、参数与可改字段见 [docs/commands.md](docs/commands.md)。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/loop`、`/context`、`/model`、`/status`、`/todos`、`/history`、`/rewind`、`/sessions`、`/resume`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。`/compact`、`/loop`、`/tools`、`/context` 支持不带参数查看当前值，或 `<字段> <值>` 修改本会话的运行时策略（不影响下次启动的默认值）；`/model` 查看或切换模型；`/status` 一屏汇总模型、权限模式、流式开关、上下文占用与调用统计；`/todos` 查看模型用 `todo_write` 维护的当前任务清单，`/todos clear` 手动清空；`/resume [<id 或前缀>]`（别名 `/continue`）在 REPL 内部直接切到另一个已保存的会话，不带参数列出可选会话，切换后沿用当前会话的权限模式。全部命令的详细用法、参数与可改字段见 [docs/commands.md](docs/commands.md)。
 
 ## 指令层（cyan.md）
 
@@ -58,6 +58,13 @@ uv run cyan
 
 任务中可用 `memory_write` 即时写入；任务 **成功结束** 后会再提取一次。中断或失败不沉淀。`CYAN_DISABLE_AUTO_MEMORY=1` 可关闭。用 `/memory` 查看文件。cyan.md 是人写的规则，memory 是 Agent 写的笔记。
 
+## 任务规划
+
+多步骤任务由模型自己调用 `todo_write` 维护一份结构化清单（对齐 Claude Code 的 TodoWrite）：每次调用传入
+**完整**清单（覆盖式更新，不是增量 patch），同一时刻最多一项 `in_progress`。清单跟随会话持久化（checkpoint +
+sidecar `meta.json`），`/rewind` 回溯时会恢复到当时的状态。清单本身不改文件系统，任何权限模式下都免审批，
+用户不能手动触发 `todo_write`，但可以用 `/todos` 随时查看，或 `/todos clear` 手动清空。
+
 ## 工具
 
 | 工具 | 类型 | 说明 |
@@ -71,6 +78,7 @@ uv run cyan
 | `memory_write` | 写入 | 写入四类笔记之一并更新索引；非 Plan 下免审批 |
 | `write_file` | 写入 | 整文件写入，自动创建父目录 |
 | `edit_file` | 写入 | 精确字符串替换，要求匹配唯一 |
+| `todo_write` | 写入 | 整体覆盖式更新任务规划清单；不改文件系统，任何模式下免审批 |
 | `bash` | 执行 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
 
 `bash` 每次调用都是独立新进程，不保留环境变量或别名，`export` 不会带到下一次调用；
@@ -129,4 +137,4 @@ uv run pytest
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出、丰富斜杠命令已落地。后续：任务规划（`todo_write`）。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出、丰富斜杠命令、任务规划工具 `todo_write` 均已落地。

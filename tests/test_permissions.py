@@ -843,3 +843,11 @@ def test_unresolved_cd_is_denied(env):
         mode=PermissionMode.ACCEPT_EDITS,
     )
     assert outcome.kind == "deny"
+
+
+def test_todo_write_always_allowed_regardless_of_mode(env):
+    """任务规划不改文件系统，跟 memory_write 不一样——Plan 模式下也要能用。"""
+    tool = env.registry.get("todo_write")
+    args = {"todos": [{"content": "写测试", "status": "pending", "activeForm": "正在写测试"}]}
+    for mode in (PermissionMode.DEFAULT, PermissionMode.PLAN, PermissionMode.ACCEPT_EDITS):
+        assert eval_perm(env, tool, args, mode=mode).kind == "allow"

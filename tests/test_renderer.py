@@ -6,7 +6,15 @@ import io
 
 from rich.console import Console
 
-from cyan.cli.renderer import Renderer, _ToolPreviewState, _tool_preview_panel, extract_partial_string_field
+from cyan.cli.renderer import (
+    Renderer,
+    _format_args,
+    _ToolPreviewState,
+    _tool_preview_panel,
+    extract_partial_string_field,
+    render_todo_lines,
+)
+from cyan.tools.types import ToolRunResult
 
 
 def _renderer() -> Renderer:
@@ -186,6 +194,49 @@ def test_extract_partial_string_field_decodes_unicode_escape_once_complete():
 def test_extract_partial_string_field_returns_complete_value_when_string_closed():
     partial = '{"path": "a.py", "content": "done"}'
     assert extract_partial_string_field(partial, "content") == "done"
+
+
+def test_format_args_summarizes_todo_write():
+    args = {
+        "todos": [
+            {"content": "写测试", "status": "completed", "activeForm": "正在写测试"},
+            {"content": "补文档", "status": "in_progress", "activeForm": "正在补文档"},
+            {"content": "发布", "status": "pending", "activeForm": "正在发布"},
+        ]
+    }
+    assert _format_args("todo_write", args) == "3 项，1 完成，1 进行中"
+
+
+def test_render_todo_lines_marks_status_glyphs():
+    items = [
+        {"content": "已完成任务", "status": "completed", "active_form": ""},
+        {"content": "进行中任务", "status": "in_progress", "active_form": "正在做进行中任务"},
+        {"content": "待办任务", "status": "pending", "active_form": ""},
+    ]
+    lines = render_todo_lines(items)
+    assert len(lines) == 3
+    assert "✓" in lines[0] and "已完成任务" in lines[0]
+    assert "●" in lines[1] and "正在做进行中任务" in lines[1]
+    assert "○" in lines[2] and "待办任务" in lines[2]
+
+
+def test_tool_finished_renders_todo_checklist():
+    renderer = _renderer()
+    result = ToolRunResult.success(
+        "[ ] 写测试",
+        todos=[{"content": "写测试", "status": "pending", "active_form": ""}],
+    )
+    renderer.tool_finished("todo_write", result, 0.1)
+    output = renderer.console.file.getvalue()
+    assert "任务清单已更新" in output
+    assert "写测试" in output
+
+
+def test_tool_finished_reports_cleared_checklist():
+    renderer = _renderer()
+    result = ToolRunResult.success("", todos=[])
+    renderer.tool_finished("todo_write", result, 0.1)
+    assert "任务清单已清空" in renderer.console.file.getvalue()
 
 
 def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():

@@ -39,6 +39,7 @@ from .types import (
     SessionState,
     SessionUsage,
     SessionWorkspace,
+    TodoItem,
     ToolExecution,
     ToolHistory,
     ToolResult,
@@ -63,6 +64,9 @@ class Session:
     events: list[SessionEvent] = field(default_factory=list)
     store: DiskStore | None = None
     model: str = ""
+    # todo_write 维护的任务清单；跟 opened_files/always_allowed 一样是「当前状态」，
+    # 不进事件表，只随 checkpoint / meta.json 走。
+    todos: list[TodoItem] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -122,6 +126,12 @@ class Session:
     @consecutive_tool_failures.setter
     def consecutive_tool_failures(self, value: int) -> None:
         self.state.consecutive_tool_failures = value
+
+    def set_todos(self, items: list[TodoItem]) -> None:
+        """整体替换任务清单（todo_write 每次都传完整列表，不是增量 patch）。"""
+        self.todos = items
+        self.metadata.touch()
+        self.persist_head()
 
     def add(self, message: Message) -> None:
         """追加一条消息。对话类消息写入事件表；ToolMessage 只挂到已有 tool_result。"""
@@ -301,6 +311,7 @@ class Session:
                 "modified_files": [str(path) for path in sorted(self.workspace.modified_files, key=str)],
                 "always_allowed": sorted(self.permissions.always_allowed),
                 "permission_mode": self.permissions.permission_mode.value,
+                "todos": [item.to_json() for item in self.todos],
             },
         )
 
@@ -323,6 +334,7 @@ class Session:
             modified_files=[str(path) for path in sorted(self.workspace.modified_files, key=str)],
             always_allowed=sorted(self.permissions.always_allowed),
             permission_mode=self.permissions.permission_mode.value,
+            todos=[item.to_json() for item in self.todos],
             usage={
                 "input_tokens": self.usage.input_tokens,
                 "output_tokens": self.usage.output_tokens,

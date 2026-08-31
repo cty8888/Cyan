@@ -230,10 +230,20 @@ class Renderer:
         logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
 
     def tool_finished(self, name: str, result: ToolRunResult, duration: float) -> None:
-        """一行摘要；bash 额外摘几行输出，写文件则附上 diff。"""
+        """一行摘要；bash 额外摘几行输出，写文件则附上 diff，todo_write 则展开清单。"""
         text = result.content if result.ok else (result.error or "执行失败")
         command_failed = result.metadata.get("exit_code") not in (None, 0)
         mark = "[green]✓[/]" if result.ok and not command_failed else "[red]✗[/]"
+
+        if name == "todo_write" and result.ok and "todos" in result.metadata:
+            summary = "任务清单已更新" if result.metadata["todos"] else "任务清单已清空"
+            self.console.print(f"  {mark} {summary} [dim]({duration:.1f}s)[/]")
+            logger.info("%s 成功  %s  (%.1fs)", name, summary, duration)
+            for line in render_todo_lines(result.metadata["todos"]):
+                self.console.print(Text.from_markup(line))
+            self.console.print()
+            return
+
         self.console.print(f"  {mark} {_first_line(text)} [dim]({duration:.1f}s)[/]")
         logger.info("%s %s  %s  (%.1fs)", name, "成功" if result.ok else "失败", _first_line(text), duration)
         if not result.ok:
@@ -420,12 +430,46 @@ def extract_partial_string_field(partial_json: str, field_name: str) -> str | No
 def _format_args(tool_name: str, args: dict[str, Any]) -> str:
     if tool_name == "bash":
         return _clip(str(args.get("command", "")), 100)
+    if tool_name == "todo_write":
+        items = args.get("todos") or []
+        in_progress = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "in_progress")
+        done = sum(1 for item in items if isinstance(item, dict) and item.get("status") == "completed")
+        return f"{len(items)} 项，{done} 完成，{in_progress} 进行中"
     if "path" in args:
         extra = ""
         if tool_name == "list_dir":
             extra = f" depth={args.get('depth', 2)}"
         return f"{args['path']}{extra}"
     return _clip(json.dumps(args, ensure_ascii=False), 100)
+
+
+_TODO_STATUS_GLYPH = {
+    "completed": "[green]✓[/]",
+    "in_progress": "[yellow]●[/]",
+    "pending": "[dim]○[/]",
+}
+
+
+def render_todo_lines(items: list[dict[str, Any]]) -> list[str]:
+    """把任务清单渲成带勾选状态的 rich markup 行，``tool_finished`` 和 ``/todos`` 共用。
+
+    输入是 ``TodoItem.to_json()`` 的形状（``content`` / ``status`` / ``active_form``），
+    不直接依赖 ``session.types``——渲染层只认字典，不认领域对象。
+    """
+    lines: list[str] = []
+    for item in items:
+        status = str(item.get("status") or "pending")
+        content = str(item.get("content") or "")
+        active_form = str(item.get("active_form") or item.get("activeForm") or "")
+        glyph = _TODO_STATUS_GLYPH.get(status, _TODO_STATUS_GLYPH["pending"])
+        if status == "completed":
+            body = f"[dim strike]{content}[/]"
+        elif status == "in_progress":
+            body = f"[bold yellow]{active_form or content}[/]"
+        else:
+            body = content
+        lines.append(f"  {glyph} {body}")
+    return lines
 
 
 def _first_line(text: str, limit: int = 120) -> str:

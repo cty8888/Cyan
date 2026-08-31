@@ -153,6 +153,7 @@ def test_bare_write_deny_hides_write_tools(env):
     env.permissions.reload()
     assert "write_file" in env.permissions.hidden_tool_names()
     assert "edit_file" in env.permissions.hidden_tool_names()
+    assert "todo_write" in env.permissions.hidden_tool_names()
 
 
 def test_tests_do_not_read_real_home(tmp_path, monkeypatch):

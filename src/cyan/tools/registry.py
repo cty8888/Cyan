@@ -94,6 +94,7 @@ def build_default_registry() -> ToolRegistry:
     from .builtin.memory_read import MemoryReadTool
     from .builtin.memory_write import MemoryWriteTool
     from .builtin.read_file import ReadFileTool
+    from .builtin.todo_write import TodoWriteTool
     from .builtin.write_file import WriteFileTool
 
     from ..memory.settings import auto_memory_enabled
@@ -108,6 +109,7 @@ def build_default_registry() -> ToolRegistry:
     registry.register(GrepTool())
     registry.register(MemoryListTool())
     registry.register(MemoryReadTool())
+    registry.register(TodoWriteTool())
     if auto_memory_enabled():
         registry.register(MemoryWriteTool())
     return registry

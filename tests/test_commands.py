@@ -17,12 +17,13 @@ from cyan.cli.commands import (
     _cmd_resume,
     _cmd_status,
     _cmd_stream,
+    _cmd_todos,
     _cmd_tools,
 )
 from cyan.cli.renderer import Renderer
 from cyan.context.types import ContextPolicy
 from cyan.security.types import PermissionMode
-from cyan.session import Session
+from cyan.session import Session, TodoItem, TodoStatus
 from cyan.session.store import DiskStore
 from cyan.settings import CompactPolicy, LLMSettings, LoopLimits, ToolLimits
 
@@ -43,6 +44,7 @@ def _fake_policy_app() -> SimpleNamespace:
     console = Console(file=io.StringIO(), force_terminal=True, width=80)
     session = SimpleNamespace(
         messages=[],
+        todos=[],
         stats=lambda: {
             "llm_calls": 2,
             "tool_calls": 1,
@@ -51,6 +53,7 @@ def _fake_policy_app() -> SimpleNamespace:
         permissions=SimpleNamespace(permission_mode=PermissionMode.DEFAULT),
         metadata=SimpleNamespace(session_id="abcdef1234567890", title="测试会话"),
     )
+    session.set_todos = lambda items: setattr(session, "todos", items)
     runtime = SimpleNamespace(
         loop_limits=LoopLimits(),
         tool_limits=ToolLimits(),
@@ -213,6 +216,41 @@ def test_status_reports_summary():
     output = _output(app)
     assert "deepseek-chat" in output
     assert "500" in output
+
+
+# ---------------------------------------------------------------- /todos
+
+
+def test_todos_no_args_reports_empty_list():
+    app = _fake_policy_app()
+    assert _cmd_todos(app, []) is False
+    assert "没有任务清单" in _output(app)
+
+
+def test_todos_no_args_lists_current_items():
+    app = _fake_policy_app()
+    app.session.todos = [
+        TodoItem(content="写测试", status=TodoStatus.IN_PROGRESS, active_form="正在写测试"),
+        TodoItem(content="补文档", status=TodoStatus.PENDING),
+    ]
+    _cmd_todos(app, [])
+    output = _output(app)
+    assert "正在写测试" in output
+    assert "补文档" in output
+
+
+def test_todos_clear_empties_list():
+    app = _fake_policy_app()
+    app.session.todos = [TodoItem(content="写测试")]
+    _cmd_todos(app, ["clear"])
+    assert app.session.todos == []
+    assert "已清空" in _output(app)
+
+
+def test_todos_unknown_argument_reports_usage():
+    app = _fake_policy_app()
+    _cmd_todos(app, ["bogus"])
+    assert "用法" in _output(app)
 
 
 # ---------------------------------------------------------------- /resume

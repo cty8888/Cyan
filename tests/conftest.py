@@ -14,7 +14,7 @@ from cyan.llm.base import LLMClient
 from cyan.llm.types import AssistantMessage, LLMResponse, ToolCallBlock, Usage
 from cyan.security.permissions import PermissionManager
 from cyan.security.types import ApprovalDecision, PermissionMode
-from cyan.session import Session, WorkspaceAccess
+from cyan.session import Session, TodoAccess, WorkspaceAccess
 from cyan.settings import AgentSettings, LLMSettings
 from cyan.tools.registry import ToolRegistry, build_default_registry
 from cyan.tools.types import ToolContext
@@ -113,6 +113,7 @@ def make_env(tmp_path):
             workspace=tmp_path,
             tool_limits=settings.tools,
             workspace_access=WorkspaceAccess(session),
+            todos=TodoAccess(session),
         )
         return Env(settings, permissions, registry, ctx, session)
 

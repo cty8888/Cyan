@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from ..security.types import PermissionMode
 
@@ -79,6 +80,47 @@ class SessionState:
     # 连续相同「工具 + 参数」的指纹与次数；中间换了调用或出现成功进展会清零。
     last_call_fingerprint: str | None = None
     consecutive_identical_calls: int = 0
+
+
+class TodoStatus(Enum):
+    """todo_write 里一项任务的状态。"""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+
+
+@dataclass
+class TodoItem:
+    """任务规划清单里的一项。
+
+    ``active_form`` 是进行中展示用的现在进行时文案（如「正在修复登录 bug」），
+    对齐 Claude Code 的 TodoWrite；对外的工具 schema 用 ``activeForm``（驼峰），
+    这里用 snake_case 跟项目内其它字段一致，序列化时才转写法。
+    """
+
+    content: str
+    status: TodoStatus = TodoStatus.PENDING
+    active_form: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "content": self.content,
+            "status": self.status.value,
+            "active_form": self.active_form,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> TodoItem:
+        try:
+            status = TodoStatus(str(data.get("status") or TodoStatus.PENDING.value))
+        except ValueError:
+            status = TodoStatus.PENDING
+        return cls(
+            content=str(data.get("content") or ""),
+            status=status,
+            active_form=str(data.get("active_form") or ""),
+        )
 
 
 @dataclass

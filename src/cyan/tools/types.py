@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ..settings import ToolLimits
 
 if TYPE_CHECKING:
-    from ..session import WorkspaceAccess
+    from ..session import TodoAccess, WorkspaceAccess
 
 
 class ToolCapability(Enum):
@@ -61,6 +61,7 @@ class ToolContext:
     workspace: Path
     tool_limits: ToolLimits
     workspace_access: WorkspaceAccess
+    todos: TodoAccess
 
 
 @dataclass

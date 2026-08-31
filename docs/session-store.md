@@ -34,7 +34,7 @@
 | `session_started` | 系统提示 |
 | `user` / `continue` / `assistant` / `tool_result` | 对话与工具 |
 | `summary` + `compact` | 压缩 overlay（`hidden_event_ids` + 插入点 `start_event_id`）。超大粘贴时 `summary.payload` 带 `preserved_user_text`，resume 时插回截断副本。 |
-| `checkpoint` | 某条 user 当时的 cwd / 已读 / 白名单 |
+| `checkpoint` | 某条 user 当时的 cwd / 已读 / 白名单 / 任务清单（`todos`） |
 | `file_op` | write_file / edit_file 索引 |
 | `branch_forked` | 新分支开头 |
 
@@ -45,7 +45,7 @@
 1. 按时间应用每条 `compact`，得到 hidden 集合，以及 `start_event_id → summary`。
 2. 扫描源事件：走到插入点时先放出 Summary（若有 `preserved_user_text` 再插截断 user），再跳过 hidden。
 3. 当前任务若被切进压缩段且不是超大粘贴，该条 `user` 不进 hidden。
-4. continue / resume 用 sidecar `meta.json` 的 head 状态（cwd、已读、白名单、用量）。rewind 才套该条 user **提交时**写下的 checkpoint（紧跟在 user 事件后面）。
+4. continue / resume 用 sidecar `meta.json` 的 head 状态（cwd、已读、白名单、用量、任务清单）。rewind 才套该条 user **提交时**写下的 checkpoint（紧跟在 user 事件后面）；任务清单是 `todo_write` 整体覆盖式更新的，checkpoint 拍的是那条 user 事件当时的清单快照，不是增量。
 5. `--continue` 跳过还没有用户消息的空会话；`last` 只在第一条真实用户消息、resume、fork 时更新。
 
 ## 分支

@@ -21,6 +21,7 @@
 | [`/context`](#context) | | `/context [<字段> <值>]` | 查看或修改上下文截断策略 |
 | [`/model`](#model) | | `/model [<名字>]` | 查看或切换模型 |
 | [`/status`](#status) | | `/status` | 一屏汇总模型/权限/流式/上下文/统计 |
+| [`/todos`](#todos) | | `/todos [clear]` | 查看当前任务清单（`todo_write` 维护） |
 | [`/history`](#history) | | `/history` | 列出用户消息（完整日志） |
 | [`/rewind`](#rewind) | | `/rewind <序号或id> [restore\|summarize-up\|summarize-from]` | 回退到某条用户消息 |
 | [`/sessions`](#sessions) | | `/sessions` | 列出本工作区已保存的会话 |
@@ -233,6 +234,22 @@
 - 当前会话 id（前 8 位）与标题
 - 上下文占用：`runtime.estimate_request_tokens()` / `compact_policy.max_context_tokens`，带百分比
 - 调用统计：模型调用次数、工具调用次数、合计 token（同 `/usage`）
+
+---
+
+## `/todos` {#todos}
+
+```
+/todos             # 查看当前任务清单
+/todos clear       # 手动清空
+```
+
+任务规划清单由模型自己判断何时用 `todo_write` 创建与更新（3 步以上、多文件、需要用户看到
+进度的任务），**用户不能手动调用 `todo_write`**——`/todos` 只是只读查看入口（`clear` 是唯一
+的写操作，直接清空，不需要经过模型）。清单是覆盖式的：模型每次调用 `todo_write` 都会传入
+完整清单，不是增量修改；同一时刻最多一项 `in_progress`。清单跟随会话持久化（checkpoint +
+sidecar `meta.json`），`/rewind restore` 分叉新会话时会恢复到锚点当时的清单状态。清单为空时
+提示"当前没有任务清单"。
 
 ---
 

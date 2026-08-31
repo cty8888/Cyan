@@ -26,7 +26,7 @@ from .events import (
     USER,
     SessionEvent,
 )
-from .types import SessionUsage, ToolExecution, ToolHistory, ToolResult, ToolResultStatus
+from .types import SessionUsage, TodoItem, ToolExecution, ToolHistory, ToolResult, ToolResultStatus
 
 if TYPE_CHECKING:
     from .session import Session
@@ -204,6 +204,7 @@ def apply_meta(session: Session, meta: SessionMeta) -> None:
         session.permissions.permission_mode = PermissionMode(meta.permission_mode)
     except ValueError:
         pass
+    session.todos = [TodoItem.from_json(item) for item in meta.todos if isinstance(item, dict)]
     usage = meta.usage
     session.usage = SessionUsage(
         input_tokens=int(usage.get("input_tokens") or 0),
@@ -259,6 +260,7 @@ def apply_checkpoint(session: Session, events: list[SessionEvent], at_event_id: 
         session.workspace.cwd = session.workspace.root
         session.workspace.opened_files.clear()
         session.workspace.modified_files.clear()
+        session.todos = []
         return
     payload = latest.payload
     cwd = payload.get("cwd")
@@ -273,6 +275,8 @@ def apply_checkpoint(session: Session, events: list[SessionEvent], at_event_id: 
             session.permissions.permission_mode = PermissionMode(str(mode))
         except ValueError:
             pass
+    raw_todos = payload.get("todos") or []
+    session.todos = [TodoItem.from_json(item) for item in raw_todos if isinstance(item, dict)]
 
 
 def repair_unpaired_tool_calls(session: Session) -> None:

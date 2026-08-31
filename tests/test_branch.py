@@ -139,6 +139,45 @@ def test_fork_restores_checkpoint_at_user(tmp_path):
     assert "exec:pytest" in branched.permissions.always_allowed
 
 
+def test_fork_restores_todos_checkpoint(tmp_path):
+    """checkpoint 挂在 user 事件后面，用当时的 ``session.todos`` 拍照——
+    ``set_todos()`` 本身不追加新 checkpoint，要等下一条用户消息才把新状态定住。
+    """
+    from cyan.session import Session, TodoItem, TodoStatus
+
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("任务1"))  # checkpoint 1：todos 还是空
+    session.set_todos([TodoItem(content="第一步", status=TodoStatus.COMPLETED)])
+    session.add(UserMessage.of("任务2"))  # checkpoint 2：捕到「第一步」
+    session.set_todos([TodoItem(content="第二步", status=TodoStatus.IN_PROGRESS, active_form="正在做第二步")])
+
+    entries = user_event_entries(session)
+    first = entries[0][1]
+    early = fork_at_user(session, first.id)
+    assert early.todos == []
+
+    second = entries[1][1]
+    branched = fork_at_user(session, second.id)
+    assert [item.content for item in branched.todos] == ["第一步"]
+
+
+def test_disk_roundtrip_preserves_todos(tmp_path, monkeypatch):
+    from cyan.session import Session, TodoItem, TodoStatus
+    from cyan.session.branch import load_session
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CYAN_HOME", str(home))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = DiskStore.create(workspace, home=home)
+    session = Session.create(workspace=workspace, system_prompt="sys", store=store)
+    session.set_todos([TodoItem(content="写测试", status=TodoStatus.IN_PROGRESS, active_form="正在写测试")])
+
+    loaded, warning = load_session(workspace, store.session_id, home=home)
+    assert warning is None
+    assert [item.to_json() for item in loaded.todos] == [item.to_json() for item in session.todos]
+
+
 def test_oversized_user_survives_reload(tmp_path, monkeypatch):
     from cyan.session import Session
     from cyan.session.branch import load_session

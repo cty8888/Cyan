@@ -51,6 +51,7 @@ class SessionMeta:
     modified_files: list[str] = field(default_factory=list)
     always_allowed: list[str] = field(default_factory=list)
     permission_mode: str = "default"
+    todos: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
@@ -68,12 +69,14 @@ class SessionMeta:
             "modified_files": self.modified_files,
             "always_allowed": self.always_allowed,
             "permission_mode": self.permission_mode,
+            "todos": self.todos,
             "usage": self.usage,
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SessionMeta:
         usage = data.get("usage") or {}
+        todos = data.get("todos") or []
         return cls(
             v=int(data.get("v") or META_VERSION),
             id=str(data.get("id") or ""),
@@ -88,6 +91,7 @@ class SessionMeta:
             modified_files=list(data.get("modified_files") or []),
             always_allowed=list(data.get("always_allowed") or []),
             permission_mode=str(data.get("permission_mode") or "default"),
+            todos=list(todos) if isinstance(todos, list) else [],
             usage={str(k): int(v) for k, v in usage.items()} if isinstance(usage, dict) else {},
         )
 

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 BARE_DENY_TOOLS: dict[str, frozenset[str]] = {
     "bash": frozenset({"bash"}),
-    "write": frozenset({"write_file", "edit_file", "memory_write"}),
+    "write": frozenset({"write_file", "edit_file", "memory_write", "todo_write"}),
     "read": frozenset({"read_file", "list_dir", "glob", "grep", "memory_list", "memory_read"}),
 }
 
@@ -266,7 +266,8 @@ def _param_message(rule: PermissionRule) -> str:
 
 
 def _family_for_tool(tool: Tool) -> Literal["bash", "read", "write"] | None:
-    if tool.name == "memory_write":
+    if tool.name in {"memory_write", "todo_write"}:
+        # 没有路径参数，走不了按路径匹配的 family 规则；仅用 BARE_DENY_TOOLS 兜底裸名 deny。
         return None
     if tool.name == "bash" or tool.capability is ToolCapability.EXEC:
         return "bash"

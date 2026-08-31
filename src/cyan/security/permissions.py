@@ -85,6 +85,10 @@ class PermissionManager:
                     tool, args, force=True, reason=crit, workspace_access=workspace_access
                 )
 
+        if tool.name == "todo_write":
+            # 任务规划本身不改文件系统，跟模式无关——Plan 模式下也要能列计划。
+            return PermissionOutcome.allow()
+
         if tool.name == "memory_write":
             if mode is PermissionMode.PLAN:
                 return PermissionOutcome.deny(DenyReason.MODE_BLOCKED, PLAN_WRITE_MSG)

@@ -4,12 +4,15 @@ from .compact import CompactPolicy
 from .events import SessionEvent
 from .session import Session
 from .store import DiskStore
+from .todo_access import TodoAccess
 from .types import (
     SessionMetadata,
     SessionPermissions,
     SessionState,
     SessionUsage,
     SessionWorkspace,
+    TodoItem,
+    TodoStatus,
     ToolExecution,
     ToolHistory,
     ToolResult,
@@ -27,6 +30,9 @@ __all__ = [
     "SessionState",
     "SessionUsage",
     "SessionWorkspace",
+    "TodoAccess",
+    "TodoItem",
+    "TodoStatus",
     "ToolExecution",
     "ToolHistory",
     "ToolResult",

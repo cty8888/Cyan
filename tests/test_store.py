@@ -6,7 +6,14 @@ from cyan.llm.types import UserMessage
 from cyan.session import Session
 from cyan.session.events import USER, SessionEvent
 from cyan.session.paths import encode_workspace
-from cyan.session.store import DiskStore, latest_jsonl_id, list_sessions, read_last, resolve_session_id
+from cyan.session.store import (
+    DiskStore,
+    SessionMeta,
+    latest_jsonl_id,
+    list_sessions,
+    read_last,
+    resolve_session_id,
+)
 
 
 def test_encode_posix_and_windows_paths(tmp_path):
@@ -89,6 +96,32 @@ def test_new_session_does_not_steal_last_until_user_speaks(tmp_path, monkeypatch
     empty = DiskStore.create(workspace, home=home)
     Session.create(workspace=workspace, system_prompt="sys", store=empty)
     assert read_last(workspace, home=home) == real.session_id
+
+
+def test_session_meta_roundtrips_todos(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = DiskStore.create(workspace, home=home)
+    todos = [{"content": "写测试", "status": "in_progress", "active_form": "正在写测试"}]
+    store.write_meta(SessionMeta(id=store.session_id, todos=todos))
+
+    loaded = store.load_meta()
+    assert loaded is not None
+    assert loaded.todos == todos
+
+
+def test_session_meta_missing_todos_defaults_to_empty_list(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = DiskStore.create(workspace, home=home)
+    store.meta_path.parent.mkdir(parents=True, exist_ok=True)
+    store.meta_path.write_text('{"v": 1, "id": "x"}', encoding="utf-8")
+
+    loaded = store.load_meta()
+    assert loaded is not None
+    assert loaded.todos == []
 
 
 def test_continue_skips_empty_last_session(tmp_path, monkeypatch):

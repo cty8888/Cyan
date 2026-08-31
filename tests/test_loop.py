@@ -89,6 +89,21 @@ def test_stops_at_max_iterations(make_env):
     assert reason is StopReason.MAX_ITERATIONS
 
 
+def test_runtime_loop_limits_edit_affects_termination_not_settings(env):
+    """会话中途改 ``runtime.loop_limits``（比如 /loop 命令）要立刻生效；
+    ``settings.loop`` 是拷贝源头，不应被这次修改动到。
+    """
+    llm = FakeLLM([tool_call("list_dir", '{"path": ".", "depth": %d}' % (i + 1), f"c{i}") for i in range(10)])
+    runtime = make_runtime(env, llm)
+    original_settings_max = runtime.settings.loop.max_iterations
+    runtime.loop_limits.max_iterations = 2
+
+    _, reason = drive(runtime, "循环")
+
+    assert reason is StopReason.MAX_ITERATIONS
+    assert runtime.settings.loop.max_iterations == original_settings_max
+
+
 def test_stops_on_repeated_calls(env):
     llm = FakeLLM([tool_call("read_file", '{"path": "nope.py"}', f"r{i}") for i in range(10)])
     runtime = make_runtime(env, llm)

@@ -190,17 +190,17 @@ CompactPolicy（压缩：默认值在 ``AgentSettings.compact``，App 拷一份�
  └── max_context_tokens / reserve_tokens / trigger_ratio / keep_recent_turns
 ```
 
-**运行时策略与斜杠命令（回头再做，先不改代码）**
+**运行时策略与斜杠命令**
 
-配置分三类，不要一律 `replace`：
+配置分三类，不一律 `replace`：
 
-- **启动身份**（workspace、api_key、log）：留在 `AgentSettings` / App，进程内基本不改；换模型要重建客户端。
-- **会话状态**（`permission_mode`、`always_allowed`）：继续挂在 Session；`/mode` 已是这个模式。
-- **本会话行为策略**（compact / loop / tools / context）：默认值只住 `settings/`，App 拷一份注入 Runtime，Loop 只读 Runtime 上的副本。会话中途用斜杠命令改副本，不写回 `AgentSettings`。
+- **启动身份**（workspace、api_key、log）：留在 `AgentSettings` / App，进程内基本不改；换模型不需要重建客户端（见下）。
+- **会话状态**（`permission_mode`、`always_allowed`）：继续挂在 Session；`/mode` 是这个模式。
+- **本会话行为策略**（compact / loop / tools / context）：默认值只住 `settings/`，`Runtime.create()` 用 `dataclasses.replace()` 各拷一份注入 `Runtime`（`compact_policy` / `loop_limits` / `tool_limits` / `context_policy`），`AgentLoop` 只读 Runtime 上的副本（`self.loop_limits`、`self.runtime.tool_limits`）。会话中途用斜杠命令改副本，不写回 `AgentSettings`。
 
-Compact 已经按第三类做了。`LoopLimits` / `ToolLimits` 还在读 `runtime.settings.*`，`ContextPolicy` 还在 `Runtime.create` 里直接 `ContextPolicy()`，回头一起收齐。同时丰富 `/` 命令：除现有 `/compact`、`/mode` 外，补查看与修改阈值、保留轮数、轮次上限、工具结果截断等（改 `runtime.compact_policy` / 将来的 `loop` / `tools` / `context`）。
+四个策略域现在都收齐了：`/compact show|set`、`/loop`、`/tools limits|<字段> <值>`、`/context` 分别查看/修改对应副本；`cli/commands.py` 里的 `_show_policy` / `_set_policy_field` 是这四个命令共用的通用小工具，按 dataclass 字段的类型注解做字符串转换。
 
-模型参数（`model` / `temperature`）留在 ``LLMSettings``，不属于 Session。
+模型参数（`model` / `temperature`）留在 `LLMSettings`，不属于 Session；`DeepSeekClient.model` 是只读 property（实时读 `self._llm.model`，不在构造时缓存），所以 `/model <名字>` 改的是同一个 `LLMSettings` 对象，下一次调用立刻生效，不需要重建客户端，跟 `/stream` 是同一个模式。`/status` 一屏汇总模型、权限模式、流式开关、当前会话、上下文占用（`estimate_request_tokens() / compact_policy.max_context_tokens`）与调用统计。
 
 核心原则：Session 保存 Agent 的「过去和当前状态」，Runtime 负责 Agent 的「下一步行动」。Session 是数据，Runtime 是行为。
 
@@ -314,7 +314,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] tool_call 参数流式可视化（`ToolCallDelta` 事件携带 `index`/`call_id`/`name`/`arguments_delta`；CLI 侧对 `write_file`/`edit_file` 尽力从未解析完的 JSON 里抠出 `content`/`new_string` 字段边生成边展示，其它工具退化成原始 JSON 片段；真正执行仍等完整 JSON 拼好、解析通过后才发起）
 - [x] rich 富渲染：工具卡片、diff 预览、执行输出摘要
 - [x] Ctrl-C 中断（中断时补齐未响应的 tool_call，保证上下文完整）
-- [ ] 丰富斜杠命令：会话中改 Runtime 上的策略副本（compact / loop / tools / context），不写回 `AgentSettings`；先把 loop/tools/context 收成与 compact 相同的「settings 默认 → App 拷贝注入」
+- [x] 丰富斜杠命令：`loop`/`tools`/`context` 收成与 `compact` 相同的「settings 默认 → `Runtime.create()` 拷贝注入」模式；新增 `/loop`、`/context`、`/model`、`/status`，扩展 `/tools`（`limits` 子命令）、`/compact`（`show`/`set` 子命令）
 
 ### Phase 3：上下文与记忆
 

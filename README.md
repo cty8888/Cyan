@@ -30,7 +30,7 @@ uv run cyan
 
 终端界面用 rich 渲染（Markdown、diff、审批面板）。助手回复默认按 SSE 流式打字机效果实时显示，`--no-stream` 可关闭退化成一次性显示。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/loop`、`/context`、`/model`、`/status`、`/history`、`/rewind`、`/sessions`、`/resume`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。`/compact`、`/loop`、`/tools`、`/context` 支持不带参数查看当前值，或 `<字段> <值>` 修改本会话的运行时策略（不影响下次启动的默认值）；`/model` 查看或切换模型；`/status` 一屏汇总模型、权限模式、流式开关、上下文占用与调用统计；`/resume [<id 或前缀>]`（别名 `/continue`）在 REPL 内部直接切到另一个已保存的会话，不带参数列出可选会话，切换后沿用当前会话的权限模式。全部命令的详细用法、参数与可改字段见 [docs/commands.md](docs/commands.md)。
 
 ## 指令层（cyan.md）
 
@@ -129,4 +129,4 @@ uv run pytest
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出已落地。后续：任务规划、丰富斜杠命令。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出、丰富斜杠命令已落地。后续：任务规划（`todo_write`）。

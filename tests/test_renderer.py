@@ -6,7 +6,7 @@ import io
 
 from rich.console import Console
 
-from cyan.cli.renderer import Renderer, extract_partial_string_field
+from cyan.cli.renderer import Renderer, _ToolPreviewState, _tool_preview_panel, extract_partial_string_field
 
 
 def _renderer() -> Renderer:
@@ -186,3 +186,16 @@ def test_extract_partial_string_field_decodes_unicode_escape_once_complete():
 def test_extract_partial_string_field_returns_complete_value_when_string_closed():
     partial = '{"path": "a.py", "content": "done"}'
     assert extract_partial_string_field(partial, "content") == "done"
+
+
+def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():
+    """content 字段还没流到（None）和已经流到但值是空字符串（""）要展示不同的提示，不能混为一谈。"""
+    pending = _ToolPreviewState(index=0, name="write_file", arguments='{"path": "a.py"')
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    console.print(_tool_preview_panel(pending))
+    assert "生成参数中" in console.file.getvalue()
+
+    empty = _ToolPreviewState(index=0, name="write_file", arguments='{"path": "a.py", "content": ""}')
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    console.print(_tool_preview_panel(empty))
+    assert "内容为空" in console.file.getvalue()

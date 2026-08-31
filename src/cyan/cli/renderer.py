@@ -349,11 +349,12 @@ def _tool_preview_panel(state: _ToolPreviewState, *, finalized: bool = False) ->
     body: Any
     if field is not None:
         preview = extract_partial_string_field(state.arguments, field)
-        body = (
-            Syntax(preview, "text", theme="ansi_dark", background_color="default", word_wrap=True)
-            if preview
-            else Text("生成参数中...", style="dim")
-        )
+        if preview is None:
+            body = Text("生成参数中...", style="dim")
+        elif preview == "":
+            body = Text("(内容为空)", style="dim")
+        else:
+            body = Syntax(preview, "text", theme="ansi_dark", background_color="default", word_wrap=True)
     else:
         body = Text(_clip(state.arguments, 300) or "...", style="dim")
     return Panel(body, title=title, border_style="dim" if finalized else "blue", padding=(0, 1))

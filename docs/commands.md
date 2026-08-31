@@ -1,0 +1,327 @@
+# 斜杠命令手册
+
+交互 REPL 里以 `/` 开头的都是斜杠命令，其余输入都当作自然语言任务。命令由
+[`cli/commands.py`](../src/cyan/cli/commands.py) 的 `build_default_commands()` 统一注册，
+`/help` 的输出直接从这份注册表生成，不需要手动同步。
+
+## 一览
+
+| 命令 | 别名 | 用法 | 作用 |
+| --- | --- | --- | --- |
+| [`/help`](#help) | | `/help` | 显示本帮助 |
+| [`/tools`](#tools) | | `/tools [limits\|<字段> <值>]` | 列出已注册工具；查看/修改工具限制 |
+| [`/mode`](#mode) | | `/mode <模式>` | 切换权限模式：plan / default / accept_edits |
+| [`/permissions`](#permissions) | | `/permissions [allow\|ask\|deny\|remove] <规则>` | 列出或增删权限规则 |
+| [`/usage`](#usage) | | `/usage` | 显示本会话的 token 与调用统计 |
+| [`/stream`](#stream) | | `/stream [on\|off]` | 查看或切换流式输出 |
+| [`/instructions`](#instructions) | | `/instructions` | 列出已加载的指令层（cyan.md） |
+| [`/memory`](#memory) | | `/memory` | 列出项目自动记忆文件 |
+| [`/compact`](#compact) | | `/compact [show\|set <字段> <值>]` | 压缩较早对话；查看/修改压缩策略 |
+| [`/loop`](#loop) | | `/loop [<字段> <值>]` | 查看或修改循环限制（轮次上限等） |
+| [`/context`](#context) | | `/context [<字段> <值>]` | 查看或修改上下文截断策略 |
+| [`/model`](#model) | | `/model [<名字>]` | 查看或切换模型 |
+| [`/status`](#status) | | `/status` | 一屏汇总模型/权限/流式/上下文/统计 |
+| [`/history`](#history) | | `/history` | 列出用户消息（完整日志） |
+| [`/rewind`](#rewind) | | `/rewind <序号或id> [restore\|summarize-up\|summarize-from]` | 回退到某条用户消息 |
+| [`/sessions`](#sessions) | | `/sessions` | 列出本工作区已保存的会话 |
+| [`/resume`](#resume) | `/continue` | `/resume [<id 或前缀>]` | 切换到另一个会话 |
+| [`/new`](#new-clear) | | `/new` | 开始新会话（旧日志保留） |
+| [`/clear`](#new-clear) | | `/clear` | 同 `/new` |
+| [`/cwd`](#cwd) | | `/cwd` | 显示当前工作目录 |
+| [`/exit`](#exit) | `/quit` | `/exit` | 退出 |
+
+四个"运行时策略"命令（`/compact` `/loop` `/tools` `/context`）都遵循同一个模式：改的是
+`Runtime` 持有的策略副本（`compact_policy` / `loop_limits` / `tool_limits` /
+`context_policy`），**只影响当前会话**，不写回 `AgentSettings`，进程重启或开新会话后
+恢复启动时的默认值。它们的 `<字段> <值>` 语法也完全一致：字段名按 dataclass 声明的
+类型自动转换（`bool` 认 `1/true/on/yes`，`int`/`float` 按对应类型解析，其它当字符串），
+类型转换失败或字段不存在都会报错且不改动任何值。
+
+---
+
+## `/help`
+
+```
+/help
+```
+
+打印本手册对应的一览表（内容直接从命令注册表生成）。
+
+---
+
+## `/tools` {#tools}
+
+```
+/tools                    # 列出已注册的工具（名字、能力、说明）
+/tools limits             # 查看当前 ToolLimits 副本
+/tools <字段> <值>         # 修改 ToolLimits 的某个字段
+```
+
+`ToolLimits` 可改字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `max_tool_output_chars` | `bash` 等工具回喂模型的输出上限 |
+| `max_file_read_chars` | `read_file` 单次读取上限（须 `<=` `/context` 的 `max_tool_result_chars`） |
+| `max_dir_entries` | `list_dir` 树形列表的条目上限 |
+| `max_glob_results` | `glob` 按 mtime 返回的文件上限 |
+| `max_file_bytes` | `read_file` / `write_file` 单次进内存上限 |
+| `max_bash_timeout_ms` | `bash` 的 `timeout_ms` 上限 |
+| `max_process_output_chars` | 子进程 stdout 入内存上限 |
+
+示例：`/tools max_bash_timeout_ms 1200000` 把单次 bash 超时上限放宽到 20 分钟。
+
+---
+
+## `/mode`
+
+```
+/mode plan
+/mode default
+/mode accept_edits
+```
+
+切换本会话的权限模式，立即写回 sidecar（`session.persist_head()`），下一次工具调用就按新模式判定：
+
+- `plan`：只读规划，禁止写文件，`bash` 仅放行只读命令
+- `default`：写/执行都需要逐次确认
+- `accept_edits`：自动批准普通写入与工作区内文件系统命令，执行仍需确认
+
+---
+
+## `/permissions`
+
+```
+/permissions                       # 列出当前生效的全部规则
+/permissions allow <规则>
+/permissions ask <规则>
+/permissions deny <规则>
+/permissions remove <规则>
+```
+
+规则写法（详见 [README「安全模型」](../README.md#安全模型)）：`Bash(pytest *)`、
+`Read(.env)`、`Edit(src/**)`、`WebFetch(domain:example.com)`。`allow`/`ask`/`deny`
+写入工作区 `.cyan/settings.local.json`；`remove` 可以删 local / 项目 / 用户三层里的规则，
+但删不掉内置规则。改完立即 `reload()` 生效，不需要重启。
+
+---
+
+## `/usage`
+
+```
+/usage
+```
+
+打印本会话累计的模型调用次数、工具调用次数、输入/输出/合计 token，以及历史消息条数
+（复用 `session.stats()`）。
+
+---
+
+## `/stream`
+
+```
+/stream            # 查看当前是开还是关
+/stream on
+/stream off
+```
+
+直接改 `AgentSettings.llm.stream`（进程级，不是 Runtime 副本）——`DeepSeekClient`
+每次调用都读同一个 `LLMSettings` 对象，改完下一次模型调用立刻生效，不需要重建客户端。
+
+---
+
+## `/instructions`
+
+```
+/instructions
+```
+
+列出当前加载的 Prompt Layer（身份 system prompt + `cyan.md` 各层 + `MEMORY.md` 索引），
+显示每层的来源路径、字数，以及是否被截断；不打印全文。
+
+---
+
+## `/memory`
+
+```
+/memory
+```
+
+列出 `{workspace}/.cyan/memory/` 下的自动记忆文件及大小。若设置了
+`CYAN_DISABLE_AUTO_MEMORY=1`，提示自动记忆已关闭。
+
+---
+
+## `/compact` {#compact}
+
+```
+/compact                       # 立即触发一次压缩
+/compact show                  # 查看当前 CompactPolicy 副本
+/compact set <字段> <值>        # 修改 CompactPolicy 的某个字段
+```
+
+`CompactPolicy` 可改字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `max_context_tokens` | 触发压缩的窗口上限，须贴近模型实际窗口 |
+| `reserve_tokens` | 给总结那次 chat 单独留出的余量 |
+| `trigger_ratio` | 触发阈值 = `(max_context_tokens - reserve_tokens) * trigger_ratio` |
+| `keep_recent_turns` | 优先保留的最近 Assistant 轮数，超窗时会自动降到 1 轮乃至全部压进摘要 |
+
+不带参数时走原有行为：把较早对话压缩成摘要（`session.compact.resolve_keep_from` 选切点，
+消息太少会提示"无需压缩"而不是报错）。压缩失败（比如模型调用异常）不改动会话。
+
+---
+
+## `/loop`
+
+```
+/loop                       # 查看当前 LoopLimits 副本
+/loop <字段> <值>            # 修改 LoopLimits 的某个字段
+```
+
+`LoopLimits` 可改字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `max_iterations` | 单次任务最多「模型 ↔ 工具」轮次 |
+| `max_consecutive_tool_failures` | 连续失败这么多次就停 |
+| `max_repeated_calls` | 同工具同参数连续出现这么多次视为死循环 |
+
+示例：`/loop max_iterations 60` 把单次任务的轮次上限从默认 30 提到 60，适合明知道任务会很长的场景。
+
+---
+
+## `/context`
+
+```
+/context                    # 查看当前 ContextPolicy 副本
+/context <字段> <值>         # 修改 ContextPolicy 的某个字段
+```
+
+目前只有一个字段：`max_tool_result_chars`——发给模型时单条工具结果最长多少字符
+（`<= 0` 表示不截断）。默认与 `ToolLimits.max_file_read_chars` 对齐，避免模型看到的
+比工具声称读到的还少；改这个不会动 `ToolLimits`，两者需要分别调。
+
+---
+
+## `/model`
+
+```
+/model                       # 查看当前模型
+/model deepseek-reasoner     # 切换模型
+```
+
+直接改 `AgentSettings.llm.model`。`DeepSeekClient.model` 是只读 property，每次调用
+实时读这个字段，所以切换立即生效，不需要重建客户端。不做模型名校验——这是目前唯一
+在用的后端，改错名字会在下一次调用时由 API 报错。
+
+---
+
+## `/status`
+
+```
+/status
+```
+
+一屏汇总当前会话状态：
+
+- 模型（`/model` 的当前值）
+- 权限模式（`/mode` 的当前值）
+- 流式输出开关（`/stream` 的当前值）
+- 当前会话 id（前 8 位）与标题
+- 上下文占用：`runtime.estimate_request_tokens()` / `compact_policy.max_context_tokens`，带百分比
+- 调用统计：模型调用次数、工具调用次数、合计 token（同 `/usage`）
+
+---
+
+## `/history`
+
+```
+/history
+```
+
+按序号列出本会话完整日志里的用户消息（不含 `continue`/摘要），每条附事件 id 前 12 位
+与文本预览。配合 `/rewind` 使用：先用 `/history` 找到序号或 id，再 `/rewind` 回退。
+
+---
+
+## `/rewind`
+
+```
+/rewind <序号或id>                          # 交互选择 restore / summarize-up / summarize-from
+/rewind <序号或id> restore                  # 从该条用户消息分叉出一个新会话
+/rewind <序号或id> summarize-up             # 把该条之前的历史压缩成摘要
+/rewind <序号或id> summarize-from           # 把该条到末尾的历史压缩成摘要
+```
+
+- `restore`：`fork_at_user()` 拷贝锚点及之前的源事件到新 `<id>.jsonl`，父会话文件不改、
+  不冻结；**不回滚工作区文件**，只是会话历史分叉。
+- `summarize-up` / `summarize-from`：走跟 `/compact` 一样的压缩入口，只是切点由这条用户
+  消息决定；如果这条消息已经被之前的压缩隐藏（不在当前上下文视图里），需要先 `restore`
+  再压缩。
+
+---
+
+## `/sessions`
+
+```
+/sessions
+```
+
+列出本工作区（`{workspace}` 对应的 `~/.cyan/projects/<路径编码>/`）下已保存的会话：
+当前会话标 `●`，其余标 `○`；`last`（`--continue` 会恢复的那个）额外标注；fork 出来的
+会话显示父会话 id 前缀。只列出，不切换——切换用 `/resume`。
+
+---
+
+## `/resume` {#resume}
+
+```
+/resume                    # 列出可切换的会话（同 /sessions 的格式）
+/resume <id 或前缀>          # 切换到该会话
+```
+
+别名 `/continue`。在 REPL 内部直接切会话，不需要退出进程重新用 `--resume <id>` 启动。
+
+- 参数支持完整 id 或本工作区内唯一的前缀（`resolve_session_id()`）；前缀有歧义或匹配不到
+  都会报错，不切换。
+- 切到当前会话本身是空操作，只提示"已经是当前会话"。
+- **权限模式沿用当前会话，不恢复目标会话磁盘上存的那个**——仿照 Claude Code 的
+  `/resume` 行为，避免切完一个旧会话后权限模式莫名其妙变了。
+- 底层复用 `session.branch.load_session()` + `App.attach_session()`，跟 `/new`、
+  `/rewind restore` 是同一套装配逻辑。
+
+---
+
+## `/new` / `/clear` {#new-clear}
+
+```
+/new
+/clear
+```
+
+两个命令等价：开一个全新会话（新的 `<id>.jsonl`），旧会话的日志原样保留在磁盘上，
+可以用 `/sessions` 找回、`/resume` 切回去。
+
+---
+
+## `/cwd`
+
+```
+/cwd
+```
+
+打印当前工作目录（即启动时 `-w/--workspace` 指定的路径，Agent 只能访问这个目录内的文件）。
+
+---
+
+## `/exit` {#exit}
+
+```
+/exit
+/quit
+```
+
+退出 REPL。

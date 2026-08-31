@@ -56,4 +56,4 @@
 
 - `cyan --continue` / `-c`
 - `cyan --resume` / `--resume <id>`
-- `/history` `/rewind` `/sessions` `/new`（`/clear` 等同 `/new`）
+- `/history` `/rewind` `/sessions` `/resume [<id 或前缀>]`（别名 `/continue`，REPL 内切会话，权限模式沿用当前会话，不恢复目标会话存的）`/new`（`/clear` 等同 `/new`）

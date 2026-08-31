@@ -34,7 +34,7 @@ from .types import (
 if TYPE_CHECKING:
     from ..llm.types import LLMResponse
     from ..session import Session
-    from ..settings import AgentSettings
+    from ..settings import AgentSettings, LoopLimits
     from .runtime import Runtime
 
 
@@ -53,10 +53,15 @@ class AgentLoop:
         return self.runtime.settings
 
     @property
+    def loop_limits(self) -> LoopLimits:
+        """会话中途可用 ``/loop`` 改的运行期副本，跟 ``AgentSettings.loop`` 解耦。"""
+        return self.runtime.loop_limits
+
+    @property
     def tool_ctx(self) -> ToolContext:
         return ToolContext(
             workspace=self.settings.workspace,
-            tool_limits=self.settings.tools,
+            tool_limits=self.runtime.tool_limits,
             workspace_access=WorkspaceAccess(self.session),
         )
 
@@ -74,7 +79,7 @@ class AgentLoop:
         max_overflow_recoveries = 2
 
         try:
-            for iteration in range(1, self.settings.loop.max_iterations + 1):
+            for iteration in range(1, self.loop_limits.max_iterations + 1):
                 yield Thinking(iteration=iteration)
 
                 yield from self._shrink_context()
@@ -121,7 +126,7 @@ class AgentLoop:
 
                 if _is_truncated_finish(response.finish_reason) or not text:
                     incomplete_replies += 1
-                    limit = self.settings.loop.max_consecutive_tool_failures
+                    limit = self.loop_limits.max_consecutive_tool_failures
                     truncated = _is_truncated_finish(response.finish_reason)
                     if incomplete_replies >= limit:
                         kind = "输出被截断" if truncated else "空回复"
@@ -144,7 +149,7 @@ class AgentLoop:
                 return
 
             yield Notice(
-                f"已达到最大轮次上限（{self.settings.loop.max_iterations}），任务可能尚未完成。",
+                f"已达到最大轮次上限（{self.loop_limits.max_iterations}），任务可能尚未完成。",
                 level="warning",
             )
             yield self._finish(StopReason.MAX_ITERATIONS, final_text)
@@ -216,13 +221,13 @@ class AgentLoop:
         allowed = yield from self._resolve_permission(tool, args, call, responded)
         if not allowed:
             repeats = self.session.record_call_fingerprint(call.name, args)
-            if repeats >= self.settings.loop.max_repeated_calls:
+            if repeats >= self.loop_limits.max_repeated_calls:
                 yield Notice(f"重复调用 {call.name} 且无进展，已终止任务。", level="error")
                 return StopReason.REPEATED_CALLS
             return None
 
         repeats = self.session.record_call_fingerprint(call.name, args)
-        if repeats >= self.settings.loop.max_repeated_calls:
+        if repeats >= self.loop_limits.max_repeated_calls:
             self._respond(
                 call,
                 responded,
@@ -233,7 +238,7 @@ class AgentLoop:
             )
             yield Notice(f"重复调用 {call.name} 且无进展，已终止任务。", level="error")
             return StopReason.REPEATED_CALLS
-        if repeats == self.settings.loop.max_repeated_calls - 1:
+        if repeats == self.loop_limits.max_repeated_calls - 1:
             yield Notice(f"{call.name} 已被重复调用 {repeats} 次，请换一种方式。", level="warning")
 
         yield ToolStarted(call_id=call.id, name=call.name, args=args)
@@ -446,7 +451,7 @@ class AgentLoop:
 
     def _check_failure_threshold(self) -> StopReason | None:
         """连续失败达到上限则终止任务；计数在 ``Session.finish_tool_execution`` 里更新。"""
-        if self.session.consecutive_tool_failures >= self.settings.loop.max_consecutive_tool_failures:
+        if self.session.consecutive_tool_failures >= self.loop_limits.max_consecutive_tool_failures:
             return StopReason.TOOL_FAILURES
         return None
 

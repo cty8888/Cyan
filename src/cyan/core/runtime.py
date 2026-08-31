@@ -12,7 +12,7 @@ from ..prompt.stack import PromptStack
 from ..security.permissions import PermissionManager
 from ..security.types import PermissionMode
 from ..session import Session, WorkspaceAccess
-from ..settings import AgentSettings, CompactPolicy
+from ..settings import AgentSettings, CompactPolicy, LoopLimits, ToolLimits
 from ..tools.registry import ToolRegistry
 from ..tools.types import ToolCapability
 from .loop import AgentLoop
@@ -36,6 +36,8 @@ class Runtime:
     settings: AgentSettings
     context_policy: ContextPolicy
     compact_policy: CompactPolicy
+    loop_limits: LoopLimits
+    tool_limits: ToolLimits
     llm: LLMClient
     context_builder: ContextBuilder
     registry: ToolRegistry
@@ -62,6 +64,9 @@ class Runtime:
 
         ``compact_policy`` 由 App 从 ``settings.compact`` 拷贝传入。
         省略时（测试）也拷一份，避免改 Runtime 时写回启动配置。
+        ``loop_limits`` / ``tool_limits`` 同理，从 ``settings.loop`` / ``settings.tools``
+        拷一份挂在 Runtime 上——会话中途用 ``/loop``、``/tools`` 改的是这份副本，
+        不动 ``AgentSettings`` 本体（``/compact``、``/stream`` 已经是这个模式）。
         组窗截断与 ``ToolLimits.max_file_read_chars`` 用同一把尺子，避免工具声称读完、
         模型却只看到前半段。
         ``prompt_stack`` 省略时只加载工作区 ``cyan.md``（不读用户主目录，避免测试误伤）。
@@ -69,6 +74,8 @@ class Runtime:
         context_policy = ContextPolicy(max_tool_result_chars=settings.tools.max_file_read_chars)
         context_builder = ContextBuilder.from_policy(context_policy)
         policy = replace(compact_policy if compact_policy is not None else settings.compact)
+        loop_limits = replace(settings.loop)
+        tool_limits = replace(settings.tools)
         stack = prompt_stack if prompt_stack is not None else PromptStack(
             workspace=settings.workspace,
             home=None,
@@ -79,6 +86,8 @@ class Runtime:
             settings=settings,
             context_policy=context_policy,
             compact_policy=policy,
+            loop_limits=loop_limits,
+            tool_limits=tool_limits,
             llm=llm,
             context_builder=context_builder,
             registry=registry,

@@ -202,7 +202,15 @@ class App:
         return reason
 
     def _render(self, event: Any) -> Any:
-        """把事件画到终端。只有 ``ApprovalRequired`` 会返回 ``ApprovalDecision``。"""
+        """把事件画到终端。只有 ``ApprovalRequired`` 会返回 ``ApprovalDecision``。
+
+        除了两种流式分片事件本身会管理 ``Live`` 的生命周期，其它任何事件渲染前
+        都先收尾一下：流式中途报错（比如 ``LLMError``）会跳过 ``AssistantReply``/
+        ``ToolStarted`` 直接落到 ``Notice``，如果不在这里兜底收尾，没打完的
+        ``Live`` 就会一直挂着，跟这条 ``Notice`` 的输出挤在一起。
+        """
+        if not isinstance(event, (AssistantReplyDelta, ToolCallDelta)):
+            self.renderer.stop_live_preview()
         if isinstance(event, TaskStarted):
             return None
         if isinstance(event, Thinking):

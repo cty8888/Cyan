@@ -33,7 +33,6 @@ class DeepSeekClient(LLMClient):
     """
 
     def __init__(self, llm: LLMSettings, on_retry: Callable[[int, float, str], None] | None = None) -> None:
-        self.model = llm.model
         self._llm = llm
         self._on_retry = on_retry
         self._client = OpenAI(
@@ -42,6 +41,12 @@ class DeepSeekClient(LLMClient):
             timeout=llm.request_timeout,
             max_retries=0,  # 重试逻辑由本类自己掌控，便于向用户反馈
         )
+
+    @property
+    def model(self) -> str:
+        """实时读 ``LLMSettings.model``——跟 ``stream``/``temperature`` 一样不在构造时缓存，
+        这样 ``/model`` 命令改了 ``settings.llm.model`` 之后，下一次调用立刻生效。"""
+        return self._llm.model
 
     def chat(
         self,

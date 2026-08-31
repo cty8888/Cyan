@@ -172,3 +172,14 @@ def test_chat_stream_yields_tool_call_argument_deltas():
     calls = response.message.tool_calls
     assert len(calls) == 1
     assert calls[0].name == "write_file"
+
+
+def test_model_property_reads_live_settings_not_a_cached_copy():
+    """``/model`` 命令改的是同一个 ``LLMSettings`` 对象，下一次调用要读到新值。"""
+    settings = LLMSettings(api_key="k", model="deepseek-chat")
+    client = DeepSeekClient(settings)
+
+    assert client.model == "deepseek-chat"
+
+    settings.model = "deepseek-reasoner"
+    assert client.model == "deepseek-reasoner"

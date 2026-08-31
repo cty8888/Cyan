@@ -7,7 +7,7 @@ from pathlib import Path
 from ...errors import ToolError
 from ...security.paths import display, resolve_path
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 LIST_DIR_NAME = "list_dir"
 LIST_DIR_DESCRIPTION = (
@@ -54,7 +54,6 @@ class ListDirTool(Tool):
     name = LIST_DIR_NAME
     description = LIST_DIR_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.MINIMAL
     parameters = LIST_DIR_PARAMETERS
 
     def run(

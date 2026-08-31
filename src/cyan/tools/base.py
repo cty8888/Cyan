@@ -1,6 +1,6 @@
 """工具契约 —— Tool 基类与参数校验。
 
-新增工具：继承 ``Tool``，填写 name / description / capability / risk / parameters，实现 ``run``；
+新增工具：继承 ``Tool``，填写 name / description / capability / parameters，实现 ``run``；
 JSON Schema 由 ``to_schema()`` 自动导出。
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..errors import InvalidToolArgumentsError
-from .types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from .types import ToolCapability, ToolContext, ToolRunResult
 
 COMPACT_JSON_LIMIT = 120
 JSON_SCHEMA_TYPE_MAP: dict[str, tuple[type, ...]] = {
@@ -34,7 +34,6 @@ class Tool(ABC):
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     capability: ClassVar[ToolCapability] = ToolCapability.READ
-    risk: ClassVar[RiskLevel] = RiskLevel.MINIMAL
     parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
 
     def to_schema(self) -> dict[str, Any]:

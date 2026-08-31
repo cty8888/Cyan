@@ -40,7 +40,10 @@ workspace/
 # 工作区运行时（cyan.md 可提交；记忆与日志留在本机）
 .cyan/logs/
 .cyan/memory/
+.cyan/settings.local.json
 
 # Temporary files
 *.tmp
 *.swp
+
+权限.md

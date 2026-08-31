@@ -20,7 +20,6 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cyan",
         description="Cyan：自主读写文件、执行命令来完成编程任务的命令行智能体",
     )
-    parser.add_argument("-p", "--prompt", help="直接执行单个任务后退出（非交互模式）")
     parser.add_argument("-w", "--workspace", type=Path, help="工作目录，默认为当前目录")
     parser.add_argument("-m", "--model", help="模型名称，默认 deepseek-chat")
     parser.add_argument("--api-key", help="API Key，默认读取环境变量 DEEPSEEK_API_KEY")
@@ -40,8 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["plan", "default", "accept_edits", "bypass"],
-        help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准编辑 / bypass=跳过普通审批（黑名单与敏感操作仍生效），默认 default",
+        choices=["plan", "default", "accept_edits"],
+        help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准普通写入（执行仍要确认），默认 default",
     )
     parser.add_argument(
         "-c",
@@ -61,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """加载配置、初始化日志，然后进入一次性任务或交互 REPL。"""
+    """加载配置、初始化日志，然后进入交互 REPL。"""
     args = build_parser().parse_args(argv)
     console = Console()
     logger = get_logger()
@@ -101,8 +100,6 @@ def main(argv: list[str] | None = None) -> int:
             continue_last=bool(args.continue_last),
             permission_mode_override=PermissionMode(args.mode) if args.mode else None,
         )
-        if args.prompt:
-            return app.run_once(args.prompt)
         return app.run_interactive()
     except AgentError as exc:
         console.print(f"[bold red]错误[/] {exc}")

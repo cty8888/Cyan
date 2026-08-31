@@ -37,6 +37,16 @@ _ENV_MAPPING = {
 _NESTED_KEYS = frozenset({"llm", "loop", "tools", "cli", "compact"})
 
 
+def _load_env_files(workspace: Any) -> None:
+    """先读进程 CWD 的 ``.env``，再用工作区 ``.env`` 覆盖，让 ``-w`` 跟对项目密钥。"""
+    load_dotenv()
+    if workspace is None or workspace == "":
+        return
+    env_file = Path(workspace).expanduser() / ".env"
+    if env_file.is_file():
+        load_dotenv(env_file, override=True)
+
+
 def _field_names(cls: type) -> frozenset[str]:
     """从 dataclass 反射字段名，避免与各域设置手工同步一份名单。"""
     return frozenset(f.name for f in dataclass_fields(cls))
@@ -60,7 +70,7 @@ _KNOWN_FIELDS = (
 
 def load_settings(**overrides: Any) -> AgentSettings:
     """按 默认值 < 环境变量 < 调用方覆盖 的顺序装配。"""
-    load_dotenv()
+    _load_env_files(overrides.get("workspace"))
 
     flat: dict[str, Any] = {"workspace": Path.cwd()}
     nested: dict[str, Any] = {}

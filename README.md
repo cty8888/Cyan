@@ -12,18 +12,14 @@ Agent Loop、工具系统、模型输出解析、安全策略、终止条件与�
 uv sync
 echo "DEEPSEEK_API_KEY=sk-..." > .env
 
-# 交互模式
+# 交互 REPL
 uv run cyan
-
-# 单任务模式
-uv run cyan -p "给 utils.py 加上类型标注并跑一遍测试"
 ```
 
 常用参数：
 
 | 参数 | 说明 |
 | --- | --- |
-| `-p, --prompt` | 执行单个任务后退出。写入/执行仍会弹出审批（`y`/`n`/`a`）；无人值守请加 `--mode bypass`（黑名单与敏感操作仍生效） |
 | `-w, --workspace` | 工作目录，默认当前目录；Agent 只能访问该目录内的文件 |
 | `-m, --model` | 模型名称，默认 `deepseek-chat` |
 | `-c, --continue` | 恢复本工作区最近一次会话（`~/.cyan/projects/.../last`） |
@@ -63,18 +59,18 @@ uv run cyan -p "给 utils.py 加上类型标注并跑一遍测试"
 
 ## 工具
 
-| 工具 | 类型 | 风险 | 说明 |
-| --- | --- | --- | --- |
-| `list_dir` | 只读 | 极低 | 树形列出目录，自动跳过 `.git`、`node_modules` 等 |
-| `read_file` | 只读 | 低 | 带行号读取，支持 offset/limit 分段 |
-| `glob` | 只读 | 低 | 按文件名 glob 查找，支持 `**` 与一层花括号，按 mtime 最多 100 条 |
-| `grep` | 只读 | 低 | 基于 ripgrep 搜内容；默认只返回路径，遵守 `.gitignore` |
-| `memory_list` | 只读 | 极低 | 列出 `.cyan/memory/` 中的记忆文件 |
-| `memory_read` | 只读 | 低 | 读取某一个记忆 md |
-| `memory_write` | 写入 | 极低 | 写入四类笔记之一并更新索引；非 Plan 下免审批 |
-| `write_file` | 写入 | 中 | 整文件写入，自动创建父目录 |
-| `edit_file` | 写入 | 中 | 精确字符串替换，要求匹配唯一 |
-| `bash` | 执行 | 高 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
+| 工具 | 类型 | 说明 |
+| --- | --- | --- |
+| `list_dir` | 只读 | 树形列出目录，自动跳过 `.git`、`node_modules` 等 |
+| `read_file` | 只读 | 带行号读取，支持 offset/limit 分段 |
+| `glob` | 只读 | 按文件名 glob 查找，支持 `**` 与一层花括号，按 mtime 最多 100 条 |
+| `grep` | 只读 | 基于 ripgrep 搜内容；默认只返回路径，遵守 `.gitignore` |
+| `memory_list` | 只读 | 列出 `.cyan/memory/` 中的记忆文件 |
+| `memory_read` | 只读 | 读取某一个记忆 md |
+| `memory_write` | 写入 | 写入四类笔记之一并更新索引；非 Plan 下免审批 |
+| `write_file` | 写入 | 整文件写入，自动创建父目录 |
+| `edit_file` | 写入 | 精确字符串替换，要求匹配唯一 |
+| `bash` | 执行 | 唯一的 shell 执行入口：测试、构建、git、脚本都走它 |
 
 `bash` 每次调用都是独立新进程，不保留环境变量或别名，`export` 不会带到下一次调用；
 但工作目录会在调用之间延续——命令里 `cd` 到哪，下一次调用就从哪继续，越出工作目录会被自动拉回工作目录根。
@@ -82,15 +78,13 @@ system prompt 里会给出本机 Python 解释器的绝对路径，避免模型�
 
 ## 安全模型
 
-三道防线，从外到内依次生效：
+判定顺序：工作区沙箱 → `deny` → 关键删除询问 → `ask` → 只读 bash / allow → 三种模式与会话白名单。
 
-1. **沙箱**：文件工具与 bash 里能看清的路径（重定向、`cat`/`cd` 等）`resolve()` 后必须落在工作目录内，`..` 与符号链接逃逸都会被拒绝。`python -c` 这类看不清目标的命令每次都要确认，且不能「始终允许」。
-2. **黑名单**：`rm -rf /`、`sudo`、`mkfs`、`curl | sh` 等致命命令直接拒绝，任何授权都无法绕过。
-3. **分级审批**：只读操作自动放行；写入与执行需确认，可选 `y` 允许 / `n` 拒绝 / `a` 本会话始终允许同类操作
-   （写入按目录前缀，执行按命令名，而不是整个工具一次放行）。
-   `.env`、`.git/`、私钥等敏感文件的写入强制逐次确认，不受「始终允许」影响。
+1. **工作区沙箱**：路径必须落在工作区内。关键 `rm` / `rmdir`（`/`、顶级目录、家目录、工作区或其父目录，含 `$VAR/*` 与命令替换）不当成区外拒绝，改为强制询问：`allow` 不能预先批准，但可以点 `y`。
+2. **声明式规则**（`allow` / `ask` / `deny`）：内置 [`defaults.json`](src/cyan/security/defaults.json) + `~/.cyan/settings.json` + 项目 `.cyan/settings.json` + `.cyan/settings.local.json`。写法：`Bash(pytest *)` / `Read(.env)` / `Edit(src/**)` / `WebFetch(domain:example.com)`。`Tool(param:value)` 按顶级输入参数匹配（仅 deny/ask，例如 `Bash(timeout_ms:1)`）；主要内容字段（`command` / `path` / `url`）不能这么写。`Write` 裸名仍匹配写入工具；`Write(路径)` 会收下但不做路径检查，请用 `Edit`。deny 压过 allow；`ask` 强制确认，没有「始终允许」。`sudo` 是内置 deny；`.env`、私钥、写 `.git` / `.vscode` / `.cyan` 是内置 ask。路径指定符支持 `src/**`（相对工作区）、`/src/**`（相对设置源）、`~/…`、`//绝对路径`。
+3. **模式**：规则没覆盖时，只读 bash 所有模式免审批；Plan 拒写、AcceptEdits 放行普通写以及工作区内文件系统命令（受保护路径仍要确认）、Default 写入与非只读执行需确认。`y` 本次 / `n` 拒绝 / `a` 始终允许（写文件只活会话；bash 按子命令写入 local，最多 5 条）。`python -c` 这类看不清目标的命令走普通执行审批，`allow` 可以放行。`deny Read(.env)` 会连带挡住写入同一路径。
 
-写操作在确认前会展示完整 diff。
+`/permissions` 列出规则；`allow|ask|deny` 写入 local；`remove` 可删 local / 项目 / 用户，不能删内置。写操作在确认前会展示完整 diff。
 
 ## 架构
 
@@ -105,7 +99,7 @@ prompt/     Prompt Layer：identity + cyan.md + MEMORY.md 索引
 memory/     项目级 Auto Memory 存储与任务结束提取
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
 tools/      工具契约、注册表、文件系统与 bash 执行工具
-security/   路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议
+security/   路径沙箱、硬地板、声明式规则、权限管理与审批协议
 settings/   按域拆分的运行时设置（CLI 参数 > 环境变量 > 默认值）
 logutil.py  标准库 logging（默认只写文件）
 errors.py   异常体系
@@ -120,7 +114,7 @@ Agent Loop 是一个 generator：向外 yield 事件，通过 `send()` 接收审
 
 ## 扩展
 
-新增工具：继承 `Tool`，填 `name`/`description`/`capability`/`risk`/`parameters`，实现 `run()`，
+新增工具：继承 `Tool`，填 `name`/`description`/`capability`/`parameters`，实现 `run()`，
 然后在 `tools/registry.py` 的 `build_default_registry()` 里注册一行。JSON Schema 会自动导出给模型。
 
 ## 开发

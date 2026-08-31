@@ -7,7 +7,7 @@ import io
 from ...errors import ToolError
 from ...security.paths import display, resolve_path
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 READ_FILE_NAME = "read_file"
 READ_FILE_DESCRIPTION = (
@@ -44,7 +44,6 @@ class ReadFileTool(Tool):
     name = READ_FILE_NAME
     description = READ_FILE_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.LOW
     parameters = READ_FILE_PARAMETERS
 
     def run(

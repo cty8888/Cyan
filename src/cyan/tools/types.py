@@ -21,24 +21,6 @@ class ToolCapability(Enum):
     EXEC = "exec"
 
 
-class RiskLevel(Enum):
-    """工具固有风险，与 ``ToolCapability`` 是正交的两轴。
-
-    - ``capability`` 回答「这是读、写还是执行」——决定 Plan / AcceptEdits / Bypass
-      怎么分流。
-    - ``risk`` 回答「这次操作有多危险」。真正参与判定的是 ``CRITICAL``：即使 Bypass、
-      AcceptEdits 或本会话始终允许，也强制逐次确认。其余级别用于审批面板展示，
-      让用户看到比 capability 更细的风险提示（例如 bash 是 EXEC + HIGH，
-      未来的 ``delete_file`` 可以是 WRITE + CRITICAL，而不必改 capability 语义）。
-    """
-
-    MINIMAL = "minimal"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
 @dataclass
 class ToolRunResult:
     """工具单次执行结果。

@@ -112,6 +112,22 @@ def test_skips_sensitive_files(env, tmp_path):
     assert "skipped 1 sensitive files" in result.content
 
 
+def test_glob_does_not_skip_vscode(env, tmp_path):
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "settings.json").write_text("{}\n", encoding="utf-8")
+    result = env.registry.execute("glob", {"pattern": "**/*"}, env.ctx)
+    assert result.ok
+    assert ".vscode/settings.json" in result.content
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    result = env.registry.execute("glob", {"pattern": "**/*"}, env.ctx)
+    assert result.ok
+    assert "app.py" in result.content
+    assert ".env" not in result.content.splitlines()
+    assert "skipped 1 sensitive files" in result.content
+
+
 def test_ssh_directory_search_drops_keys(env, tmp_path):
     ssh = tmp_path / ".ssh"
     ssh.mkdir()

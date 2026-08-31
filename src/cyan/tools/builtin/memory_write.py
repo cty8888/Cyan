@@ -7,7 +7,7 @@ from ...memory.settings import auto_memory_enabled
 from ...memory.store import write_entry
 from ...memory.types import MemoryEntry, MemoryKind
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 MEMORY_WRITE_NAME = "memory_write"
 MEMORY_WRITE_DESCRIPTION = (
@@ -45,7 +45,6 @@ class MemoryWriteTool(Tool):
     name = MEMORY_WRITE_NAME
     description = MEMORY_WRITE_DESCRIPTION
     capability = ToolCapability.WRITE
-    risk = RiskLevel.MINIMAL
     parameters = MEMORY_WRITE_PARAMETERS
 
     def run(

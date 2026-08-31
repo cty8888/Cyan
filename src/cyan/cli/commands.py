@@ -96,7 +96,7 @@ def _cmd_tools(app: App, args: list[str]) -> bool:
     for tool in app.registry:
         app.renderer.console.print(
             f"  [bold]{tool.name}[/] "
-            f"[dim]({tool.capability.value}/{tool.risk.value})[/] — {tool.description}"
+            f"[dim]({tool.capability.value})[/] — {tool.description}"
         )
     return False
 
@@ -104,17 +104,68 @@ def _cmd_tools(app: App, args: list[str]) -> bool:
 def _cmd_mode(app: App, args: list[str]) -> bool:
     console = app.renderer.console
     if len(args) != 1:
-        console.print("[yellow]用法：/mode plan|default|accept_edits|bypass[/]")
+        console.print("[yellow]用法：/mode plan|default|accept_edits[/]")
         return False
     try:
         mode = PermissionMode(args[0])
     except ValueError:
-        console.print("[yellow]无效权限模式, 可选: plan / default / accept_edits / bypass[/]")
+        console.print("[yellow]无效权限模式, 可选: plan / default / accept_edits[/]")
         return False
     app.session.permissions.permission_mode = mode
     app.session.persist_head()
     console.print(f"[dim]已切换至 {MODE_LABELS[mode]}[/]")
     logger.info("切换权限模式：%s", mode.value)
+    return False
+
+
+def _cmd_permissions(app: App, args: list[str]) -> bool:
+    """列出或增删声明式规则。新增写入 local；删除可动 local / 项目 / 用户。"""
+    from ..security.rule_syntax import parse_rule
+    from ..security.settings_file import add_local_rule, remove_rule
+
+    console = app.renderer.console
+    if not args:
+        rules = app.permissions.ruleset.rules
+        if not rules:
+            console.print("[dim]当前没有权限规则[/]")
+            return False
+        for rule in rules:
+            lock = "" if rule.removable else "  [dim](内置)[/]"
+            console.print(f"  [bold]{rule.kind:<5}[/] {rule.raw:<28} [dim]{rule.source}[/]{lock}")
+        return False
+
+    action = args[0].lower()
+    raw = " ".join(args[1:]).strip()
+    if action in {"allow", "ask", "deny"}:
+        if not raw:
+            console.print("[yellow]用法：/permissions allow|ask|deny <规则>[/]")
+            return False
+        try:
+            parse_rule(raw)
+        except ValueError as exc:
+            console.print(f"[yellow]{exc}[/]")
+            return False
+        add_local_rule(app.settings.workspace, action, raw)  # type: ignore[arg-type]
+        app.permissions.reload()
+        console.print(f"[dim]已写入 local：{action} {raw}[/]")
+        logger.info("permissions %s %s", action, raw)
+        return False
+    if action == "remove":
+        if not raw:
+            console.print("[yellow]用法：/permissions remove <规则>[/]")
+            return False
+        status, source = remove_rule(app.settings.workspace, raw, home=app.permissions.home)
+        if status == "builtin":
+            console.print("[yellow]不能删除内置规则[/]")
+            return False
+        if status == "missing":
+            console.print(f"[yellow]没有可删除的规则 {raw}[/]")
+            return False
+        app.permissions.reload()
+        console.print(f"[dim]已从 {source} 删除 {raw}[/]")
+        logger.info("permissions remove %s from %s", raw, source)
+        return False
+    console.print("[yellow]用法：/permissions [allow|ask|deny|remove] <规则>[/]")
     return False
 
 
@@ -300,7 +351,15 @@ def build_default_commands() -> CommandRegistry:
     registry.register(SlashCommand("/help", "/help", "显示本帮助", _cmd_help))
     registry.register(SlashCommand("/tools", "/tools", "列出已注册的工具", _cmd_tools))
     registry.register(
-        SlashCommand("/mode", "/mode <模式>", "切换权限模式：plan / default / accept_edits / bypass", _cmd_mode)
+        SlashCommand("/mode", "/mode <模式>", "切换权限模式：plan / default / accept_edits", _cmd_mode)
+    )
+    registry.register(
+        SlashCommand(
+            "/permissions",
+            "/permissions",
+            "列出或增删权限规则（allow / ask / deny）",
+            _cmd_permissions,
+        )
     )
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
     registry.register(SlashCommand("/instructions", "/instructions", "列出已加载的指令层（cyan.md）", _cmd_instructions))

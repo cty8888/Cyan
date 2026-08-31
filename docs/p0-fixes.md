@@ -225,11 +225,11 @@
 
 **原因**：判定链把「只读」当成一律安全。
 
-**修复**：`read_file` / `list_dir` 命中 `sensitive_path` 时 `force=True` 确认，Plan / Bypass 也不能跳过。普通源码读取仍自动放行。
+**修复**：`read_file` / `list_dir` 命中 `sensitive_path` 时 `force=True` 确认，Plan / AcceptEdits 也不能跳过。普通源码读取仍自动放行。
 
 **改动**：`src/cyan/security/permissions.py`
 
-**测试**：`tests/test_permissions.py` — `test_read_env_is_forced_in_plan`、`test_read_env_is_forced_in_bypass`、`test_read_id_rsa_is_forced`
+**测试**：`tests/test_permissions.py` — `test_read_env_is_forced_in_plan`、`test_read_env_is_forced_in_accept_edits`、`test_read_id_rsa_is_forced`
 
 ---
 

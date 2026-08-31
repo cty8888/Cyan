@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import sys
 
+from pathlib import Path
+
 from cyan.settings import ToolLimits
+
+from .conftest import eval_perm
 
 
 def test_echo(env):
@@ -66,14 +70,34 @@ def test_newline_cd_outside_then_write_is_rejected(env, tmp_path):
     assert not (tmp_path / "escaped.txt").exists()
 
 
-def test_opaque_cd_outside_still_resets_cwd(env, tmp_path):
-    """``$HOME`` 解析不到真实路径，执行层拦不住；结束后仍把 cwd 拉回。"""
+def test_opaque_cd_outside_is_rejected(env, tmp_path):
+    """解析不到的 cd 目标直接拒绝，不能先在区外跑再把 cwd 拉回。"""
     result = env.registry.execute("bash", {"command": 'cd "$HOME" && pwd'}, env.ctx)
-    assert result.ok
-    assert "已重置回工作目录根" in result.content
+    assert not result.ok
+    assert "无法确认" in (result.error or result.content or "")
     result = env.registry.execute("bash", {"command": "pwd"}, env.ctx)
     assert result.ok
     assert str(tmp_path.resolve()) in result.content
+
+
+def test_pushd_outside_write_is_rejected(env, tmp_path):
+    result = env.registry.execute(
+        "bash", {"command": "pushd /tmp; echo x > cyan-pushd-leak.txt; popd"}, env.ctx
+    )
+    assert not result.ok
+    assert not Path("/tmp/cyan-pushd-leak.txt").exists()
+
+
+def test_subshell_cd_outside_write_is_rejected(env, tmp_path):
+    result = env.registry.execute("bash", {"command": "(cd /tmp; echo x > cyan-subshell-leak.txt)"}, env.ctx)
+    assert not result.ok
+    assert not Path("/tmp/cyan-subshell-leak.txt").exists()
+
+
+def test_builtin_cd_outside_write_is_rejected(env, tmp_path):
+    result = env.registry.execute("bash", {"command": "builtin cd /tmp; echo x > cyan-builtin-leak.txt"}, env.ctx)
+    assert not result.ok
+    assert not Path("/tmp/cyan-builtin-leak.txt").exists()
 
 
 def test_redirect_outside_is_rejected(env):
@@ -93,19 +117,27 @@ def test_env_c_outside_is_rejected(env):
     assert "之外" in (result.error or result.content or "")
 
 
-def test_write_git_dir_is_rejected(env, tmp_path):
-    (tmp_path / ".git").mkdir(exist_ok=True)
-    result = env.registry.execute("bash", {"command": "echo hacked > .git/config"}, env.ctx)
-    assert not result.ok
-    assert not (tmp_path / ".git" / "config").exists()
+def test_write_git_dir_is_forced(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "echo hacked > .git/config"},
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
 
 
-def test_sed_inplace_git_is_rejected(env, tmp_path):
+def test_sed_inplace_git_is_forced(env, tmp_path):
     git = tmp_path / ".git"
     git.mkdir(exist_ok=True)
     (git / "config").write_text("old\n", encoding="utf-8")
-    result = env.registry.execute("bash", {"command": "sed -i 's/old/new/' .git/config"}, env.ctx)
-    assert not result.ok
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "sed -i 's/old/new/' .git/config"},
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
     assert (git / "config").read_text(encoding="utf-8") == "old\n"
 
 

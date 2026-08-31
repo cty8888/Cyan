@@ -29,7 +29,7 @@ from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
 from ..memory.settings import auto_memory_enabled
 from ..prompt.stack import PromptStack
-from ..security.permissions import PermissionManager
+from ..security.permissions import PermissionManager, initial_permission_mode
 from ..security.types import PermissionMode
 from ..session import Session
 from ..session.paths import cyan_home
@@ -60,7 +60,8 @@ class App:
     ) -> None:
         self.settings = settings
         self.renderer = Renderer(console)
-        self.permissions = PermissionManager(settings.workspace)
+        home = cyan_home()
+        self.permissions = PermissionManager(settings.workspace, home=home)
         self.registry = build_default_registry()
         self.commands: CommandRegistry = build_default_commands()
         self._permission_mode_override = permission_mode_override
@@ -102,7 +103,11 @@ class App:
         session = Session.create(
             workspace=self.settings.workspace,
             system_prompt=build_system_prompt(self.settings.workspace),
-            permission_mode=self.settings.cli.permission_mode,
+            permission_mode=initial_permission_mode(
+                self.settings.cli.permission_mode,
+                override=self._permission_mode_override,
+                configured=self.permissions.configured_mode,
+            ),
             store=store,
             model=self.settings.llm.model,
         )
@@ -136,11 +141,6 @@ class App:
         return session
 
     # ------------------------------------------------------------------ 入口
-    def run_once(self, task: str) -> int:
-        """非交互模式：执行单个任务后退出。"""
-        reason = self._execute(task)
-        return 0 if reason is StopReason.COMPLETED else 1
-
     def run_interactive(self) -> int:
         """REPL：读一行任务或斜杠命令，直到 /exit 或 Ctrl-D。"""
         self.renderer.banner(

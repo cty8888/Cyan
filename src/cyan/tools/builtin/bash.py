@@ -14,7 +14,7 @@ from ...security.paths import display
 from ...security.rules import blocked_command, restricted_command
 from ..base import Tool
 from ..process import run_process
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 BASH_NAME = "bash"
 BASH_DESCRIPTION = (
@@ -44,7 +44,6 @@ class BashTool(Tool):
     name = BASH_NAME
     description = BASH_DESCRIPTION
     capability = ToolCapability.EXEC
-    risk = RiskLevel.HIGH
     parameters = BASH_PARAMETERS
 
     def describe(self, args: dict[str, Any], workspace: Path, workspace_access=None) -> tuple[str, str | None, str]:
@@ -53,18 +52,17 @@ class BashTool(Tool):
 
     def run(self, ctx: ToolContext, command: str, timeout_ms: int = BASH_DEFAULT_TIMEOUT_MS) -> ToolRunResult:
         # 权限层已经拦过一遍；这里再拦一次，避免有人绕过 PermissionManager 直接 execute。
-        blocked = blocked_command(command)
-        if blocked:
-            raise BlockedCommandError(blocked)
-        restricted = restricted_command(command)
-        if restricted:
-            raise SecurityError(restricted)
-
         cwd = ctx.workspace_access.bash_cwd or ctx.workspace
         if not cwd.is_dir():
             # 上次记录的目录已不存在，退回工作目录根
             cwd = ctx.workspace
             ctx.workspace_access.bash_cwd = None
+        blocked = blocked_command(command, workspace=ctx.workspace, cwd=cwd)
+        if blocked:
+            raise BlockedCommandError(blocked)
+        restricted = restricted_command(command)
+        if restricted:
+            raise SecurityError(restricted)
         reject_unsafe_paths(ctx.workspace, command, cwd)
 
         timeout_ms = min(max(1, int(timeout_ms)), ctx.tool_limits.max_bash_timeout_ms)

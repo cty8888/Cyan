@@ -28,7 +28,6 @@ MODE_LABELS = {
     PermissionMode.PLAN: "Plan (只读规划)",
     PermissionMode.DEFAULT: "Default (默认)",
     PermissionMode.ACCEPT_EDITS: "AcceptEdits (自动批准编辑)",
-    PermissionMode.BYPASS: "Bypass (跳过普通审批)",
 }
 STOP_REASON_TEXT = {
     StopReason.COMPLETED: "任务结束",
@@ -43,13 +42,6 @@ _CAPABILITY_LABEL = {
     "read": "只读",
     "write": "写入",
     "exec": "执行",
-}
-_RISK_LABEL = {
-    "minimal": "极低风险",
-    "low": "低风险",
-    "medium": "中风险",
-    "high": "高风险",
-    "critical": "极高风险",
 }
 _DECISION_BY_KEY = {
     "y": ApprovalDecision.ALLOW_ONCE,
@@ -139,8 +131,7 @@ class Renderer:
         ``force=True`` 时没有「始终允许」。EOF 视为拒绝；Ctrl-C 向上抛，由 CLI 中断整次任务。
         """
         capability = _CAPABILITY_LABEL.get(request.capability, request.capability)
-        risk = _RISK_LABEL.get(request.risk, request.risk)
-        title = f"需要确认 · {capability} · {risk}"
+        title = f"需要确认 · {capability}"
         body: list[Any] = [Text.from_markup(f"[bold]{request.summary}[/]")]
 
         if request.detail:

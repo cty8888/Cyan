@@ -11,7 +11,7 @@ from ...security.paths import display, resolve_path
 from ...security.rules import sensitive_path
 from ..base import Tool
 from ..process import run_process
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 GREP_NAME = "grep"
 GREP_DESCRIPTION = (
@@ -93,7 +93,6 @@ class GrepTool(Tool):
     name = GREP_NAME
     description = GREP_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.LOW
     parameters = GREP_PARAMETERS
 
     def run(

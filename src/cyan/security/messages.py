@@ -26,3 +26,8 @@ ENV_DUMP_MSG = "会打印进程环境变量，可能包含 API Key，每次都�
 UNBOUNDED_READ_MSG = (
     "这条命令含通配符或递归搜索，可能读到 .env / 密钥，每次都需要确认。"
 )
+
+UNRESOLVED_CHDIR_MSG = (
+    "无法确认 cd / pushd 的目标目录（例如变量或 popd），"
+    "拒绝执行以免越出工作区。"
+)

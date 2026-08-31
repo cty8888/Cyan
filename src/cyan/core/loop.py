@@ -68,6 +68,7 @@ class AgentLoop:
         final_text = ""
         schemas = self.runtime.schemas_for_mode()
         incomplete_replies = 0
+        max_overflow_recoveries = 2
 
         try:
             for iteration in range(1, self.settings.loop.max_iterations + 1):
@@ -75,26 +76,28 @@ class AgentLoop:
 
                 yield from self._shrink_context()
 
-                try:
-                    response = self.runtime.call_llm(self.runtime.messages_for_request(), tools=schemas)
-                except LLMContextOverflowError as exc:
-                    recovered = yield from self._compact_after_overflow()
-                    if not recovered:
-                        yield Notice(f"模型调用失败：{exc}", level="error")
-                        yield self._finish(StopReason.FATAL_ERROR, final_text)
-                        return
+                overflow_recoveries = 0
+                while True:
                     try:
                         response = self.runtime.call_llm(
                             self.runtime.messages_for_request(), tools=schemas
                         )
-                    except LLMError as retry_exc:
-                        yield Notice(f"模型调用失败：{retry_exc}", level="error")
+                        break
+                    except LLMContextOverflowError as exc:
+                        overflow_recoveries += 1
+                        if overflow_recoveries > max_overflow_recoveries:
+                            yield Notice(f"模型调用失败：{exc}", level="error")
+                            yield self._finish(StopReason.FATAL_ERROR, final_text)
+                            return
+                        recovered = yield from self._compact_after_overflow()
+                        if not recovered:
+                            yield Notice(f"模型调用失败：{exc}", level="error")
+                            yield self._finish(StopReason.FATAL_ERROR, final_text)
+                            return
+                    except LLMError as exc:
+                        yield Notice(f"模型调用失败：{exc}", level="error")
                         yield self._finish(StopReason.FATAL_ERROR, final_text)
                         return
-                except LLMError as exc:
-                    yield Notice(f"模型调用失败：{exc}", level="error")
-                    yield self._finish(StopReason.FATAL_ERROR, final_text)
-                    return
 
                 self.session.record_usage(response.usage)
                 self.session.add(response.message)

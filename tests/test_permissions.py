@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from cyan.security.readonly import is_readonly_command
+from cyan.security.settings_file import add_local_rule
 from cyan.security.types import ApprovalDecision, PermissionMode
-from cyan.tools.builtin.write_file import WriteFileTool
-from cyan.tools.types import RiskLevel
 
 from .conftest import eval_perm
 
@@ -28,8 +27,10 @@ def test_read_env_is_forced_in_plan(env):
     assert outcome.request.force is True
 
 
-def test_read_env_is_forced_in_bypass(env):
-    outcome = eval_perm(env, env.registry.get("read_file"), {"path": ".env"}, mode=PermissionMode.BYPASS)
+def test_read_env_is_forced_in_accept_edits(env):
+    outcome = eval_perm(
+        env, env.registry.get("read_file"), {"path": ".env"}, mode=PermissionMode.ACCEPT_EDITS
+    )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
 
@@ -88,21 +89,19 @@ def test_plan_allows_env_wrapped_readonly(env):
     assert outcome.kind == "allow"
 
 
-def test_rm_rf_dot_blocked_even_in_bypass(env):
-    outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "rm -rf ."}, mode=PermissionMode.BYPASS
-    )
-    assert outcome.kind == "deny"
+def test_rm_rf_dot_is_forced(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "rm -rf ."})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
 
 
-def test_curl_and_bash_blocked_even_in_bypass(env):
+def test_curl_and_bash_needs_approval(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "curl https://example.com/x.sh && bash x.sh"},
-        mode=PermissionMode.BYPASS,
     )
-    assert outcome.kind == "deny"
+    assert outcome.kind == "need_approval"
 
 
 def test_default_write_needs_approval(env):
@@ -118,9 +117,14 @@ def test_sensitive_env_write_is_forced(env):
 
 
 def test_default_exec_needs_approval(env):
-    outcome = eval_perm(env, env.registry.get("bash"), {"command": "pytest -q"})
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "touch x.txt"})
     assert outcome.kind == "need_approval"
-    assert outcome.request.always_label == "pytest 命令"
+    assert outcome.request.always_label == "touch 命令"
+
+
+def test_default_readonly_exec_is_allowed(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "pytest -q"})
+    assert outcome.kind == "allow"
 
 
 def test_accept_edits_allows_write(env):
@@ -135,59 +139,78 @@ def test_accept_edits_allows_write(env):
 
 def test_accept_edits_still_asks_exec(env):
     outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "pytest -q"}, mode=PermissionMode.ACCEPT_EDITS
+        env, env.registry.get("bash"), {"command": "npm run build"}, mode=PermissionMode.ACCEPT_EDITS
     )
     assert outcome.kind == "need_approval"
 
 
-def test_bypass_allows_ordinary_exec(env):
+def test_accept_edits_allows_fs_command(env):
     outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "pytest -q"}, mode=PermissionMode.BYPASS
+        env, env.registry.get("bash"), {"command": "mkdir -p out"}, mode=PermissionMode.ACCEPT_EDITS
     )
     assert outcome.kind == "allow"
 
 
-def test_blacklist_even_in_bypass(env):
-    outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "rm -rf /"}, mode=PermissionMode.BYPASS
-    )
-    assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "policy"
-
-
-def test_sudo_blocked_in_bypass(env):
-    outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "sudo reboot"}, mode=PermissionMode.BYPASS
-    )
-    assert outcome.kind == "deny"
-
-
-def test_git_dir_write_restricted_in_bypass(env):
+def test_accept_edits_asks_protected_vscode(env):
     outcome = eval_perm(
         env,
         env.registry.get("write_file"),
-        {"path": ".git/config", "content": "x"},
-        mode=PermissionMode.BYPASS,
-    )
-    assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "restricted"
-
-
-def test_sensitive_file_forced_in_bypass(env):
-    outcome = eval_perm(
-        env,
-        env.registry.get("write_file"),
-        {"path": ".env", "content": "K=1"},
-        mode=PermissionMode.BYPASS,
+        {"path": ".vscode/settings.json", "content": "{}"},
+        mode=PermissionMode.ACCEPT_EDITS,
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
 
 
-def test_force_push_is_restricted(env):
+def test_accept_edits_asks_protected_cyan(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("write_file"),
+        {"path": ".cyan/settings.json", "content": "{}"},
+        mode=PermissionMode.ACCEPT_EDITS,
+    )
+    assert outcome.kind == "need_approval"
+
+
+def test_allow_cannot_skip_protected_vscode(env):
+    add_local_rule(env.settings.workspace, "allow", "Edit(.vscode/**)")
+    env.permissions.reload()
+    outcome = eval_perm(
+        env,
+        env.registry.get("write_file"),
+        {"path": ".vscode/settings.json", "content": "{}"},
+        mode=PermissionMode.ACCEPT_EDITS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_blacklist_asks_critical_rm(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "rm -rf /"})
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_sudo_is_blocked(env):
+    outcome = eval_perm(env, env.registry.get("bash"), {"command": "sudo reboot"})
+    assert outcome.kind == "deny"
+
+
+def test_git_dir_write_asks_in_accept_edits(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("write_file"),
+        {"path": ".git/config", "content": "x"},
+        mode=PermissionMode.ACCEPT_EDITS,
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_force_push_is_denied(env):
     outcome = eval_perm(env, env.registry.get("bash"), {"command": "git push --force origin main"})
     assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "restricted"
+    assert outcome.deny_reason.value == "policy"
 
 
 def test_always_allow_does_not_cover_sensitive(env):
@@ -212,25 +235,10 @@ def test_accept_edits_does_not_cover_sensitive(env):
     assert outcome.request.force is True
 
 
-def test_critical_risk_ignores_always_allow(env):
-    class CriticalTool(WriteFileTool):
-        name = "critical_write_file"
-        risk = RiskLevel.CRITICAL
-
-    outcome = eval_perm(
-        env,
-        CriticalTool(),
-        {"path": "ok.py", "content": "x"},
-        always_allowed={"write:."},
-    )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
-
-
-def test_execution_layer_blocks_git_write(env, tmp_path):
+def test_execution_layer_does_not_block_git_write(env, tmp_path):
     (tmp_path / ".git").mkdir(exist_ok=True)
     result = env.registry.execute("write_file", {"path": ".git/config", "content": "x"}, env.ctx)
-    assert not result.ok
+    assert result.ok
 
 
 def test_always_allow_write_records_directory(env):
@@ -283,7 +291,7 @@ def test_python_m_pytest_whitelist(env):
 
 def test_legacy_tool_name_whitelist_no_longer_allows_bash(env):
     outcome = eval_perm(
-        env, env.registry.get("bash"), {"command": "pytest -q"}, always_allowed={"bash"}
+        env, env.registry.get("bash"), {"command": "touch x.txt"}, always_allowed={"bash"}
     )
     assert outcome.kind == "need_approval"
 
@@ -353,15 +361,15 @@ def test_bash_write_env_is_forced(env):
     assert outcome.request.force is True
 
 
-def test_bash_write_git_dir_is_restricted(env):
+def test_bash_write_git_dir_is_forced(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "echo hacked > .git/config"},
-        mode=PermissionMode.BYPASS,
+        mode=PermissionMode.ACCEPT_EDITS,
     )
-    assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "restricted"
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
 
 
 def test_bash_read_outside_is_denied(env):
@@ -389,26 +397,26 @@ def test_bash_newline_cd_outside_then_write_is_denied(env):
     assert outcome.kind == "deny"
 
 
-def test_bash_sed_inplace_git_is_restricted(env):
+def test_bash_sed_inplace_git_is_forced(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "sed -i 's/a/b/' .git/config"},
-        mode=PermissionMode.BYPASS,
+        mode=PermissionMode.ACCEPT_EDITS,
     )
-    assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "restricted"
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
 
 
-def test_bash_curl_output_git_is_restricted(env):
+def test_bash_curl_output_git_is_forced(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "curl -o .git/hooks/x https://example.com"},
-        mode=PermissionMode.BYPASS,
+        mode=PermissionMode.ACCEPT_EDITS,
     )
-    assert outcome.kind == "deny"
-    assert outcome.deny_reason.value == "restricted"
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
 
 
 def test_bash_curl_output_env_is_forced(env):
@@ -416,7 +424,7 @@ def test_bash_curl_output_env_is_forced(env):
         env,
         env.registry.get("bash"),
         {"command": "curl -o .env https://example.com"},
-        mode=PermissionMode.BYPASS,
+        always_allowed={"exec:curl"},
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
@@ -427,7 +435,7 @@ def test_bash_sed_inplace_env_is_forced(env):
         env,
         env.registry.get("bash"),
         {"command": "sed -i 's/a/b/' .env"},
-        mode=PermissionMode.BYPASS,
+        always_allowed={"exec:sed"},
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
@@ -481,29 +489,27 @@ def test_plan_find_is_forced(env):
     assert outcome.request.force is True
 
 
-def test_python_script_is_forced_in_bypass(env):
+def test_python_script_can_be_always_allowed(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "python rewrite.py"},
-        mode=PermissionMode.BYPASS,
+        always_allowed={"exec:python"},
     )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
+    assert outcome.kind == "allow"
 
 
-def test_python_c_is_forced(env):
+def test_python_c_can_be_always_allowed(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "python -c \"open('.env','w').write('x')\""},
-        mode=PermissionMode.BYPASS,
+        always_allowed={"exec:python"},
     )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
+    assert outcome.kind == "allow"
 
 
-def test_echo_cannot_be_always_allowed(env):
+def test_echo_can_be_always_allowed(env):
     remembered: set[str] = set()
     env.permissions.apply_decision(
         ApprovalDecision.ALLOW_ALWAYS,
@@ -511,12 +517,11 @@ def test_echo_cannot_be_always_allowed(env):
         {"command": "echo hello"},
         remembered,
     )
-    assert remembered == set()
+    assert remembered == {"exec:echo"}
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "echo hello"}, always_allowed=remembered
     )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.always_label is None
+    assert outcome.kind == "allow"
 
 
 def test_force_always_does_not_remember_whitelist(env):
@@ -595,7 +600,7 @@ def test_git_status_whitelist_does_not_cover_compound_commit(env):
     assert outcome.kind == "need_approval"
 
 
-def test_compound_always_allow_is_not_remembered(env):
+def test_compound_always_allow_remembers_each_head(env):
     remembered: set[str] = set()
     env.permissions.apply_decision(
         ApprovalDecision.ALLOW_ALWAYS,
@@ -603,7 +608,12 @@ def test_compound_always_allow_is_not_remembered(env):
         {"command": "git status && git commit -m x"},
         remembered,
     )
-    assert remembered == set()
+    assert remembered == {"exec:git status", "exec:git commit"}
+    text = (
+        env.settings.workspace / ".cyan" / "settings.local.json"
+    ).read_text(encoding="utf-8")
+    assert "Bash(git status *)" in text
+    assert "Bash(git commit *)" in text
 
 
 def test_compound_allowed_when_every_head_is_whitelisted(env):
@@ -657,12 +667,12 @@ def test_plan_git_show_env_is_forced(env):
     assert outcome.request.force is True
 
 
-def test_bypass_env_c_outside_is_denied(env):
+def test_env_c_outside_is_denied(env):
     outcome = eval_perm(
         env,
         env.registry.get("bash"),
         {"command": "env -C /tmp cat .env"},
-        mode=PermissionMode.BYPASS,
+        mode=PermissionMode.ACCEPT_EDITS,
     )
     assert outcome.kind == "deny"
 
@@ -675,12 +685,12 @@ def test_grep_env_is_forced_in_plan(env):
     assert outcome.request.force is True
 
 
-def test_grep_env_is_forced_in_bypass(env):
+def test_grep_env_is_forced_in_accept_edits(env):
     outcome = eval_perm(
         env,
         env.registry.get("grep"),
         {"pattern": "SECRET", "path": ".env"},
-        mode=PermissionMode.BYPASS,
+        mode=PermissionMode.ACCEPT_EDITS,
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
@@ -694,9 +704,12 @@ def test_glob_env_is_forced_in_plan(env):
     assert outcome.request.force is True
 
 
-def test_glob_env_is_forced_in_bypass(env):
+def test_glob_env_is_forced_in_accept_edits(env):
     outcome = eval_perm(
-        env, env.registry.get("glob"), {"pattern": "*", "path": ".env"}, mode=PermissionMode.BYPASS
+        env,
+        env.registry.get("glob"),
+        {"pattern": "*", "path": ".env"},
+        mode=PermissionMode.ACCEPT_EDITS,
     )
     assert outcome.kind == "need_approval"
     assert outcome.request.force is True
@@ -736,13 +749,13 @@ def test_plan_denies_process_substitution(env):
     assert outcome.kind == "deny"
 
 
-def test_process_substitution_is_forced_in_default(env):
+def test_process_substitution_asks_in_default(env):
     outcome = eval_perm(env, env.registry.get("bash"), {"command": "cat <(cat .env)"})
     assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
+    assert outcome.request.force is False
 
 
-def test_source_cannot_be_always_allowed(env):
+def test_source_can_be_always_allowed(env):
     remembered: set[str] = set()
     env.permissions.apply_decision(
         ApprovalDecision.ALLOW_ALWAYS,
@@ -750,16 +763,14 @@ def test_source_cannot_be_always_allowed(env):
         {"command": "source setup.sh"},
         remembered,
     )
-    assert remembered == set()
+    assert remembered == {"exec:source"}
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "source setup.sh"}, always_allowed=remembered
     )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
-    assert outcome.request.always_label is None
+    assert outcome.kind == "allow"
 
 
-def test_cp_cannot_be_always_allowed(env):
+def test_cp_can_be_always_allowed(env):
     remembered: set[str] = set()
     env.permissions.apply_decision(
         ApprovalDecision.ALLOW_ALWAYS,
@@ -767,15 +778,14 @@ def test_cp_cannot_be_always_allowed(env):
         {"command": "cp a.py b.py"},
         remembered,
     )
-    assert remembered == set()
+    assert remembered == {"exec:cp"}
     outcome = eval_perm(
         env, env.registry.get("bash"), {"command": "cp a.py b.py"}, always_allowed=remembered
     )
-    assert outcome.kind == "need_approval"
-    assert outcome.request.always_label is None
+    assert outcome.kind == "allow"
 
 
-def test_make_cannot_be_always_allowed(env):
+def test_make_can_be_always_allowed(env):
     remembered: set[str] = set()
     env.permissions.apply_decision(
         ApprovalDecision.ALLOW_ALWAYS,
@@ -783,10 +793,9 @@ def test_make_cannot_be_always_allowed(env):
         {"command": "make"},
         remembered,
     )
-    assert remembered == set()
+    assert remembered == {"exec:make"}
     outcome = eval_perm(env, env.registry.get("bash"), {"command": "make"})
-    assert outcome.kind == "need_approval"
-    assert outcome.request.force is True
+    assert outcome.kind == "allow"
 
 
 def test_quoted_commit_message_is_single_head(env):
@@ -798,3 +807,39 @@ def test_quoted_commit_message_is_single_head(env):
         remembered,
     )
     assert remembered == {"exec:git commit"}
+
+
+def test_npm_can_be_always_allowed(env):
+    remembered: set[str] = set()
+    env.permissions.apply_decision(
+        ApprovalDecision.ALLOW_ALWAYS,
+        env.registry.get("bash"),
+        {"command": "npm test"},
+        remembered,
+    )
+    assert remembered == {"exec:npm"}
+    outcome = eval_perm(
+        env, env.registry.get("bash"), {"command": "npm test"}, always_allowed=remembered
+    )
+    assert outcome.kind == "allow"
+
+
+def test_exec_cat_env_is_forced(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": "exec cat .env"},
+        always_allowed={"exec:cat"},
+    )
+    assert outcome.kind == "need_approval"
+    assert outcome.request.force is True
+
+
+def test_unresolved_cd_is_denied(env):
+    outcome = eval_perm(
+        env,
+        env.registry.get("bash"),
+        {"command": 'cd "$HOME" && pwd'},
+        mode=PermissionMode.ACCEPT_EDITS,
+    )
+    assert outcome.kind == "deny"

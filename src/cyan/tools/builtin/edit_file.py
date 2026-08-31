@@ -11,7 +11,7 @@ from ...security.rules import reject_restricted_write
 from ..base import Tool
 from ..diff import unified_diff
 from ..textnorm import detect_newline, from_lf, read_text, strip_read_line_prefixes, to_lf, write_text
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 if TYPE_CHECKING:
     from ...session import WorkspaceAccess
@@ -45,7 +45,6 @@ class EditFileTool(Tool):
     name = EDIT_FILE_NAME
     description = EDIT_FILE_DESCRIPTION
     capability = ToolCapability.WRITE
-    risk = RiskLevel.MEDIUM
     parameters = EDIT_FILE_PARAMETERS
 
     def describe(

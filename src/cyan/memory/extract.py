@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from typing import Callable
 
-from ..errors import LLMError
-from ..llm.types import AssistantMessage, Message, SystemMessage, ToolMessage, UserMessage
+from ..errors import InvalidToolArgumentsError
+from ..llm.parser import parse_tool_arguments
+from ..llm.types import (
+    AssistantMessage,
+    ContinueMessage,
+    Message,
+    SummaryMessage,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 from ..session.session import Session
 from ..session.types import ToolHistory
 from ..settings.tools import DEFAULT_TOOL_RESULT_CHARS
@@ -29,17 +37,14 @@ EXTRACT_SYSTEM_PROMPT = """你在为同一个编程助手提取「值得跨会�
 
 
 def persist_auto_memory(session: Session, call_llm: CallLLM) -> int:
-    """COMPLETED 任务结束后提取并写入。返回新写入条数；失败返回 0。"""
+    """COMPLETED 任务结束后提取并写入。返回新写入条数；LLM 失败向上抛，由 Loop 提示。"""
     if not auto_memory_enabled():
         return 0
     payloads = [
         {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
         {"role": "user", "content": _extract_user_payload(session)},
     ]
-    try:
-        response = call_llm(payloads, None)
-    except LLMError:
-        return 0
+    response = call_llm(payloads, None)
     text = ""
     message = getattr(response, "message", None)
     if isinstance(message, AssistantMessage):
@@ -57,7 +62,7 @@ def _extract_user_payload(session: Session) -> str:
         _cyan_excerpt(session.workspace.root),
         _index_excerpt(session.workspace.root),
         "# 本任务对话",
-        _conversation_excerpt(session.messages, session.tool_history),
+        _conversation_excerpt(_current_task_messages(session.messages), session.tool_history),
     ]
     return "\n\n".join(part for part in parts if part.strip())
 
@@ -82,6 +87,21 @@ def _index_excerpt(workspace) -> str:
     if layer is None:
         return "# 已有索引\n（无）"
     return f"# 已有索引\n{layer.text}"
+
+
+def _is_task_user(message: Message) -> bool:
+    return isinstance(message, UserMessage) and not isinstance(
+        message, (SummaryMessage, ContinueMessage)
+    )
+
+
+def _current_task_messages(messages: list[Message]) -> list[Message]:
+    """只保留最近一条用户任务及其后的对话，避免把旧任务写进记忆。"""
+    start = 0
+    for index, message in enumerate(messages):
+        if _is_task_user(message):
+            start = index
+    return messages[start:]
 
 
 def _conversation_excerpt(messages: list[Message], tool_history: ToolHistory) -> str:
@@ -112,28 +132,15 @@ def _conversation_excerpt(messages: list[Message], tool_history: ToolHistory) ->
             chunks.append(f"{role}: {text}")
     blob = "\n".join(chunks)
     if len(blob) > DEFAULT_TOOL_RESULT_CHARS:
-        blob = blob[-DEFAULT_TOOL_RESULT_CHARS :]
+        blob = blob[:DEFAULT_TOOL_RESULT_CHARS] + "...[truncated]"
     return blob
 
 
 def _parse_entries(text: str) -> list[MemoryEntry]:
-    raw = text.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            return []
-        try:
-            data = json.loads(raw[start : end + 1])
-        except json.JSONDecodeError:
-            return []
+        data = parse_tool_arguments(text)
+    except InvalidToolArgumentsError:
+        return []
     if not isinstance(data, dict):
         return []
     items = data.get("entries") or []

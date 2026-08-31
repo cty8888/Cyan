@@ -2,7 +2,7 @@
 
 白名单、只读、路径抽取共用这里的切段和展开结果：
 一段命令先剥 ``env`` / ``timeout`` 等前缀，再认 ``git -C`` 这类全局选项，
-最后才看真正的命令头。复合命令按 ``&&`` / ``||`` / ``;`` / ``|`` / 换行切段，
+最后才看真正的命令头。复合命令按 ``&&`` / ``||`` / ``;`` / ``|`` / ``|&`` / ``&`` / 换行切段，
 每段各自判定，不能拿第一段的头去放行整串。
 """
 
@@ -13,37 +13,18 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .catalog import shell_catalog
+
 # bash 把换行和 ; 同级当命令分隔符。只切 && || ; | 时，
 # ``cd /tmp\\necho x > a`` 会当成一段，相对路径按工作区解析，实际写到 /tmp。
 # 引号内的分隔符不切，否则 ``git commit -m 'fix; extra'`` 会拆出假命令头。
-_TWO_CHAR_SEPARATORS = ("||", "&&", "\r\n")
+_TWO_CHAR_SEPARATORS = ("||", "&&", "|&", "\r\n")
 _ONE_CHAR_SEPARATORS = frozenset({";", "|", "\n", "\r"})
 
-# 不带子命令歧义、单看命令名就能判定"只读"的可执行文件。
-# pytest 显式列在其中：README/PLAN_EXEC_MSG 都拿它当"Plan 模式允许的典型例子"，
-# 即便它可能顺手写一点 __pycache__/.pytest_cache 这类无关缓存，也不算"改动用户代码"。
-_SIMPLE_READONLY_BINARIES = frozenset(
-    {
-        "ls", "pwd", "echo", "cat", "head", "tail", "wc", "grep", "egrep",
-        "fgrep", "rg", "ag", "diff", "file", "stat", "du", "df", "tree",
-        "which", "type", "printenv", "date", "whoami", "id", "uname",
-        "ps", "sort", "uniq", "cut", "tr", "column", "nl", "less", "more",
-        "jq", "pytest", "md5sum", "sha1sum", "sha256sum",
-    }
-)
-
+# 只读命令 / 包装前缀 / 安全环境变量 / acceptEdits FS：见 defaults.json ``shell``。
 _FIND_DANGEROUS_FLAGS = frozenset({"-delete", "-exec", "-execdir", "-fprintf", "-fls", "-ok", "-okdir"})
 _SED_INPLACE_FLAGS = frozenset({"-i", "--in-place"})
 _SORT_OUTPUT_FLAGS = frozenset({"-o", "--output"})
-
-# git 子命令：本身就是只读操作，不需要再看参数。
-_GIT_READONLY_SUBCOMMANDS = frozenset(
-    {
-        "status", "diff", "log", "show", "blame", "describe", "shortlog",
-        "reflog", "grep", "ls-files", "ls-tree", "rev-parse", "cat-file",
-        "show-ref", "for-each-ref", "diff-tree",
-    }
-)
 
 _ENV_VALUE_FLAGS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
 _TIMEOUT_VALUE_FLAGS = frozenset({"-k", "--kill-after", "-s", "--signal"})
@@ -54,6 +35,7 @@ _GIT_CONFIG_FLAGS = frozenset({"-c", "--namespace", "--config-env", "--super-pre
 _GIT_CHDIR_EQ = ("--work-tree=",)
 _GIT_DIR_EQ = ("--git-dir=",)
 _GIT_CONFIG_EQ = ("--namespace=", "--config-env=", "--super-prefix=", "--exec-path=")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -77,9 +59,11 @@ class GitGlobals:
 
 
 def split_command_segments(command: str) -> list[str]:
-    """按 ``&&`` / ``||`` / ``;`` / ``|`` / 换行切开，去掉分隔符本身。
+    """按 ``&&`` / ``||`` / ``;`` / ``|`` / ``|&`` / ``&`` / 换行切开，去掉分隔符本身。
 
     单引号 / 双引号里的分隔符不切。双引号里 ``\\"`` 不算结束引号。
+    ``2>&1`` / ``&>file`` 这类重定向里的 ``&`` 不切。
+    ``(...)`` / ``{...}`` 里的分隔符也不切，交给路径分析按子 shell / 分组处理。
     """
     segments: list[str] = []
     buf: list[str] = []
@@ -93,6 +77,8 @@ def split_command_segments(command: str) -> list[str]:
         if text:
             segments.append(text)
 
+    paren = 0
+    brace = 0
     while index < length:
         char = command[index]
         if quote == "'":
@@ -112,10 +98,44 @@ def split_command_segments(command: str) -> list[str]:
             buf.append(char)
             index += 1
             continue
+        if char == "(":
+            paren += 1
+            buf.append(char)
+            index += 1
+            continue
+        if char == ")" and paren:
+            paren -= 1
+            buf.append(char)
+            index += 1
+            continue
+        if char == "{":
+            brace += 1
+            buf.append(char)
+            index += 1
+            continue
+        if char == "}" and brace:
+            brace -= 1
+            buf.append(char)
+            index += 1
+            continue
+        if paren or brace:
+            buf.append(char)
+            index += 1
+            continue
         matched = next((sep for sep in _TWO_CHAR_SEPARATORS if command.startswith(sep, index)), None)
         if matched is not None:
             flush()
             index += len(matched)
+            continue
+        if char == "&":
+            prev = command[index - 1] if index else ""
+            nxt = command[index + 1] if index + 1 < length else ""
+            if prev in "<>" or nxt in "<>":
+                buf.append(char)
+                index += 1
+                continue
+            flush()
+            index += 1
             continue
         if char in _ONE_CHAR_SEPARATORS:
             flush()
@@ -135,6 +155,72 @@ def _is_escaped(text: str, index: int) -> bool:
         slashes += 1
         cursor -= 1
     return slashes % 2 == 1
+
+
+def iter_command_substitutions(command: str) -> list[str]:
+    """抽出 ``$(...)`` / `` `...` `` / ``<(...)`` / ``>(...)`` 的内层命令（含嵌套）。"""
+    found: list[str] = []
+    _scan_substitutions(command, found)
+    return found
+
+
+def _scan_substitutions(text: str, found: list[str]) -> None:
+    index = 0
+    length = len(text)
+    while index < length:
+        if text.startswith("$(", index) or text.startswith("<(", index) or text.startswith(">(", index):
+            inner, end = _extract_paren_inner(text, index + 2)
+            if inner is None:
+                index += 1
+                continue
+            found.append(inner)
+            _scan_substitutions(inner, found)
+            index = end
+            continue
+        if text[index] == "`":
+            close = text.find("`", index + 1)
+            if close == -1:
+                break
+            inner = text[index + 1 : close]
+            found.append(inner)
+            _scan_substitutions(inner, found)
+            index = close + 1
+            continue
+        index += 1
+
+
+def _extract_paren_inner(text: str, start: int) -> tuple[str | None, int]:
+    depth = 1
+    index = start
+    in_single = False
+    in_double = False
+    while index < len(text):
+        char = text[index]
+        if in_single:
+            if char == "'":
+                in_single = False
+            index += 1
+            continue
+        if in_double:
+            if char == "\\" and index + 1 < len(text):
+                index += 2
+                continue
+            if char == '"':
+                in_double = False
+            index += 1
+            continue
+        if char == "'":
+            in_single = True
+        elif char == '"':
+            in_double = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:index], index + 1
+        index += 1
+    return None, start
 
 
 def tokenize(segment: str) -> list[str]:
@@ -158,15 +244,17 @@ def executable_name(token: str) -> str:
 
 
 def unwrap_argv(tokens: list[str]) -> UnwrappedArgv:
-    """剥 ``env`` / ``timeout`` / ``nice`` 等前缀，露出真正要执行的命令。
+    """剥 ``env`` / ``timeout`` / ``nice`` / ``exec`` / ``builtin`` 等前缀，露出真正要执行的命令。
 
     剥不干净（裸 ``env``、缺 duration 的 ``timeout``）就停，tokens 保持原样。
     """
     current = list(tokens)
     chdir: str | None = None
+    unwrap = shell_catalog().unwrap
     while current:
         name = executable_name(current[0])
-        if name == "env":
+        kind = unwrap.get(name)
+        if kind == "env":
             inner, env_chdir = _peel_env(current)
             if env_chdir:
                 chdir = env_chdir
@@ -174,31 +262,37 @@ def unwrap_argv(tokens: list[str]) -> UnwrappedArgv:
                 return UnwrappedArgv(current, chdir)
             current = inner
             continue
-        if name == "timeout":
+        if kind == "timeout":
             inner = _peel_timeout(current)
             if inner is None:
                 break
             current = inner
             continue
-        if name == "nice":
+        if kind == "nice":
             inner = _peel_nice(current)
             if inner is None:
                 break
             current = inner
             continue
-        if name == "stdbuf":
+        if kind == "stdbuf":
             inner = _peel_stdbuf(current)
             if inner is None:
                 break
             current = inner
             continue
-        if name == "command":
+        if kind == "command":
             inner = _peel_command_wrapper(current)
             if inner is None:
                 break
             current = inner
             continue
-        if name in {"nohup", "time"}:
+        if kind == "exec":
+            inner = _peel_exec(current)
+            if inner is None:
+                break
+            current = inner
+            continue
+        if kind == "passthrough":
             inner = current[1:]
             if not inner:
                 break
@@ -206,6 +300,44 @@ def unwrap_argv(tokens: list[str]) -> UnwrappedArgv:
             continue
         break
     return UnwrappedArgv(current, chdir)
+
+
+def peel_leading_assignments(tokens: list[str], *, all_assignments: bool) -> list[str]:
+    """剥开头的 ``VAR=value``。
+
+    deny/ask 剥掉任意赋值再匹配；allow 只剥已知安全的变量，其余前缀留在命令里，
+    因此 ``FOO=bar pytest`` 对不上 ``bash(pytest *)``。
+    """
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-") or "=" not in token:
+            break
+        name, _, _ = token.partition("=")
+        if not _ENV_NAME.fullmatch(name):
+            break
+        if not all_assignments and name not in shell_catalog().safe_env_names:
+            break
+        index += 1
+    return tokens[index:]
+
+
+def is_accept_edits_fs_command(command: str) -> bool:
+    """AcceptEdits 自动放行的工作区内文件系统命令：mkdir / touch / rm / mv / cp / sed。"""
+    segments = split_command_segments(command)
+    if not segments:
+        return False
+    for segment in segments:
+        if "`" in segment or "$(" in segment or "<(" in segment or ">(" in segment:
+            return False
+        tokens = peel_leading_assignments(
+            unwrap_argv(tokenize(segment)).tokens, all_assignments=False
+        )
+        if not tokens:
+            return False
+        if executable_name(tokens[0]) not in shell_catalog().accept_edits_fs:
+            return False
+    return True
 
 
 def peel_git_globals(tokens: list[str]) -> GitGlobals:
@@ -331,7 +463,7 @@ def _is_readonly_segment(segment: str) -> bool:
         return False  # 后台执行，脱离了本次判定能追踪的范围
 
     unwrapped = unwrap_argv(tokens)
-    tokens = unwrapped.tokens
+    tokens = peel_leading_assignments(unwrapped.tokens, all_assignments=False)
     if not tokens:
         return False
 
@@ -349,7 +481,7 @@ def _is_readonly_segment(segment: str) -> bool:
         return not any(flag in _SED_INPLACE_FLAGS or flag.startswith("-i") for flag in rest)
     if name == "sort":
         return not _sort_writes(rest)
-    return name in _SIMPLE_READONLY_BINARIES
+    return name in shell_catalog().readonly_binaries
 
 
 def _sort_writes(rest: list[str]) -> bool:
@@ -444,6 +576,27 @@ def _peel_stdbuf(tokens: list[str]) -> list[str] | None:
     return None
 
 
+def _peel_exec(tokens: list[str]) -> list[str] | None:
+    """``exec [-cl] [-a name] command``：露出真正要执行的命令。"""
+    index = 1
+    while index < len(tokens):
+        arg = tokens[index]
+        if arg == "--":
+            inner = tokens[index + 1 :]
+            return inner or None
+        if arg in {"-c", "-l"}:
+            index += 1
+            continue
+        if arg == "-a":
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return tokens[index:]
+    return None
+
+
 def _peel_command_wrapper(tokens: list[str]) -> list[str] | None:
     index = 1
     while index < len(tokens):
@@ -484,7 +637,7 @@ def _is_readonly_git(rest: list[str]) -> bool:
     if not peeled.argv:
         return False  # 裸 `git` 没有子命令，没有意义，保守拒绝
     subcommand, *args = peeled.argv
-    if subcommand in _GIT_READONLY_SUBCOMMANDS:
+    if subcommand in shell_catalog().git_readonly_subcommands:
         return True
     handler = _GIT_CONDITIONAL_READONLY.get(subcommand)
     return handler(args) if handler else False

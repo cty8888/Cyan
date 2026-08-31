@@ -62,7 +62,7 @@ src/cyan/
     deepseek.py          # OpenAI 兼容实现（DeepSeek）
     parser.py            # 模型输出解析：tool_call 参数 JSON 容错
   tools/
-    types.py             # ToolCapability / RiskLevel / ToolRunResult / ToolContext
+    types.py             # ToolCapability / ToolRunResult / ToolContext
     base.py              # Tool 抽象基类 + 参数校验
     registry.py          # 注册表：schema 导出 + 名称分发 + 执行封装
     diff.py              # write_file / edit_file 共用的 diff 生成
@@ -86,7 +86,13 @@ src/cyan/
     shell.py             # Plan 模式只读命令判定、执行头提取（白名单共用）
     command_paths.py     # 从 bash 命令抽出路径，套文件规则
     allowlist.py         # 本会话「始终允许」：write:{目录} / exec:{命令}
-    rules.py             # Blocked / Restricted / Sensitive 路径与命令规则
+    floor.py             # 关键路径 rm/rmdir：强制询问，allow 不能预先批准
+    rule_syntax.py       # Bash(pytest *) / Read(.env) / Edit(src/**)
+    policy.py            # RuleSet：deny / ask / allow 判定
+    settings_file.py     # 内置 + 用户 + 项目 + local JSON
+    catalog.py           # 从 defaults.json 读只读命令 / 包装前缀等名单
+    defaults.json        # 内置 deny / ask + shell 名单
+    rules.py             # 执行层二次拦截：转调 floor + 内置规则
     readonly.py          # 兼容旧导入，转调 shell.py
 ```
 
@@ -213,7 +219,6 @@ class Tool(ABC):
     name: str
     description: str
     capability: ToolCapability  # READ / WRITE / EXEC —— 决定模式怎么分流
-    risk: RiskLevel             # MINIMAL … CRITICAL；CRITICAL 强制逐次确认
     parameters: dict            # JSON Schema，直接喂给 tool calling
     def describe(self, args, workspace) -> tuple[str, str | None, str]: ...
     def run(self, ctx: ToolContext, **kwargs) -> ToolRunResult: ...
@@ -240,43 +245,43 @@ MVP 工具集：
 
 ## 5. 安全模型
 
-两轴 + 四级规则，由 [`PermissionManager.evaluate()`](src/cyan/security/permissions.py) 一次判定：
+`ToolCapability` + 声明式规则，由 [`PermissionManager.evaluate()`](src/cyan/security/permissions.py) 一次判定。
 
-**两轴**（写在每个 `Tool` 上，正交）：
+**能力**（写在每个 `Tool` 上）：`READ` / `WRITE` / `EXEC`。Plan 拒写；AcceptEdits 放行普通写（执行仍要确认）。
 
-| 轴 | 回答的问题 | 参与判定的方式 |
-| --- | --- | --- |
-| `ToolCapability`（READ / WRITE / EXEC） | 这是读、写还是执行？ | Plan 拒写；AcceptEdits 放行普通写；Bypass 放行普通写/执行 |
-| `RiskLevel`（MINIMAL … CRITICAL） | 这次操作有多危险？ | **CRITICAL 强制逐次确认**，不受模式 / 「始终允许」影响；其余级别用于审批面板展示 |
+**判定顺序**：工作区沙箱 → deny 规则 → 关键删除强制询问 → ask 规则 → 只读 bash / allow 规则 → 三种模式与会话白名单。deny 压过 allow。关键删除的落点不走「区外拒绝」，以便用户能当场确认。Plan 在 allow 之前：`Edit(src/**)` 不能覆盖 Plan 拒写。`deny Read(.env)` 连带挡住同一路径的写入与 bash 读。
 
-**四级规则**（[`rules.py`](src/cyan/security/rules.py)，write 与 exec 统一；工具 `run()` 里对 Blocked / Restricted 再拦一次，防止有人绕过权限层直接 `execute`）：
+**关键删除**（[`floor.py`](src/cyan/security/floor.py)）：`rm` / `rmdir` 打到 `/`、`/usr` 等根下顶级目录、家目录、`.`、工作区或其父目录；`$VAR/*` / `$VAR/`；命令替换里的同样形状。`permissions.allow` 不能预先批准，用户可以当场确认。
 
-| 级别 | 处置 | 例子 |
-|------|------|------|
-| **Blocked 黑名单** | 永远 DENY，连 Bypass 也不能绕过 | `sudo`、`rm -rf /`、`mkfs`、`curl \| sh` |
-| **Restricted 强硬限制** | 永远 DENY，不出审批 UI | `git push --force`、写入 `.git/` |
-| **Sensitive 敏感** | NEED_APPROVAL + `force=True`，不受「始终允许」/ AcceptEdits / Bypass 影响 | `.env`、私钥、`pip install`、`git push` |
-| **Normal 普通** | 由 `PermissionMode` 决定 | 普通源码写入、`pytest` |
+**规则**（[`defaults.json`](src/cyan/security/defaults.json) + 用户/项目/local JSON）。只读命令、包装前缀、安全环境变量、acceptEdits 文件系统命令写在同一文件的 `shell` 段，用户设置不能覆盖。
 
-**PermissionMode**（Normal 级别）：
+| 种类 | 处置 | 内置例子 |
+|------|------|----------|
+| **deny** | 永远 DENY | `Bash(sudo *)`、`Bash(git push --force *)` |
+| **ask** | NEED_APPROVAL + `force=True`，没有「始终允许」 | `.env`、私钥、`pip install`、`git push`、写 `.git` / `.vscode` / `.cyan` / shell rc |
+| **allow** | 放行（deny 与关键删除仍优先） | `Bash(pytest *)`、`Edit(src/**)` |
+
+写法：`Bash(pytest *)` / `Read(.env)` / `Edit(src/**)` / `WebFetch(domain:host)`。`Tool(param:value)` 匹配顶级标量参数（deny/ask）；`Bash(command:…)` / `Read(path:…)` / `WebFetch(url:…)` 会忽略并警告。`Write` 裸名匹配写入工具；`Write(路径)` 收下但不做路径检查。未知工具名按工具名匹配，以后加网络工具不必改解析器。路径还可写成 `/src/**`（相对设置源：用户设置锚到 `~/.cyan`，项目/local 锚到工作区）、`~/Documents/*.pdf`、`//tmp/scratch.txt`。复合命令先切段（`&&` `||` `;` `|` `|&` `&` 换行）：deny/ask 任一段命中即生效；allow 必须每段都命中。点 `a` 对复合命令按子命令各存一条 allow，最多 5 条。设置文件：内置 defaults + `~/.cyan/settings.json` + `{workspace}/.cyan/settings.json` + `settings.local.json`。`/permissions` 列出、增（写 local）、删（local / 项目 / 用户，不能删内置）。
+
+**PermissionMode**（规则没覆盖时）：
 
 | 模式 | 只读 | 普通写入 | 普通执行 |
 |------|------|----------|----------|
-| Plan | 放行 | DENY | 仅放行只读命令（`git status`、`pytest`、`ls` 等，见 `security/shell.py`） |
-| Default | 放行 | 需审批 | 需审批 |
-| AcceptEdits | 放行 | 直接放行 | 需审批 |
-| Bypass | 放行 | 直接放行 | 直接放行 |
+| Plan | 放行 | DENY | 仅放行只读命令（`git status`、`pytest`、`ls` 等，名单在 `defaults.json` 的 `shell`） |
+| Default | 放行 | 需审批 | 只读命令免审批，其余需审批 |
+| AcceptEdits | 放行 | 直接放行（`.vscode` / `.cyan` / shell rc 等内置 ask 仍要确认） | 工作区内 `mkdir`/`touch`/`mv`/`cp`/`rm`/`sed` 免审批，其余需审批 |
 
-审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按**每一段**的命令头（`exec:pytest` 只放行 `pytest …`，不放行 `touch`；`git status && git commit` 要两段都在白名单里）。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于这套规则：文件工具走 `resolve_path`；bash 由 `command_paths.py` 抽出能看清的路径（重定向、`cat`/`echo`/`cd`、`env -C` / `git -C`、`git show HEAD:.env` 等）再套同一套 Restricted / Sensitive / 区外拒绝。先剥 `env` / `timeout` 等包装再判定。`python -c`、命令替换等解析不到的标成不透明，强制逐次确认且不能「始终允许」。执行头按 `git status` 而不是整条 `git` 记白名单。
+审批选项：`y` 本次允许 / `n` 拒绝 / `a` 本会话始终允许同类操作（仅非 force）。写入按目录前缀（根目录文件记 `write:.`，只放行根下其它文件；`write:pkg` 放行 `pkg/` 及其子目录，`write_file` 与 `edit_file` 共用），执行按**每一段**的命令头（`exec:pytest` 只放行 `pytest …`，不放行 `touch`；`git status && git commit` 要两段都在白名单里）。bash 点 `a` 还会往 local 按子命令追加 `Bash(pytest *)`，最多 5 条。用户拒绝后回喂模型换方案。路径沙箱（`security/paths.py`）独立于规则：文件工具走 `resolve_path`；bash 由 `command_paths.py` 抽出能看清的路径（重定向、`cat`/`echo`/`cd`、`env -C` / `git -C`、`git show HEAD:.env` 等）再套同一套沙箱 / write deny / ask。先剥 `env` / `timeout` 等包装再判定。`python -c`、命令替换等解析不到的标成不透明，路径层不当成已看清，但 `allow` 仍可放行。执行头按 `git status` 而不是整条 `git` 记白名单。路径只按 Linux 语义处理。
 
 组件职责：
 
-1. **`rules.py`**：Blocked / Restricted / Sensitive 规则表
-2. **`shell.py`**：Plan 只读命令判定与执行头提取
-3. **`command_paths.py`**：从 bash 命令抽出路径，套文件沙箱 / Restricted / Sensitive
-4. **`allowlist.py`**：本会话始终允许的范围键（过宽的命令头不能写入）
-5. **`PermissionManager`**：编排判定链，产出 `PermissionOutcome`
-6. **工具 `run()`**：对 Blocked / Restricted / 区外路径再拦一次
+1. **`floor.py`**：关键路径删除（强制询问）
+2. **`rule_syntax.py` / `policy.py` / `settings_file.py`**：规则解析、合并、判定
+3. **`shell.py` / `catalog.py`**：只读判定与执行头提取；名单在 `defaults.json` 的 `shell`
+4. **`command_paths.py`**：从 bash 命令抽出路径，套文件沙箱 / write deny / ask
+5. **`allowlist.py`**：本会话始终允许的范围键
+6. **`PermissionManager`**：编排判定链，产出 `PermissionOutcome`
+7. **工具 `run()`**：对内置 write deny / 区外路径再拦一次
 
 ## 6. 上下文管理与 Memory
 
@@ -297,7 +302,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] llm 层：types/base 抽象 + deepseek OpenAI 兼容实现（非流式）+ parser 的 tool_call 参数 JSON 容错解析
 - [x] tools 层：Tool 基类 + ToolRunResult + registry 自动导出 schema，实现 `list_dir`/`read_file`/`write_file`/`edit_file`/`bash`/`glob`/`grep`
 - [x] execution 工具：`bash`（超时/输出截断/跨调用工作目录延续），对齐 Claude Code 的 Bash 工具设计，取代早期的 `run_command`+`run_code` 双工具方案
-- [x] security 层：路径沙箱、命令黑名单 / 强硬限制 / 敏感资源、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`shell.py`）
+- [x] security 层：路径沙箱、硬地板、声明式 allow/ask/deny、权限管理与审批协议（y/n/a）、Plan 模式只读命令判定（`shell.py`）
 - [x] `core/runtime` Agent Loop（generator + 事件流）、session 状态、全部终止条件与错误恢复策略
 - [x] 基础 CLI REPL：消费事件流、处理审批交互，跑通端到端最小闭环
 - [x] 提前补做：审批 diff 预览、Ctrl-C 中断、离线测试 `tests/`（pytest）

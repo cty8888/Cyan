@@ -3,7 +3,6 @@
 - 写入：``write:{目录}``。根目录文件为 ``write:.``，只放行根下其它文件，不含子目录；
   ``write:pkg`` 放行 ``pkg/`` 及其子目录。
 - 执行：``exec:{命令名}``（如 ``exec:pytest``、``exec:git status``）。
-  ``echo`` / ``python`` / ``env`` / ``bash`` 等太宽的命令头不能「始终允许」。
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..tools.types import ToolCapability
-from .command_paths import analyze_command
 from .paths import write_target_display
 from .shell import command_head, split_command_segments
 
@@ -21,44 +19,7 @@ if TYPE_CHECKING:
 
 WRITE_SCOPE_PREFIX = "write:"
 EXEC_SCOPE_PREFIX = "exec:"
-
-# 这些命令头太宽，或本身就能绕开路径解析 / 已读检查，禁止写入「始终允许」。
-_NEVER_ALWAYS_ALLOW_HEADS = frozenset(
-    {
-        "echo",
-        "python",
-        "python3",
-        "env",
-        "bash",
-        "sh",
-        "zsh",
-        "tee",
-        "eval",
-        "exec",
-        "node",
-        "nodejs",
-        "ruby",
-        "perl",
-        "awk",
-        "sed",
-        "git",
-        "source",
-        ".",
-        "cp",
-        "mv",
-        "ln",
-        "install",
-        "rsync",
-        "scp",
-        "rclone",
-        "tar",
-        "unzip",
-        "make",
-        "cmake",
-        "ninja",
-        "ninja-build",
-    }
-)
+MAX_PERSISTED_COMMANDS = 5
 
 
 def is_always_allowed(
@@ -82,40 +43,56 @@ def is_always_allowed(
 
 
 def remember(workspace: Path, tool: Tool, args: dict[str, Any], always_allowed: set[str]) -> None:
-    """把本次操作的范围键写入会话白名单。"""
-    key = always_key(workspace, tool, args)
-    if key:
-        always_allowed.add(key)
+    """把本次操作的范围键写入会话白名单。复合命令按段各记一条，最多 5 条。"""
+    always_allowed.update(always_keys(workspace, tool, args))
+
+
+def persistable_allow_rule(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
+    """兼容旧接口：只返回第一条可落盘的 Bash 规则。"""
+    rules = persistable_allow_rules(workspace, tool, args)
+    return rules[0] if rules else None
+
+
+def persistable_allow_rules(workspace: Path, tool: Tool, args: dict[str, Any]) -> list[str]:
+    """bash 的「始终允许」写成 ``Bash(pytest *)``；写入不落盘。复合命令每段一条，最多 5 条。"""
+    if tool.capability is not ToolCapability.EXEC:
+        return []
+    rules: list[str] = []
+    for key in always_keys(workspace, tool, args):
+        if not key.startswith(EXEC_SCOPE_PREFIX):
+            continue
+        head = key[len(EXEC_SCOPE_PREFIX) :]
+        if head:
+            rules.append(f"Bash({head} *)")
+    return rules
 
 
 def always_key(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
-    """生成白名单键：``write:{目录}`` / ``exec:{命令名}``；无法归类时退回工具名。"""
+    """单条白名单键；复合命令有多段时返回 None（请用 ``always_keys``）。"""
+    keys = always_keys(workspace, tool, args)
+    return keys[0] if len(keys) == 1 else None
+
+
+def always_keys(workspace: Path, tool: Tool, args: dict[str, Any]) -> list[str]:
+    """生成白名单键。复合命令按段收集，最多 ``MAX_PERSISTED_COMMANDS`` 条。"""
     if tool.capability is ToolCapability.WRITE:
         scope = write_dir_scope(workspace, args)
-        return f"{WRITE_SCOPE_PREFIX}{scope}" if scope is not None else None
+        return [f"{WRITE_SCOPE_PREFIX}{scope}"] if scope is not None else []
     if tool.capability is ToolCapability.EXEC:
-        keys = _exec_keys(str(args.get("command") or ""))
-        if not keys:
-            return None
-        unique = set(keys)
-        if len(unique) != 1:
-            return None
-        return unique.pop()
-    return tool.name
+        return _persistable_exec_keys(str(args.get("command") or ""))
+    return [tool.name]
 
 
 def _exec_segment_key(segment: str) -> str | None:
-    """一段命令能否记入白名单：不透明、过宽的头都不能。"""
-    if analyze_command(segment).opaque:
-        return None
+    """一段命令的白名单键：有命令头就能记。"""
     head = command_head(segment)
-    if not head or head in _NEVER_ALWAYS_ALLOW_HEADS:
+    if not head:
         return None
     return f"{EXEC_SCOPE_PREFIX}{head}"
 
 
 def _exec_keys(command: str) -> list[str] | None:
-    """复合命令每一段的白名单键。任一段无法归类则整串都不能「始终允许」。"""
+    """复合命令每一段的白名单键。任一段无法归类则整串都不能靠白名单放行。"""
     segments = split_command_segments(command)
     if not segments:
         return None
@@ -125,6 +102,24 @@ def _exec_keys(command: str) -> list[str] | None:
         if key is None:
             return None
         keys.append(key)
+    return keys
+
+
+def _persistable_exec_keys(command: str) -> list[str]:
+    """可写入始终允许的段。最多 5 条。"""
+    segments = split_command_segments(command)
+    if not segments:
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        key = _exec_segment_key(segment)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+        if len(keys) >= MAX_PERSISTED_COMMANDS:
+            break
     return keys
 
 
@@ -138,11 +133,13 @@ def always_label(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | Non
             return "工作目录根下的写入"
         return f"{scope}/ 下的写入"
     if tool.capability is ToolCapability.EXEC:
-        key = always_key(workspace, tool, args)
-        if key is None:
+        keys = always_keys(workspace, tool, args)
+        if not keys:
             return None
-        head = key[len(EXEC_SCOPE_PREFIX) :]
-        return f"{head} 命令" if head else None
+        heads = [key[len(EXEC_SCOPE_PREFIX) :] for key in keys]
+        if len(heads) == 1:
+            return f"{heads[0]} 命令"
+        return "、".join(heads) + " 命令"
     return None
 
 

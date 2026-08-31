@@ -13,7 +13,6 @@ class PermissionMode(Enum):
     PLAN = "plan"  # 只读规划：禁止写文件，bash 仅放行只读命令
     DEFAULT = "default"  # 写/执行需逐次确认
     ACCEPT_EDITS = "accept_edits"  # 自动批准普通写入，执行仍要确认
-    BYPASS = "bypass"  # 跳过普通审批；黑名单、强硬限制、敏感操作仍生效
 
 
 class ApprovalDecision(Enum):
@@ -40,12 +39,11 @@ class ApprovalRequest:
 
     tool_name: str
     capability: str
-    risk: str
     summary: str
     detail: str | None = None  # diff / 命令原文等，按 detail_format 渲染
     detail_format: str = "text"
     force: bool = False  # True 时不能选「始终允许」
-    reason: str | None = None  # 强制确认的额外说明（敏感路径、CRITICAL）
+    reason: str | None = None  # 强制确认的额外说明（敏感路径、不透明命令）
     always_label: str | None = None  # 「a=始终允许」的范围文案
 
 

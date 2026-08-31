@@ -6,7 +6,7 @@ from ...errors import ToolError
 from ...memory.store import read_memory_file
 from ...memory.types import ALLOWED_FILENAMES, INDEX_FILENAME, KIND_FILENAMES, MemoryKind
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 MEMORY_READ_NAME = "memory_read"
 MEMORY_READ_DESCRIPTION = (
@@ -45,7 +45,6 @@ class MemoryReadTool(Tool):
     name = MEMORY_READ_NAME
     description = MEMORY_READ_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.LOW
     parameters = MEMORY_READ_PARAMETERS
 
     def run(self, ctx: ToolContext, name: str = "", **kwargs) -> ToolRunResult:

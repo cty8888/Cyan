@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ...memory.store import list_memory_files
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 MEMORY_LIST_NAME = "memory_list"
 MEMORY_LIST_DESCRIPTION = (
@@ -19,7 +19,6 @@ class MemoryListTool(Tool):
     name = MEMORY_LIST_NAME
     description = MEMORY_LIST_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.MINIMAL
     parameters = MEMORY_LIST_PARAMETERS
 
     def run(self, ctx: ToolContext, **kwargs) -> ToolRunResult:

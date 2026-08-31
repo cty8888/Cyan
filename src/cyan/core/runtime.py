@@ -90,18 +90,20 @@ class Runtime:
         return self.loop.run(task)
 
     def schemas_for_mode(self) -> list[dict]:
-        """按当前权限模式导出要交给模型的工具 schema。
+        """按当前权限模式与裸名 deny 导出要交给模型的工具 schema。
 
-        Plan 模式只暴露只读工具和 bash（后者仍由权限层拦截写操作），
-        模型甚至看不到 write_file / edit_file 的定义。
+        Plan 模式只暴露只读工具和 bash（后者仍由权限层拦截写操作）。
+        裸名 deny（如 ``write``）会把对应工具从上下文摘掉。
         """
+        hidden = self.permissions.hidden_tool_names()
+        tools = [tool for tool in self.registry if tool.name not in hidden]
         if self.session.permissions.permission_mode is PermissionMode.PLAN:
-            return [
-                tool.to_schema()
-                for tool in self.registry
+            tools = [
+                tool
+                for tool in tools
                 if tool.capability is ToolCapability.READ or tool.name == "bash"
             ]
-        return self.registry.schemas()
+        return [tool.to_schema() for tool in tools]
 
     def messages_for_request(self) -> list[dict]:
         """把会话消息与工具历史渲染成发给模型的 wire 格式。

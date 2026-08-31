@@ -1,7 +1,8 @@
 """从 shell 命令里抽出能看清的路径，按文件工具同一套规则判定。
 
-解析不到的（python -c、命令替换、``$VAR``）标成 opaque，由权限层强制确认，
-不在这里假装能拦住。
+解析不到的（python -c、命令替换、``$VAR``）标成 opaque，路径层不当成已看清；
+权限上走普通执行审批，``allow`` 可以放行。
+``cd "$HOME"`` / ``popd`` 这类看不清目标的改目录命令直接拒绝，不在区外执行。
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from pathlib import Path
 
 from ..errors import PathOutsideWorkspaceError, SecurityError
 from . import rules
-from .messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
+from .floor import critical_rm_reason
+from .messages import ENV_DUMP_MSG, UNBOUNDED_READ_MSG, UNRESOLVED_CHDIR_MSG
 from .paths import display, resolve_path
 from .shell import (
     executable_name,
@@ -112,6 +114,8 @@ _OPAQUE_HEADS = frozenset(
         "rclone",
     }
 )
+# 无参数的 bash/sh/zsh 是从 stdin 读脚本（如 curl | sh），路径看不清但不算「不透明命令头」。
+_STDIN_SHELLS = frozenset({"bash", "sh", "zsh"})
 _GIT_CONTENT_SUBCOMMANDS = frozenset(
     {"show", "cat-file", "blame", "diff", "log", "ls-files", "ls-tree"}
 )
@@ -188,7 +192,7 @@ def outside_workspace_reason(workspace: Path, command: str, cwd: Path | None = N
 
 
 def restricted_write_reason(workspace: Path, command: str, cwd: Path | None = None) -> str | None:
-    """写入目标命中 Restricted 路径（如 ``.git/``）时返回理由。"""
+    """写入目标命中 write/read deny（如 ``.git/``、``Read`` deny 连带挡写）时返回理由。"""
     for relative, kind in _resolved_touches(workspace, command, cwd or workspace):
         if kind == "write":
             reason = rules.restricted_path(relative)
@@ -197,33 +201,46 @@ def restricted_write_reason(workspace: Path, command: str, cwd: Path | None = No
     return None
 
 
+def denied_path_reason(workspace: Path, command: str, cwd: Path | None = None) -> str | None:
+    """bash 能看清的读/写路径命中 deny 规则。read deny 也挡住写入。"""
+    for relative, kind in _resolved_touches(workspace, command, cwd or workspace):
+        if kind == "write":
+            reason = rules.restricted_path(relative)
+        else:
+            reason = rules.read_denied_path(relative)
+        if reason:
+            return reason
+    return None
+
+
 def forced_exec_reason(workspace: Path, command: str, cwd: Path | None = None) -> str | None:
-    """敏感路径、倾倒环境、或不透明命令：必须逐次确认。"""
+    """敏感路径、倾倒环境、无界读取：必须逐次确认。不透明命令走普通审批，allow 可以放行。"""
     analysis = analyze_command(command)
-    if analysis.opaque:
-        return OPAQUE_EXEC_MSG
     if analysis.unbounded_read:
         return UNBOUNDED_READ_MSG
     if analysis.dumps_env:
         return ENV_DUMP_MSG
     for relative, kind in _resolved_touches(workspace, command, cwd or workspace):
+        if kind == "write":
+            reason = rules.write_confirm_path(relative)
+            if reason:
+                return reason
+            continue
         reason = rules.sensitive_path(relative)
         if reason:
-            if kind == "read":
-                return f"{relative} 可能包含密钥 / 凭据，读取也需要确认。"
-            return reason
+            return f"{relative} 可能包含密钥 / 凭据，读取也需要确认。"
     return None
 
 
 def reject_unsafe_paths(workspace: Path, command: str, cwd: Path | None = None) -> None:
-    """执行层二次拦截：区外路径与 Restricted 写入。"""
+    """执行层二次拦截：区外路径与 deny 路径。"""
     origin = cwd or workspace
     outside = outside_workspace_reason(workspace, command, origin)
     if outside:
         raise PathOutsideWorkspaceError(outside)
-    restricted = restricted_write_reason(workspace, command, origin)
-    if restricted:
-        raise SecurityError(restricted)
+    denied = denied_path_reason(workspace, command, origin)
+    if denied:
+        raise SecurityError(denied)
 
 
 def written_paths(workspace: Path, command: str, cwd: Path | None = None) -> list[Path]:
@@ -258,14 +275,52 @@ def _walk_resolved(
     ignore_outside: bool,
 ) -> list[tuple[str, str, Path]]:
     """按段解析路径。``env -C`` / ``git -C`` 只影响该段内层命令，不影响重定向。"""
-    cwd = start or workspace
+    found, _cwd = _walk_from(workspace, command, start or workspace, ignore_outside=ignore_outside)
+    return found
+
+
+def _walk_from(
+    workspace: Path,
+    command: str,
+    cwd: Path,
+    *,
+    ignore_outside: bool,
+) -> tuple[list[tuple[str, str, Path]], Path]:
+    """从 ``cwd`` 起按段走命令，返回触点与走完后的 shell cwd。
+
+    ``(...)`` 子 shell 不改外层 cwd；``{...}`` 当前 shell 分组会改。
+    """
     found: list[tuple[str, str, Path]] = []
     for segment in split_command_segments(command):
+        kind, inner = _strip_compound(segment)
+        if kind == "subshell":
+            inner_found, _ignored = _walk_from(
+                workspace, inner, cwd, ignore_outside=ignore_outside
+            )
+            found.extend(inner_found)
+            continue
+        if kind == "group":
+            inner_found, cwd = _walk_from(
+                workspace, inner, cwd, ignore_outside=ignore_outside
+            )
+            found.extend(inner_found)
+            continue
+
         plan = _plan_segment(segment)
         resolved_here: list[tuple[str, str, Path]] = []
 
         def add(raw: str, kind: str, base: Path) -> Path | None:
-            item = _try_resolve(workspace, raw, base, ignore_outside=ignore_outside)
+            try:
+                item = _try_resolve(workspace, raw, base, ignore_outside=ignore_outside)
+            except PathOutsideWorkspaceError:
+                # 关键 rm 的落点（/、家目录、工作区父目录）交给强制询问，不当成区外拒绝。
+                if (
+                    not ignore_outside
+                    and kind == "write"
+                    and critical_rm_reason(segment, workspace=workspace, cwd=cwd)
+                ):
+                    return None
+                raise
             if item is None:
                 return None
             resolved_here.append((item[0], kind, item[1]))
@@ -289,12 +344,30 @@ def _walk_resolved(
             add(raw, kind, proc_base)
 
         found.extend(resolved_here)
+        if plan.chdir_unresolved:
+            if not ignore_outside:
+                raise PathOutsideWorkspaceError(UNRESOLVED_CHDIR_MSG)
+            continue
         if plan.is_cd:
+            updated = False
             for _relative, kind, path in resolved_here:
                 if kind == "read":
                     cwd = path
+                    updated = True
                     break
-    return found
+            if not updated and not ignore_outside:
+                raise PathOutsideWorkspaceError(UNRESOLVED_CHDIR_MSG)
+    return found, cwd
+
+
+def _strip_compound(segment: str) -> tuple[str | None, str]:
+    """``(...)`` 子 shell、``{...}`` 当前 shell 分组。否则原样返回。"""
+    text = segment.strip()
+    if len(text) >= 2 and text.startswith("(") and text.endswith(")"):
+        return "subshell", text[1:-1]
+    if len(text) >= 2 and text.startswith("{") and text.endswith("}"):
+        return "group", text[1:-1].strip()
+    return None, segment
 
 
 def _try_resolve(
@@ -315,6 +388,11 @@ def _try_resolve(
 
 
 def _analyze_segment(segment: str, analysis: CommandPathAnalysis) -> None:
+    kind, inner = _strip_compound(segment)
+    if kind:
+        for sub in split_command_segments(inner):
+            _analyze_segment(sub, analysis)
+        return
     plan = _plan_segment(segment)
     for raw, kind in plan.shell_touches:
         analysis.touches.append(PathTouch(raw=raw, kind=kind))
@@ -324,7 +402,7 @@ def _analyze_segment(segment: str, analysis: CommandPathAnalysis) -> None:
         analysis.touches.append(PathTouch(raw=plan.git_chdir, kind="read"))
     for raw, kind in plan.inner_touches:
         analysis.touches.append(PathTouch(raw=raw, kind=kind))
-    tokens = tokenize(segment)
+    tokens = unwrap_argv(tokenize(segment)).tokens
     if tokens and executable_name(tokens[0]) in {"printenv", "env"} and _is_bare_env(tokens):
         analysis.dumps_env = True
 
@@ -338,6 +416,7 @@ class _SegmentPlan:
     git_chdir: str | None
     inner_touches: list[tuple[str, str]]
     is_cd: bool
+    chdir_unresolved: bool = False
 
 
 def _plan_segment(segment: str) -> _SegmentPlan:
@@ -349,14 +428,22 @@ def _plan_segment(segment: str) -> _SegmentPlan:
         shell_touches.append((target, "write" if ">" in op else "read"))
 
     tokens = tokenize(segment)
-    is_cd = bool(tokens) and tokens[0] == "cd"
-    if is_cd:
-        target = tokens[-1] if len(tokens) > 1 else str(Path.home())
-        shell_touches.append((target, "read"))
-        return _SegmentPlan(shell_touches, None, None, [], True)
-
     unwrapped = unwrap_argv(tokens)
     inner = unwrapped.tokens
+    head = executable_name(inner[0]) if inner else ""
+
+    if head == "popd":
+        return _SegmentPlan(shell_touches, None, None, [], True, True)
+    if head in {"cd", "pushd"}:
+        operands = [token for token in inner[1:] if not token.startswith("-") or token == "-"]
+        if head == "pushd" and not operands:
+            return _SegmentPlan(shell_touches, None, None, [], True, True)
+        target = operands[-1] if operands else str(Path.home())
+        shell_touches.append((target, "read"))
+        return _SegmentPlan(
+            shell_touches, None, None, [], True, _unresolved(target)
+        )
+
     git_chdir: str | None = None
     inner_touches: list[tuple[str, str]] = []
     if inner and executable_name(inner[0]) == "git":
@@ -613,11 +700,18 @@ def _is_opaque(command: str) -> bool:
     if any(pattern.search(command) for pattern in _OPAQUE_PATTERNS):
         return True
     for segment in split_command_segments(command):
+        kind, inner = _strip_compound(segment)
+        if kind:
+            if _is_opaque(inner):
+                return True
+            continue
         tokens = unwrap_argv(tokenize(segment)).tokens
         if not tokens:
             continue
         head = executable_name(tokens[0])
         if head in _OPAQUE_HEADS:
+            if head in _STDIN_SHELLS and len(tokens) == 1:
+                continue
             return True
         if head in _INTERPRETER_NAMES and not _is_pytest_module(tokens):
             return True
@@ -630,6 +724,11 @@ _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 def _is_unbounded_read(command: str) -> bool:
     """通配或递归搜索可能扫到 .env / 密钥，不能当「看清了路径的只读」。"""
     for segment in split_command_segments(command):
+        kind, inner = _strip_compound(segment)
+        if kind:
+            if _is_unbounded_read(inner):
+                return True
+            continue
         tokens = unwrap_argv(tokenize(segment)).tokens
         if not tokens:
             continue

@@ -30,7 +30,7 @@ class LLMError(AgentError):
 
 
 class LLMContextOverflowError(LLMError):
-    """请求超出模型上下文窗口。不走 HTTP 重试，由 Loop 先压缩再打一次。"""
+    """请求超出模型上下文窗口。不走 HTTP 重试，由 Loop 先压缩再打，最多恢复两次。"""
 
 
 class LLMAuthError(LLMError):

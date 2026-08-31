@@ -6,9 +6,8 @@ from cyan.security.command_paths import (
     analyze_command,
     forced_exec_reason,
     outside_workspace_reason,
-    restricted_write_reason,
 )
-from cyan.security.messages import ENV_DUMP_MSG, OPAQUE_EXEC_MSG, UNBOUNDED_READ_MSG
+from cyan.security.messages import ENV_DUMP_MSG, UNBOUNDED_READ_MSG
 from cyan.security.paths import resolve_path
 from cyan.security.shell import command_head, is_readonly_command, split_command_segments
 
@@ -60,22 +59,22 @@ def test_crlf_cd_outside_then_write(tmp_path):
     assert reason is not None
 
 
-def test_git_dir_redirect_is_restricted(tmp_path):
-    reason = restricted_write_reason(tmp_path, "echo hacked > .git/config")
+def test_git_dir_redirect_needs_confirm(tmp_path):
+    reason = forced_exec_reason(tmp_path, "echo hacked > .git/config")
     assert reason is not None
     assert ".git" in reason
 
 
-def test_sed_inplace_git_is_restricted(tmp_path):
+def test_sed_inplace_git_needs_confirm(tmp_path):
     analysis = analyze_command("sed -i 's/a/b/' .git/config")
     assert any(touch.raw == ".git/config" and touch.kind == "write" for touch in analysis.touches)
-    reason = restricted_write_reason(tmp_path, "sed -i 's/a/b/' .git/config")
+    reason = forced_exec_reason(tmp_path, "sed -i 's/a/b/' .git/config")
     assert reason is not None
     assert ".git" in reason
 
 
-def test_sed_inplace_suffix_git_is_restricted(tmp_path):
-    reason = restricted_write_reason(tmp_path, "sed -i.bak 's/a/b/' .git/config")
+def test_sed_inplace_suffix_git_needs_confirm(tmp_path):
+    reason = forced_exec_reason(tmp_path, "sed -i.bak 's/a/b/' .git/config")
     assert reason is not None
 
 
@@ -84,16 +83,16 @@ def test_sed_without_inplace_is_not_write():
     assert not any(touch.kind == "write" for touch in analysis.touches)
 
 
-def test_curl_output_git_is_restricted(tmp_path):
+def test_curl_output_git_needs_confirm(tmp_path):
     analysis = analyze_command("curl -o .git/hooks/x https://example.com")
     assert any(touch.raw == ".git/hooks/x" and touch.kind == "write" for touch in analysis.touches)
-    reason = restricted_write_reason(tmp_path, "curl -o .git/hooks/x https://example.com")
+    reason = forced_exec_reason(tmp_path, "curl -o .git/hooks/x https://example.com")
     assert reason is not None
     assert ".git" in reason
 
 
-def test_wget_output_git_is_restricted(tmp_path):
-    reason = restricted_write_reason(tmp_path, "wget -O .git/hooks/x https://example.com")
+def test_wget_output_git_needs_confirm(tmp_path):
+    reason = forced_exec_reason(tmp_path, "wget -O .git/hooks/x https://example.com")
     assert reason is not None
     assert ".git" in reason
 
@@ -122,8 +121,8 @@ def test_curl_output_eq_env_is_forced(tmp_path):
     assert ".env" in reason
 
 
-def test_opaque_is_forced(tmp_path):
-    assert forced_exec_reason(tmp_path, "python -c 'print(1)'") == OPAQUE_EXEC_MSG
+def test_opaque_is_not_forced_by_path_layer(tmp_path):
+    assert forced_exec_reason(tmp_path, "python -c 'print(1)'") is None
 
 
 def test_printenv_is_forced(tmp_path):
@@ -184,8 +183,8 @@ def test_dd_of_env_is_write(tmp_path):
     assert forced_exec_reason(tmp_path, "dd of=.env if=/dev/zero") is not None
 
 
-def test_dd_of_git_is_restricted(tmp_path):
-    reason = restricted_write_reason(tmp_path, "dd of=.git/config if=/dev/zero")
+def test_dd_of_git_needs_confirm(tmp_path):
+    reason = forced_exec_reason(tmp_path, "dd of=.git/config if=/dev/zero")
     assert reason is not None
     assert ".git" in reason
 
@@ -317,8 +316,8 @@ def test_xargs_is_opaque():
     assert analysis.opaque is True
 
 
-def test_xargs_is_forced(tmp_path):
-    assert forced_exec_reason(tmp_path, "xargs rm") == OPAQUE_EXEC_MSG
+def test_xargs_is_not_forced_as_opaque(tmp_path):
+    assert forced_exec_reason(tmp_path, "xargs rm") is None
 
 
 def test_awk_is_opaque():
@@ -343,31 +342,31 @@ def test_process_substitution_is_opaque(tmp_path):
     analysis = analyze_command("cat <(cat .env)")
     assert analysis.opaque is True
     assert is_readonly_command("cat <(cat .env)") is False
-    assert forced_exec_reason(tmp_path, "cat <(cat .env)") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, "cat <(cat .env)") is None
 
 
 def test_process_substitution_write_is_opaque(tmp_path):
     analysis = analyze_command("echo hi > >(tee .env)")
     assert analysis.opaque is True
-    assert forced_exec_reason(tmp_path, "echo hi > >(tee .env)") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, "echo hi > >(tee .env)") is None
 
 
 def test_source_is_opaque(tmp_path):
     analysis = analyze_command("source setup.sh")
     assert analysis.opaque is True
-    assert forced_exec_reason(tmp_path, "source setup.sh") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, "source setup.sh") is None
 
 
 def test_dot_source_is_opaque(tmp_path):
     analysis = analyze_command(". ./setup.sh")
     assert analysis.opaque is True
-    assert forced_exec_reason(tmp_path, ". ./setup.sh") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, ". ./setup.sh") is None
 
 
 def test_bash_script_is_opaque(tmp_path):
     analysis = analyze_command("bash install.sh")
     assert analysis.opaque is True
-    assert forced_exec_reason(tmp_path, "bash install.sh") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, "bash install.sh") is None
 
 
 def test_quoted_and_does_not_split():
@@ -388,7 +387,20 @@ def test_unquoted_and_still_splits():
 def test_make_is_opaque(tmp_path):
     analysis = analyze_command("make")
     assert analysis.opaque is True
-    assert forced_exec_reason(tmp_path, "make") == OPAQUE_EXEC_MSG
+    assert forced_exec_reason(tmp_path, "make") is None
+
+
+def test_pipe_ampersand_splits():
+    assert split_command_segments("git status |& tee log") == ["git status", "tee log"]
+
+
+def test_background_ampersand_splits():
+    assert split_command_segments("git status & pytest -q") == ["git status", "pytest -q"]
+
+
+def test_redirect_ampersand_does_not_split():
+    assert split_command_segments("echo out; echo err >&2") == ["echo out", "echo err >&2"]
+    assert split_command_segments("echo hi &> out.txt") == ["echo hi &> out.txt"]
 
 
 def test_tar_directory_outside_is_denied(tmp_path):
@@ -401,3 +413,46 @@ def test_rsync_outside_is_denied(tmp_path):
     reason = outside_workspace_reason(tmp_path, "rsync -a src/ /tmp/out/")
     assert reason is not None
     assert "之外" in reason
+
+
+def test_pushd_outside_then_write(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "pushd /tmp; echo x > leak.txt; popd")
+    assert reason is not None
+
+
+def test_builtin_cd_outside_then_write(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "builtin cd /tmp; echo x > leak.txt")
+    assert reason is not None
+
+
+def test_subshell_cd_outside_then_write(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "(cd /tmp; echo x > leak.txt)")
+    assert reason is not None
+
+
+def test_brace_group_cd_outside_then_write(tmp_path):
+    reason = outside_workspace_reason(tmp_path, "{ cd /tmp; echo x > leak.txt; }")
+    assert reason is not None
+
+
+def test_paren_does_not_split_inner_semicolon():
+    assert split_command_segments("(cd /tmp; echo x > a)") == ["(cd /tmp; echo x > a)"]
+
+
+def test_unresolved_cd_is_denied(tmp_path):
+    from cyan.security.messages import UNRESOLVED_CHDIR_MSG
+
+    reason = outside_workspace_reason(tmp_path, 'cd "$HOME" && pwd')
+    assert reason == UNRESOLVED_CHDIR_MSG
+
+
+def test_exec_cat_env_is_forced(tmp_path):
+    (tmp_path / ".env").write_text("K=1\n", encoding="utf-8")
+    reason = forced_exec_reason(tmp_path, "exec cat .env")
+    assert reason is not None
+    assert ".env" in reason
+
+
+def test_exec_peels_to_inner_head():
+    assert command_head("exec cat .env") == "cat"
+    assert is_readonly_command("exec cat .env") is True

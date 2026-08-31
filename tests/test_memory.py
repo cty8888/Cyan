@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cyan.core.runtime import Runtime
-from cyan.core.types import AssistantReply, StopReason, TaskFinished
-from cyan.errors import PathOutsideWorkspaceError, ToolError
-from cyan.llm.types import AssistantMessage
+from cyan.core.types import AssistantReply, Notice, StopReason, TaskFinished
+from cyan.errors import LLMError, PathOutsideWorkspaceError, ToolError
+from cyan.llm.types import AssistantMessage, UserMessage
 from cyan.memory.extract import persist_auto_memory
 from cyan.memory.store import (
     list_memory_files,
@@ -19,6 +21,7 @@ from cyan.memory.types import INDEX_FILENAME, MemoryEntry, MemoryKind
 from cyan.prompt.stack import PromptStack
 from cyan.security.types import PermissionMode
 from cyan.session import Session
+from cyan.settings.tools import DEFAULT_TOOL_RESULT_CHARS
 
 from .conftest import FakeLLM, drive, eval_perm, tool_call
 
@@ -191,3 +194,83 @@ def test_session_started_excludes_memory_body(tmp_path):
     started = [event for event in session.events if event.type == SESSION_STARTED]
     assert "秘密偏好" not in str(started[0].payload)
     assert session.messages[0].text == "identity-only"
+
+
+def test_extract_only_current_task(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = Session.create(workspace=workspace, system_prompt="sys")
+    session.add(UserMessage.of("旧任务"))
+    session.add(AssistantMessage.of("旧回复 UNIQUE_OLD_TASK"))
+    session.add(UserMessage.of("新任务"))
+    session.state.current_task = "新任务"
+    session.add(AssistantMessage.of("新回复"))
+    llm = FakeLLM([])
+    llm.extract_script = ['{"entries": []}']
+    persist_auto_memory(session, llm.chat)
+    assert llm.extract_requests
+    blob = llm.extract_requests[0][1]["content"]
+    assert "UNIQUE_OLD_TASK" not in blob
+    assert "新任务" in blob
+
+
+def test_extract_truncates_from_head(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = Session.create(workspace=workspace, system_prompt="sys")
+    huge = "HEAD_MARKER " + ("x" * (DEFAULT_TOOL_RESULT_CHARS + 50)) + " TAIL_MARKER"
+    session.add(UserMessage.of(huge))
+    session.state.current_task = "任务"
+    llm = FakeLLM([])
+    llm.extract_script = ['{"entries": []}']
+    persist_auto_memory(session, llm.chat)
+    blob = llm.extract_requests[0][1]["content"]
+    assert "HEAD_MARKER" in blob
+    assert "TAIL_MARKER" not in blob
+    assert "...[truncated]" in blob
+
+
+def test_extract_parses_fenced_json(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = Session.create(workspace=workspace, system_prompt="sys")
+    session.add(UserMessage.of("记住我喜欢 tabs"))
+    session.state.current_task = "记住我喜欢 tabs"
+    llm = FakeLLM([])
+    llm.extract_script = [
+        '```json\n{"entries": [{"kind": "user", "summary": "喜欢 tabs"}]}\n```'
+    ]
+    written = persist_auto_memory(session, llm.chat)
+    assert written == 1
+    index = read_memory_file(workspace, INDEX_FILENAME)
+    assert "喜欢 tabs" in index
+
+
+def test_extract_llm_error_propagates(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = Session.create(workspace=workspace, system_prompt="sys")
+    session.add(UserMessage.of("任务"))
+    session.state.current_task = "任务"
+
+    def boom(messages, tools=None):
+        raise LLMError("down")
+
+    with pytest.raises(LLMError):
+        persist_auto_memory(session, boom)
+
+
+def test_completed_extract_failure_is_noticed(env):
+    class ExtractBoom(FakeLLM):
+        def chat(self, messages, tools=None):
+            if messages and "值得跨会话记住" in str(messages[0].get("content")):
+                self.extract_requests.append(list(messages))
+                raise LLMError("down")
+            return super().chat(messages, tools)
+
+    llm = ExtractBoom([AssistantMessage.of("做完了")])
+    runtime = _runtime_with_memory(env, llm)
+    events, reason = drive(runtime, "随便做一下")
+    assert reason is StopReason.COMPLETED
+    notices = [getattr(event, "message", "") for event in events if isinstance(event, Notice)]
+    assert any("自动记忆提取失败" in message for message in notices)

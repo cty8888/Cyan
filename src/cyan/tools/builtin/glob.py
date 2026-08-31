@@ -9,7 +9,7 @@ from ...errors import ToolError
 from ...security.paths import display, resolve_path
 from ...security.rules import sensitive_path
 from ..base import Tool
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 GLOB_NAME = "glob"
 GLOB_DESCRIPTION = (
@@ -42,7 +42,6 @@ class GlobTool(Tool):
     name = GLOB_NAME
     description = GLOB_DESCRIPTION
     capability = ToolCapability.READ
-    risk = RiskLevel.LOW
     parameters = GLOB_PARAMETERS
 
     def run(
@@ -191,7 +190,7 @@ def _is_git_internal(workspace: Path, path: Path) -> bool:
 def _explicit_sensitive_root(root: Path, workspace: Path) -> bool:
     """搜索根已过敏感路径审批时，结果不再二次剔除。
 
-    只认 ``sensitive_path``（与权限层同一套规则）。``.ssh`` 目录本身不算敏感，
+    只认 ``sensitive_path`` 的 read ask/deny。``.ssh`` 目录本身不算敏感，
     否则未审批就会把 ``id_rsa`` 留在结果里。
     """
     return sensitive_path(display(workspace, root)) is not None

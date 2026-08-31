@@ -614,6 +614,22 @@ def test_loop_overflow_without_history_is_fatal(env, tmp_path):
     assert any("无法缩小上下文" in m or "模型调用失败" in m for m in notices)
 
 
+def test_loop_second_overflow_tries_compact_again(env, tmp_path):
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    session.add(UserMessage.of("做任务"))
+    _add_assistant_round(session, "c0", "early-round")
+    overflow = LLMContextOverflowError("This model's maximum context length is 65536 tokens")
+    llm = FakeLLM(
+        [AssistantMessage.of("不应到达")],
+        task_errors=[overflow, overflow],
+    )
+    runtime = make_runtime(env, llm, session)
+    events, reason = drive(runtime, "下一问")
+    assert reason is StopReason.FATAL_ERROR
+    notices = [e.message for e in events if isinstance(e, Notice)]
+    assert sum("超出模型窗口" in m for m in notices) == 2
+
+
 def test_runtime_compact_policy_is_a_copy(make_env, tmp_path):
     env = make_env()
     env.settings.compact.keep_recent_turns = 5

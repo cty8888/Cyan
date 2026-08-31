@@ -11,7 +11,7 @@ from ...security.rules import reject_restricted_write
 from ..base import Tool
 from ..diff import unified_diff
 from ..textnorm import apply_existing_newline, read_text, write_text
-from ..types import RiskLevel, ToolCapability, ToolContext, ToolRunResult
+from ..types import ToolCapability, ToolContext, ToolRunResult
 
 if TYPE_CHECKING:
     from ...session import WorkspaceAccess
@@ -36,7 +36,6 @@ class WriteFileTool(Tool):
     name = WRITE_FILE_NAME
     description = WRITE_FILE_DESCRIPTION
     capability = ToolCapability.WRITE
-    risk = RiskLevel.MEDIUM
     parameters = WRITE_FILE_PARAMETERS
 
     def describe(

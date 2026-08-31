@@ -6,7 +6,15 @@ import json
 import sys
 
 from cyan.core.prompts import EMPTY_REPLY_CONTINUE_MSG, TRUNCATION_CONTINUE_MSG
-from cyan.core.types import ApprovalRequired, AssistantReply, Notice, StopReason, TaskFinished, ToolFinished
+from cyan.core.types import (
+    ApprovalRequired,
+    AssistantReply,
+    AssistantReplyDelta,
+    Notice,
+    StopReason,
+    TaskFinished,
+    ToolFinished,
+)
 from cyan.llm.types import (
     AssistantMessage,
     ContinueMessage,
@@ -34,6 +42,20 @@ def test_completes_write_then_bash(env, tmp_path):
     assert reason is StopReason.COMPLETED
     assert sum(isinstance(e, ToolFinished) for e in events) == 2
     assert (tmp_path / "loop.py").is_file()
+
+
+def test_final_reply_streams_delta_before_full_text(env):
+    """FakeLLM 走 LLMClient 的默认 chat_stream 兜底：一个 delta 分片 + 一条完整 AssistantReply。"""
+    llm = FakeLLM([AssistantMessage.of("已完成任务。")])
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "随便做点什么")
+    assert reason is StopReason.COMPLETED
+
+    deltas = [e for e in events if isinstance(e, AssistantReplyDelta)]
+    replies = [e for e in events if isinstance(e, AssistantReply)]
+    assert deltas == [AssistantReplyDelta(text="已完成任务。")]
+    assert replies == [AssistantReply(text="已完成任务。")]
+    assert events.index(deltas[0]) < events.index(replies[0])
 
 
 def test_stops_at_max_iterations(make_env):

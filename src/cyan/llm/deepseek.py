@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Generator
 
 import openai
 from openai import OpenAI
@@ -20,8 +20,8 @@ from ..errors import (
 )
 from ..logutil import get_logger
 from .base import LLMClient
-from .parser import parse_completion
-from .types import LLMResponse
+from .parser import StreamAssembler, parse_completion
+from .types import LLMResponse, StreamChunk
 
 logger = get_logger("llm")
 
@@ -72,6 +72,57 @@ class DeepSeekClient(LLMClient):
                 last_error = error
                 delay = _backoff_delay(attempt)
                 logger.warning("模型调用失败（%s），%.1fs 后第 %s 次重试", error, delay, attempt + 1)
+                if self._on_retry:
+                    self._on_retry(attempt + 1, delay, str(error))
+                time.sleep(delay)
+
+        raise last_error or LLMError("模型调用失败")
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Generator[StreamChunk, None, LLMResponse]:
+        """流式发起补全；只在还没吐出任何文本增量之前允许重试。
+
+        一旦有内容已经展示给用户，中途网络错误就直接抛出去，不做「悄悄重连
+        再吐一遍」——避免重复内容或语义混乱（比 ``chat()`` 的重试语义更保守）。
+        """
+        if not self._llm.stream:
+            return (yield from super().chat_stream(messages, tools=tools))
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self._llm.temperature,
+            "max_tokens": self._llm.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        last_error: LLMError | None = None
+        for attempt in range(self._llm.max_retries + 1):
+            assembler = StreamAssembler()
+            emitted_any = False
+            try:
+                for raw_chunk in self._client.chat.completions.create(**payload):
+                    delta = assembler.feed(raw_chunk)
+                    if delta:
+                        emitted_any = True
+                        yield StreamChunk(text_delta=delta)
+                return assembler.finalize()
+            except LLMResponseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 统一映射为内部异常
+                error = _map_exception(exc)
+                if emitted_any or not error.retryable or attempt == self._llm.max_retries:
+                    raise error from exc
+                last_error = error
+                delay = _backoff_delay(attempt)
+                logger.warning("流式模型调用失败（%s），%.1fs 后第 %s 次重试", error, delay, attempt + 1)
                 if self._on_retry:
                     self._on_retry(attempt + 1, delay, str(error))
                 time.sleep(delay)

@@ -17,3 +17,4 @@ class LLMSettings:
     max_tokens: int = 8_192  # 单次补全上限；不设的话厂商默认过小，容易 finish_reason=length
     request_timeout: float = 180.0  # 单次 HTTP 请求超时（秒）
     max_retries: int = 3  # 可重试错误的额外尝试次数，不含首次
+    stream: bool = True  # 是否用 SSE 流式输出；关闭后退化成一次性 chat()

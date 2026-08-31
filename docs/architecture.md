@@ -90,7 +90,7 @@ src/cyan/
     rule_syntax.py       # Bash(pytest *) / Read(.env) / Edit(src/**)
     policy.py            # RuleSet：deny / ask / allow 判定
     settings_file.py     # 内置 + 用户 + 项目 + local JSON
-    catalog.py           # 从 defaults.json 读只读命令 / 包装前缀等名单
+    catalog.py           # 从 defaults.json 读命令名单 / 包装前缀 / 路径分析表
     defaults.json        # 内置 deny / ask + shell 名单
     rules.py             # 执行层二次拦截：转调 floor + 内置规则
     readonly.py          # 兼容旧导入，转调 shell.py

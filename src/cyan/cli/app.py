@@ -14,6 +14,7 @@ from rich.console import Console
 from ..core.types import (
     ApprovalRequired,
     AssistantReply,
+    AssistantReplyDelta,
     Notice,
     StopReason,
     TaskFinished,
@@ -206,6 +207,9 @@ class App:
         if isinstance(event, Thinking):
             self.renderer.thinking(event.iteration)
             return None
+        if isinstance(event, AssistantReplyDelta):
+            self.renderer.assistant_delta(event.text)
+            return None
         if isinstance(event, AssistantReply):
             self.renderer.assistant(event.text)
             return None
@@ -227,6 +231,7 @@ class App:
 
     def _abort(self, stream: Any) -> StopReason:
         """把中断抛回 generator，让它清理未完成的工具调用。"""
+        self.renderer.abort_live()
         try:
             event = stream.throw(KeyboardInterrupt())
         except (StopIteration, KeyboardInterrupt):

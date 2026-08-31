@@ -20,7 +20,9 @@ from .tool_executor import ToolExecutor
 from .types import AgentStream
 
 if TYPE_CHECKING:
-    from ..llm.types import LLMResponse
+    from typing import Generator
+
+    from ..llm.types import LLMResponse, StreamChunk
     from ..security.types import ApprovalDecision, PermissionOutcome
     from ..tools.base import Tool
     from ..tools.types import ToolContext, ToolRunResult
@@ -122,6 +124,12 @@ class Runtime:
 
     def call_llm(self, messages: list[dict], tools: list[dict] | None = None) -> LLMResponse:
         return self.llm.chat(messages, tools=tools)
+
+    def call_llm_stream(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> Generator[StreamChunk, None, LLMResponse]:
+        """流式版本：AgentLoop 手动消费，翻译成 AssistantReplyDelta 事件。"""
+        return self.llm.chat_stream(messages, tools=tools)
 
     def estimate_request_tokens(self) -> int:
         """粗估下一轮任务请求的体积：组窗后的 wire + 本轮 tools schema。"""

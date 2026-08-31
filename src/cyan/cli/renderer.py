@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -53,6 +54,8 @@ _DECISION_BY_KEY = {
 class Renderer:
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
+        self._live: Live | None = None
+        self._live_buffer: str = ""
 
     # ------------------------------------------------------------------ 通用
     def banner(
@@ -89,9 +92,34 @@ class Renderer:
         logger.error("%s", message)
 
     def assistant(self, text: str) -> None:
+        """一轮文本的定稿输出；若正在流式展示，先收尾再打印完整 Markdown。"""
+        self._stop_live()
         self.console.print(Markdown(text))
         self.console.print()
         logger.info("助手：\n%s", text)
+
+    def assistant_delta(self, text: str) -> None:
+        """流式增量：懒启动一个 transient 的 ``Live`` 面板，边收边刷新打字机效果。
+
+        ``transient=True`` 让中间态渲染不残留在终端滚动历史里；
+        真正写入历史的是 ``assistant()`` 最后那次完整 Markdown 打印。
+        """
+        if self._live is None:
+            self._live = Live(console=self.console, refresh_per_second=12, transient=True)
+            self._live.start()
+            self._live_buffer = ""
+        self._live_buffer += text
+        self._live.update(Markdown(self._live_buffer))
+
+    def abort_live(self) -> None:
+        """Ctrl-C 中断落在流式输出中途时，避免残留一个没关掉的 Live。"""
+        self._stop_live()
+
+    def _stop_live(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        self._live_buffer = ""
 
     def thinking(self, iteration: int) -> None:
         self.console.print(f"[dim]· 第 {iteration} 轮，思考中...[/]")

@@ -211,6 +211,122 @@
       "command": ["command"],
       "exec": ["exec"],
       "passthrough": ["nohup", "time", "builtin"]
-    }
+    },
+    "pythonBinaries": ["python", "python3"],
+    "findDangerousFlags": ["-delete", "-exec", "-execdir", "-fprintf", "-fls", "-ok", "-okdir"],
+    "sedInplaceFlags": ["-i", "--in-place"],
+    "sortOutputFlags": ["-o", "--output"],
+    "envDumpCommands": ["printenv", "env"],
+    "chdirCommands": ["cd", "pushd"],
+    "unresolvedChdirCommands": ["popd"],
+    "writeAll": [
+      "rm",
+      "rmdir",
+      "mkdir",
+      "touch",
+      "unlink",
+      "chmod",
+      "chown",
+      "chgrp",
+      "tee",
+      "truncate",
+      "gzip",
+      "gunzip",
+      "bzip2",
+      "bunzip2",
+      "xz",
+      "unxz"
+    ],
+    "writeLast": ["cp", "mv", "ln", "install", "rsync", "scp"],
+    "readArgs": [
+      "cat",
+      "head",
+      "tail",
+      "less",
+      "more",
+      "wc",
+      "file",
+      "stat",
+      "md5sum",
+      "sha1sum",
+      "sha256sum",
+      "nl",
+      "sort",
+      "uniq",
+      "cut",
+      "grep",
+      "egrep",
+      "fgrep",
+      "rg",
+      "diff",
+      "realpath",
+      "readlink"
+    ],
+    "opaqueHeads": [
+      "xargs",
+      "parallel",
+      "awk",
+      "make",
+      "cmake",
+      "ninja",
+      "ninja-build",
+      "tar",
+      "unzip",
+      "source",
+      ".",
+      "bash",
+      "sh",
+      "zsh",
+      "scp",
+      "rclone"
+    ],
+    "stdinShells": ["bash", "sh", "zsh"],
+    "interpreters": ["python", "python3", "node", "nodejs", "ruby", "perl", "php"],
+    "inplaceInterpreters": ["perl", "ruby", "php"],
+    "gitContentSubcommands": ["show", "cat-file", "blame", "diff", "log", "ls-files", "ls-tree"],
+    "recursiveSearchHeads": ["rg", "ag", "find"],
+    "grepHeads": ["grep", "egrep", "fgrep"],
+    "recursiveGrepFlags": ["-r", "-R", "--recursive"],
+    "writeFlagNext": {
+      "curl": ["-o", "--output"],
+      "wget": ["-O", "--output-document"],
+      "install": ["-t", "--target-directory"],
+      "sort": ["-o", "--output"],
+      "tar": ["-C", "--directory"],
+      "unzip": ["-d"]
+    },
+    "writeFlagEq": {
+      "curl": ["--output="],
+      "wget": ["--output-document="],
+      "install": ["--target-directory="],
+      "sort": ["--output="],
+      "tar": ["--directory="]
+    },
+    "uploadFlagNext": {
+      "curl": [
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--data-urlencode",
+        "-F",
+        "--form",
+        "-T",
+        "--upload-file"
+      ],
+      "wget": ["--post-file"]
+    },
+    "uploadFlagEq": {
+      "curl": [
+        "--data=",
+        "--data-raw=",
+        "--data-binary=",
+        "--data-urlencode=",
+        "--form=",
+        "--upload-file="
+      ],
+      "wget": ["--post-file="]
+    },
+    "uploadAlwaysPathFlags": ["-T", "--upload-file", "--post-file"]
   }
 }

@@ -20,6 +20,7 @@ from .types import (
     AgentStream,
     ApprovalRequired,
     AssistantReply,
+    AssistantReplyDelta,
     Notice,
     StopReason,
     TaskFinished,
@@ -30,6 +31,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from ..llm.types import LLMResponse
     from ..session import Session
     from ..settings import AgentSettings
     from .runtime import Runtime
@@ -79,8 +81,8 @@ class AgentLoop:
                 overflow_recoveries = 0
                 while True:
                     try:
-                        response = self.runtime.call_llm(
-                            self.runtime.messages_for_request(), tools=schemas
+                        response = yield from self._stream_llm(
+                            self.runtime.messages_for_request(), schemas
                         )
                         break
                     except LLMContextOverflowError as exc:
@@ -360,6 +362,25 @@ class AgentLoop:
             if block and block.tool_call_id:
                 responded.add(block.tool_call_id)
         self._respond_unanswered(assistant.tool_calls, responded, error)
+
+    def _stream_llm(
+        self, messages: list[dict], tools: list[dict]
+    ) -> Generator[AgentEvent, Any, LLMResponse]:
+        """消费 ``Runtime.call_llm_stream``：把 ``StreamChunk`` 翻译成 ``AssistantReplyDelta``。
+
+        手动 ``next()`` + 捕获 ``StopIteration`` 才能拿到底层 generator 的 return
+        值（完整 ``LLMResponse``）——``yield from`` 只能透传同类型，这里要做翻译，
+        所以不能直接 ``yield from`` 底层的 ``StreamChunk`` 流。异常原样向上抛出，
+        由调用方现有的 ``except LLMContextOverflowError`` / ``except LLMError`` 处理。
+        """
+        stream = self.runtime.call_llm_stream(messages, tools=tools)
+        try:
+            while True:
+                chunk = next(stream)
+                if chunk.text_delta:
+                    yield AssistantReplyDelta(text=chunk.text_delta)
+        except StopIteration as stop:
+            return stop.value
 
     def _shrink_context(self) -> Generator[AgentEvent, Any, bool]:
         """出门前按阈值尽量压。保留段仍超窗时会降到更少轮，最多压 ``keep+1`` 次。"""

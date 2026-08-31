@@ -27,6 +27,7 @@ _ENV_MAPPING = {
     "CYAN_MAX_TOKENS": "max_tokens",
     "CYAN_TEMPERATURE": "temperature",
     "CYAN_LOG_LEVEL": "log_level",
+    "CYAN_STREAM": "stream",
     "CYAN_MODE": "permission_mode",
     "CYAN_MAX_CONTEXT_TOKENS": "max_context_tokens",
     "CYAN_COMPACT_RESERVE_TOKENS": "reserve_tokens",
@@ -123,7 +124,7 @@ def _coerce_flat(field_name: str, raw: str, source: str) -> Any:
         return _coerce_int(raw, source)
     if field_name in {"temperature", "request_timeout", "trigger_ratio"}:
         return _coerce_float(raw, source)
-    if field_name == "verbose":
+    if field_name in {"verbose", "stream"}:
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     if field_name == "permission_mode":
         try:

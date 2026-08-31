@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..errors import InvalidToolArgumentsError, LLMResponseError
@@ -59,6 +60,95 @@ def parse_completion(raw: Any) -> LLMResponse:
         finish_reason=getattr(choice, "finish_reason", "stop") or "stop",
         usage=usage,
     )
+
+
+@dataclass
+class _ToolCallBuffer:
+    """按 ``delta.tool_calls[].index`` 分桶累积的一次工具调用分片。"""
+
+    id: str | None = None
+    name: str = ""
+    arguments: str = ""
+
+
+@dataclass
+class _StreamState:
+    text_parts: list[str] = field(default_factory=list)
+    tool_calls: dict[int, _ToolCallBuffer] = field(default_factory=dict)
+    finish_reason: str = "stop"
+    usage: Usage = field(default_factory=Usage)
+
+
+class StreamAssembler:
+    """累积一次流式补全的分片，最终装配成与 ``parse_completion`` 同构的 ``LLMResponse``。
+
+    OpenAI 兼容的流式协议里，``tool_calls`` 的 ``name``/``arguments`` 会分好几个
+    分片逐步补全（``id`` 与 ``name`` 通常只在该 tool_call 的第一个分片给出），
+    因此按 ``index`` 分桶累加，直到流结束再拼成完整 JSON 字符串交给
+    ``parse_tool_arguments`` 解析。
+    """
+
+    def __init__(self) -> None:
+        self._state = _StreamState()
+
+    def feed(self, raw_chunk: Any) -> str:
+        """吃一个 SSE 分片，返回它贡献的文本增量（没有则空串）。"""
+        choices = getattr(raw_chunk, "choices", None) or []
+        delta_text = ""
+        if choices:
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is not None:
+                content = getattr(delta, "content", None)
+                if content:
+                    self._state.text_parts.append(content)
+                    delta_text = content
+                for tool_call in getattr(delta, "tool_calls", None) or []:
+                    self._merge_tool_call(tool_call)
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason:
+                self._state.finish_reason = finish_reason
+
+        usage_raw = getattr(raw_chunk, "usage", None)
+        if usage_raw is not None:
+            self._state.usage = Usage(
+                prompt_tokens=getattr(usage_raw, "prompt_tokens", 0) or 0,
+                completion_tokens=getattr(usage_raw, "completion_tokens", 0) or 0,
+                total_tokens=getattr(usage_raw, "total_tokens", 0) or 0,
+            )
+        return delta_text
+
+    def _merge_tool_call(self, tool_call: Any) -> None:
+        index = getattr(tool_call, "index", 0) or 0
+        buffer = self._state.tool_calls.setdefault(index, _ToolCallBuffer())
+        call_id = getattr(tool_call, "id", None)
+        if call_id:
+            buffer.id = call_id
+        function = getattr(tool_call, "function", None)
+        if function is not None:
+            name = getattr(function, "name", None)
+            if name:
+                buffer.name += name
+            arguments = getattr(function, "arguments", None)
+            if arguments:
+                buffer.arguments += arguments
+
+    def finalize(self) -> LLMResponse:
+        """流结束后调用，装配完整响应；可以在没有任何分片时调用（返回空回复）。"""
+        tool_calls = [
+            ToolCallBlock(
+                id=buffer.id or f"call_{index}",
+                name=buffer.name,
+                arguments=buffer.arguments,
+            )
+            for index, buffer in sorted(self._state.tool_calls.items())
+        ]
+        text = "".join(self._state.text_parts) or None
+        return LLMResponse(
+            message=AssistantMessage.of(text=text, tool_calls=tool_calls),
+            finish_reason=self._state.finish_reason,
+            usage=self._state.usage,
+        )
 
 
 def parse_tool_arguments(raw: str, tool_name: str = "") -> dict[str, Any]:

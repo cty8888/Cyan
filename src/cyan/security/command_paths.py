@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..errors import PathOutsideWorkspaceError, SecurityError
 from . import rules
+from .catalog import shell_catalog
 from .floor import critical_rm_reason
 from .messages import ENV_DUMP_MSG, UNBOUNDED_READ_MSG, UNRESOLVED_CHDIR_MSG
 from .paths import display, resolve_path
@@ -27,124 +28,7 @@ from .shell import (
 _REDIRECT = re.compile(r"(?<!&)(?:\d*)(>>?|<<?)(?!&)\s*([^\s|&;<>]+)")
 _UNRESOLVED = re.compile(r"^\$|/\$\{|\$\{")
 
-_WRITE_ALL = frozenset(
-    {
-        "rm",
-        "rmdir",
-        "mkdir",
-        "touch",
-        "unlink",
-        "chmod",
-        "chown",
-        "chgrp",
-        "tee",
-        "truncate",
-        "gzip",
-        "gunzip",
-        "bzip2",
-        "bunzip2",
-        "xz",
-        "unxz",
-    }
-)
-_INTERPRETER_NAMES = frozenset({"python", "python3", "node", "nodejs", "ruby", "perl", "php"})
-_INPLACE_INTERPRETERS = frozenset({"perl", "ruby", "php"})
-_WRITE_LAST = frozenset({"cp", "mv", "ln", "install", "rsync", "scp"})
-# 写目标在 flag 的值里，不在位置参数末尾。-o 对 grep 是 --only-matching，必须按命令头分。
-_WRITE_FLAG_NEXT = {
-    "curl": frozenset({"-o", "--output"}),
-    "wget": frozenset({"-O", "--output-document"}),
-    "install": frozenset({"-t", "--target-directory"}),
-    "sort": frozenset({"-o", "--output"}),
-    "tar": frozenset({"-C", "--directory"}),
-    "unzip": frozenset({"-d"}),
-}
-_WRITE_FLAG_EQ = {
-    "curl": ("--output=",),
-    "wget": ("--output-document=",),
-    "install": ("--target-directory=",),
-    "sort": ("--output=",),
-    "tar": ("--directory=",),
-}
-# curl/wget 把本地文件当请求体：-d @.env、--data-binary @file、-T file
-_UPLOAD_AT_FLAGS = frozenset(
-    {
-        "-d",
-        "--data",
-        "--data-raw",
-        "--data-binary",
-        "--data-urlencode",
-        "-F",
-        "--form",
-    }
-)
-_UPLOAD_PATH_FLAGS = frozenset({"-T", "--upload-file", "--post-file"})
-_UPLOAD_FLAG_NEXT = {
-    "curl": _UPLOAD_AT_FLAGS | frozenset({"-T", "--upload-file"}),
-    "wget": frozenset({"--post-file"}),
-}
-_UPLOAD_FLAG_EQ = {
-    "curl": (
-        "--data=",
-        "--data-raw=",
-        "--data-binary=",
-        "--data-urlencode=",
-        "--form=",
-        "--upload-file=",
-    ),
-    "wget": ("--post-file=",),
-}
-_OPAQUE_HEADS = frozenset(
-    {
-        "xargs",
-        "parallel",
-        "awk",
-        "make",
-        "cmake",
-        "ninja",
-        "ninja-build",
-        "tar",
-        "unzip",
-        "source",
-        ".",
-        "bash",
-        "sh",
-        "zsh",
-        "scp",
-        "rclone",
-    }
-)
-# 无参数的 bash/sh/zsh 是从 stdin 读脚本（如 curl | sh），路径看不清但不算「不透明命令头」。
-_STDIN_SHELLS = frozenset({"bash", "sh", "zsh"})
-_GIT_CONTENT_SUBCOMMANDS = frozenset(
-    {"show", "cat-file", "blame", "diff", "log", "ls-files", "ls-tree"}
-)
-_READ_ARGS = frozenset(
-    {
-        "cat",
-        "head",
-        "tail",
-        "less",
-        "more",
-        "wc",
-        "file",
-        "stat",
-        "md5sum",
-        "sha1sum",
-        "sha256sum",
-        "nl",
-        "sort",
-        "uniq",
-        "cut",
-        "grep",
-        "egrep",
-        "fgrep",
-        "rg",
-        "diff",
-        "realpath",
-        "readlink",
-    }
-)
+# 位置参数里「后面跟值」的通用 flag，和具体命令名单无关。
 _VALUE_FLAGS = frozenset(
     {"-n", "-c", "-C", "-o", "-O", "-f", "-d", "-t", "-w", "-I", "--file", "--directory"}
 )
@@ -403,7 +287,7 @@ def _analyze_segment(segment: str, analysis: CommandPathAnalysis) -> None:
     for raw, kind in plan.inner_touches:
         analysis.touches.append(PathTouch(raw=raw, kind=kind))
     tokens = unwrap_argv(tokenize(segment)).tokens
-    if tokens and executable_name(tokens[0]) in {"printenv", "env"} and _is_bare_env(tokens):
+    if tokens and executable_name(tokens[0]) in shell_catalog().env_dump_commands and _is_bare_env(tokens):
         analysis.dumps_env = True
 
 
@@ -432,9 +316,10 @@ def _plan_segment(segment: str) -> _SegmentPlan:
     inner = unwrapped.tokens
     head = executable_name(inner[0]) if inner else ""
 
-    if head == "popd":
+    catalog = shell_catalog()
+    if head in catalog.unresolved_chdir_commands:
         return _SegmentPlan(shell_touches, None, None, [], True, True)
-    if head in {"cd", "pushd"}:
+    if head in catalog.chdir_commands:
         operands = [token for token in inner[1:] if not token.startswith("-") or token == "-"]
         if head == "pushd" and not operands:
             return _SegmentPlan(shell_touches, None, None, [], True, True)
@@ -468,24 +353,25 @@ def _argv_touches(tokens: list[str]) -> list[tuple[str, str]]:
     touches.extend((path, kind) for path, kind in _dd_paths(tokens))
     touches.extend((path, "read") for path in _upload_paths(tokens))
 
+    catalog = shell_catalog()
     paths = _path_args(tokens)
-    if head in _WRITE_ALL:
+    if head in catalog.write_all:
         touches.extend((path, "write") for path in paths)
-    elif head in _WRITE_LAST and paths:
+    elif head in catalog.write_last and paths:
         touches.extend((path, "read") for path in paths[:-1])
         touches.append((paths[-1], "write"))
     elif head == "sed" and _sed_is_inplace(tokens):
         touches.extend((path, "write") for path in paths)
-    elif head in _INPLACE_INTERPRETERS and _inplace_rewrite(tokens):
+    elif head in catalog.inplace_interpreters and _inplace_rewrite(tokens):
         touches.extend((path, "write") for path in paths)
-    elif head in _READ_ARGS:
+    elif head in catalog.read_args:
         touches.extend((path, "read") for path in paths)
     return touches
 
 
 def _git_content_paths(argv: list[str]) -> list[str]:
     """``git show HEAD:.env`` / ``git blame id_rsa`` 这类能打出文件内容的参数。"""
-    if not argv or argv[0] not in _GIT_CONTENT_SUBCOMMANDS:
+    if not argv or argv[0] not in shell_catalog().git_content_subcommands:
         return []
     paths: list[str] = []
     skip_next = False
@@ -560,26 +446,28 @@ def _upload_paths(tokens: list[str]) -> list[str]:
     if not tokens:
         return []
     head = executable_name(tokens[0])
-    next_flags = _UPLOAD_FLAG_NEXT.get(head)
-    eq_prefixes = _UPLOAD_FLAG_EQ.get(head, ())
+    catalog = shell_catalog()
+    next_flags = catalog.upload_flag_next.get(head)
+    eq_prefixes = catalog.upload_flag_eq.get(head, ())
     if not next_flags and not eq_prefixes:
         return []
     paths: list[str] = []
     skip_next = False
+    always_path_flags = catalog.upload_always_path_flags
     for index, token in enumerate(tokens[1:], start=1):
         if skip_next:
             skip_next = False
             continue
         if next_flags and token in next_flags:
             if index + 1 < len(tokens):
-                paths.extend(_upload_target(tokens[index + 1], always_path=token in _UPLOAD_PATH_FLAGS))
+                paths.extend(_upload_target(tokens[index + 1], always_path=token in always_path_flags))
                 skip_next = True
             continue
         for prefix in eq_prefixes:
             if token.startswith(prefix):
                 flag = prefix.rstrip("=")
                 paths.extend(
-                    _upload_target(token[len(prefix) :], always_path=flag in _UPLOAD_PATH_FLAGS)
+                    _upload_target(token[len(prefix) :], always_path=flag in always_path_flags)
                 )
                 break
     return paths
@@ -609,8 +497,9 @@ def _write_flag_paths(tokens: list[str]) -> list[str]:
     if not tokens:
         return []
     head = executable_name(tokens[0])
-    next_flags = _WRITE_FLAG_NEXT.get(head)
-    eq_prefixes = _WRITE_FLAG_EQ.get(head, ())
+    catalog = shell_catalog()
+    next_flags = catalog.write_flag_next.get(head)
+    eq_prefixes = catalog.write_flag_eq.get(head, ())
     if not next_flags and not eq_prefixes:
         return []
     paths: list[str] = []
@@ -635,10 +524,11 @@ def _write_flag_paths(tokens: list[str]) -> list[str]:
 
 def _sed_is_inplace(tokens: list[str]) -> bool:
     """``sed -i`` / ``--in-place`` / ``-i.bak`` 会改文件；普通 sed 只往 stdout 打。"""
+    flags = shell_catalog().sed_inplace_flags
     for token in tokens[1:]:
         if token == "--":
             break
-        if token in {"-i", "--in-place"} or token.startswith("-i") or token.startswith("--in-place="):
+        if token in flags or token.startswith("-i") or token.startswith("--in-place="):
             return True
     return False
 
@@ -664,10 +554,11 @@ def _path_args(tokens: list[str]) -> list[str]:
 
 def _is_bare_env(tokens: list[str]) -> bool:
     name = executable_name(tokens[0])
-    if name == "printenv":
-        return True
-    if name != "env":
+    catalog = shell_catalog()
+    if name not in catalog.env_dump_commands:
         return False
+    if name != "env":
+        return True
     rest = tokens[1:]
     i = 0
     while i < len(rest):
@@ -687,18 +578,14 @@ def _is_bare_env(tokens: list[str]) -> bool:
     return True
 
 
-_RECURSIVE_SEARCH_HEADS = frozenset({"rg", "ag", "find"})
-_GREP_HEADS = frozenset({"grep", "egrep", "fgrep"})
-_RECURSIVE_GREP_FLAGS = frozenset({"-r", "-R", "--recursive"})
-
-
 def _is_pytest_module(tokens: list[str]) -> bool:
-    return executable_name(tokens[0]) in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]
+    return executable_name(tokens[0]) in shell_catalog().python_binaries and tokens[1:3] == ["-m", "pytest"]
 
 
 def _is_opaque(command: str) -> bool:
     if any(pattern.search(command) for pattern in _OPAQUE_PATTERNS):
         return True
+    catalog = shell_catalog()
     for segment in split_command_segments(command):
         kind, inner = _strip_compound(segment)
         if kind:
@@ -709,11 +596,11 @@ def _is_opaque(command: str) -> bool:
         if not tokens:
             continue
         head = executable_name(tokens[0])
-        if head in _OPAQUE_HEADS:
-            if head in _STDIN_SHELLS and len(tokens) == 1:
+        if head in catalog.opaque_heads:
+            if head in catalog.stdin_shells and len(tokens) == 1:
                 continue
             return True
-        if head in _INTERPRETER_NAMES and not _is_pytest_module(tokens):
+        if head in catalog.interpreters and not _is_pytest_module(tokens):
             return True
     return False
 
@@ -723,6 +610,7 @@ _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 def _is_unbounded_read(command: str) -> bool:
     """通配或递归搜索可能扫到 .env / 密钥，不能当「看清了路径的只读」。"""
+    catalog = shell_catalog()
     for segment in split_command_segments(command):
         kind, inner = _strip_compound(segment)
         if kind:
@@ -737,9 +625,9 @@ def _is_unbounded_read(command: str) -> bool:
             if peeled.argv and peeled.argv[0] == "grep":
                 return True
         head, *rest = tokens
-        if executable_name(head) in _RECURSIVE_SEARCH_HEADS:
+        if executable_name(head) in catalog.recursive_search_heads:
             return True
-        if executable_name(head) in _GREP_HEADS and _has_recursive_grep_flag(rest):
+        if executable_name(head) in catalog.grep_heads and _has_recursive_grep_flag(rest):
             return True
         unquoted = _QUOTED.sub(" ", segment)
         unquoted_tokens = tokenize(unquoted)
@@ -749,8 +637,9 @@ def _is_unbounded_read(command: str) -> bool:
 
 
 def _has_recursive_grep_flag(tokens: list[str]) -> bool:
+    flags = shell_catalog().recursive_grep_flags
     for token in tokens:
-        if token in _RECURSIVE_GREP_FLAGS:
+        if token in flags:
             return True
         if token.startswith("--"):
             continue

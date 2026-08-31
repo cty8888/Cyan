@@ -256,3 +256,10 @@ class LLMResponse:
     message: AssistantMessage
     finish_reason: str = "stop"
     usage: Usage = field(default_factory=Usage)
+
+
+@dataclass
+class StreamChunk:
+    """流式补全的一次增量。目前只携带文本；完整响应由 generator 的 return 值给出。"""
+
+    text_delta: str

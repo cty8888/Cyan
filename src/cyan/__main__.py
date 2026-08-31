@@ -38,6 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="同时把日志打到 stderr（默认只写文件，避免和 rich 界面叠在一起）",
     )
     parser.add_argument(
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        default=None,
+        help="关闭流式输出，改为等模型说完整段话再一次性显示",
+    )
+    parser.add_argument(
         "--mode",
         choices=["plan", "default", "accept_edits"],
         help="权限模式：plan=只读规划 / default=默认 / accept_edits=自动批准普通写入（执行仍要确认），默认 default",
@@ -74,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             max_iterations=args.max_iterations,
             log_level=args.log_level,
             verbose=args.verbose,
+            stream=args.stream,
             permission_mode=PermissionMode(args.mode) if args.mode else None,
         )
     except ConfigError as exc:

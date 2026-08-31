@@ -21,11 +21,8 @@ from .catalog import shell_catalog
 _TWO_CHAR_SEPARATORS = ("||", "&&", "|&", "\r\n")
 _ONE_CHAR_SEPARATORS = frozenset({";", "|", "\n", "\r"})
 
-# 只读命令 / 包装前缀 / 安全环境变量 / acceptEdits FS：见 defaults.json ``shell``。
-_FIND_DANGEROUS_FLAGS = frozenset({"-delete", "-exec", "-execdir", "-fprintf", "-fls", "-ok", "-okdir"})
-_SED_INPLACE_FLAGS = frozenset({"-i", "--in-place"})
-_SORT_OUTPUT_FLAGS = frozenset({"-o", "--output"})
-
+# 只读命令 / 包装前缀 / 路径分析命令名：见 defaults.json ``shell``。
+# 下面这些是剥包装、git 全局选项的参数形状，和具体命令名单无关。
 _ENV_VALUE_FLAGS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
 _TIMEOUT_VALUE_FLAGS = frozenset({"-k", "--kill-after", "-s", "--signal"})
 _STDBUF_VALUE_FLAGS = frozenset({"-i", "-o", "-e"})
@@ -430,7 +427,7 @@ def command_head(command: str) -> str:
     tokens = unwrap_argv(tokenize(command)).tokens
     if not tokens:
         return ""
-    if tokens[0] in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"]:
+    if tokens[0] in shell_catalog().python_binaries and tokens[1:3] == ["-m", "pytest"]:
         return "python -m pytest"
     if executable_name(tokens[0]) == "git":
         peeled = peel_git_globals(tokens)
@@ -476,9 +473,10 @@ def _is_readonly_segment(segment: str) -> bool:
     if command_head(segment) == "python -m pytest":
         return True
     if name == "find":
-        return not any(flag in _FIND_DANGEROUS_FLAGS for flag in rest)
+        return not any(flag in shell_catalog().find_dangerous_flags for flag in rest)
     if name == "sed":
-        return not any(flag in _SED_INPLACE_FLAGS or flag.startswith("-i") for flag in rest)
+        flags = shell_catalog().sed_inplace_flags
+        return not any(flag in flags or flag.startswith("-i") for flag in rest)
     if name == "sort":
         return not _sort_writes(rest)
     return name in shell_catalog().readonly_binaries
@@ -486,8 +484,9 @@ def _is_readonly_segment(segment: str) -> bool:
 
 def _sort_writes(rest: list[str]) -> bool:
     """``sort -o FILE`` / ``--output=FILE`` 会写文件，不能当只读。"""
+    flags = shell_catalog().sort_output_flags
     for token in rest:
-        if token in _SORT_OUTPUT_FLAGS or token.startswith("--output="):
+        if token in flags or token.startswith("--output="):
             return True
     return False
 

@@ -43,11 +43,23 @@ class Thinking(AgentEvent):
 
 
 @dataclass
+class AssistantReplyDelta(AgentEvent):
+    """模型流式输出的增量文本分片，用于实时展示（打字机效果）。
+
+    同一轮里若干条 ``AssistantReplyDelta`` 之后必定紧跟一条携带完整文本的
+    ``AssistantReply``——后者才是「这一轮文本已完整」的权威信号，
+    ``final_text``、Auto Memory、压缩等下游逻辑仍只看 ``AssistantReply``。
+    """
+
+    text: str
+
+
+@dataclass
 class AssistantReply(AgentEvent):
     """模型给出的可见文本（不含 tool_calls，那些走 ToolStarted）。"""
 
     text: str
-
+    
 
 @dataclass
 class ApprovalRequired(AgentEvent):

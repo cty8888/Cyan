@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..errors import InvalidToolArgumentsError, LLMResponseError
-from .types import AssistantMessage, LLMResponse, ToolCallBlock, Usage
+from .types import AssistantMessage, LLMResponse, StreamChunk, ToolCallBlock, Usage
 
 _CODE_FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 _TRAILING_COMMA = re.compile(r",\s*([}\]])")
@@ -91,10 +91,14 @@ class StreamAssembler:
     def __init__(self) -> None:
         self._state = _StreamState()
 
-    def feed(self, raw_chunk: Any) -> str:
-        """吃一个 SSE 分片，返回它贡献的文本增量（没有则空串）。"""
+    def feed(self, raw_chunk: Any) -> StreamChunk | None:
+        """吃一个 SSE 分片，返回它贡献的增量（没有就返回 None）。
+
+        文本分片和 tool_call 分片不会同时出现在同一个 ``StreamChunk`` 里——
+        OpenAI 兼容协议里一次 delta 只携带其中一种。
+        """
         choices = getattr(raw_chunk, "choices", None) or []
-        delta_text = ""
+        result: StreamChunk | None = None
         if choices:
             choice = choices[0]
             delta = getattr(choice, "delta", None)
@@ -102,9 +106,9 @@ class StreamAssembler:
                 content = getattr(delta, "content", None)
                 if content:
                     self._state.text_parts.append(content)
-                    delta_text = content
+                    result = StreamChunk(text_delta=content)
                 for tool_call in getattr(delta, "tool_calls", None) or []:
-                    self._merge_tool_call(tool_call)
+                    result = self._merge_tool_call(tool_call)
             finish_reason = getattr(choice, "finish_reason", None)
             if finish_reason:
                 self._state.finish_reason = finish_reason
@@ -116,22 +120,32 @@ class StreamAssembler:
                 completion_tokens=getattr(usage_raw, "completion_tokens", 0) or 0,
                 total_tokens=getattr(usage_raw, "total_tokens", 0) or 0,
             )
-        return delta_text
+        return result
 
-    def _merge_tool_call(self, tool_call: Any) -> None:
+    def _merge_tool_call(self, tool_call: Any) -> StreamChunk:
         index = getattr(tool_call, "index", 0) or 0
         buffer = self._state.tool_calls.setdefault(index, _ToolCallBuffer())
         call_id = getattr(tool_call, "id", None)
         if call_id:
             buffer.id = call_id
+        name_delta = ""
+        arguments_delta = ""
         function = getattr(tool_call, "function", None)
         if function is not None:
             name = getattr(function, "name", None)
             if name:
                 buffer.name += name
+                name_delta = name
             arguments = getattr(function, "arguments", None)
             if arguments:
                 buffer.arguments += arguments
+                arguments_delta = arguments
+        return StreamChunk(
+            tool_call_index=index,
+            tool_call_id=call_id,
+            tool_call_name=name_delta or None,
+            tool_call_arguments_delta=arguments_delta,
+        )
 
     def finalize(self) -> LLMResponse:
         """流结束后调用，装配完整响应；可以在没有任何分片时调用（返回空回复）。"""

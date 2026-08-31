@@ -109,10 +109,10 @@ class DeepSeekClient(LLMClient):
             emitted_any = False
             try:
                 for raw_chunk in self._client.chat.completions.create(**payload):
-                    delta = assembler.feed(raw_chunk)
-                    if delta:
+                    chunk = assembler.feed(raw_chunk)
+                    if chunk is not None:
                         emitted_any = True
-                        yield StreamChunk(text_delta=delta)
+                        yield chunk
                 return assembler.finalize()
             except LLMResponseError:
                 raise

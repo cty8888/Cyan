@@ -62,6 +62,25 @@ class AssistantReply(AgentEvent):
     
 
 @dataclass
+class ToolCallDelta(AgentEvent):
+    """流式过程中一次工具调用参数 JSON 的增量分片，用于 CLI 实时预览。
+
+    比如 ``write_file``/``edit_file`` 可以边生成边把文件内容"typing" 出来，
+    跟 Claude Code 靠 Anthropic 的 fine-grained tool streaming 做的效果一样。
+
+    ``index`` 是本轮响应内的顺序号（模型可能一次发起多个工具调用）；
+    ``call_id``/``name`` 通常只在该调用的第一个分片里携带，之后为 None，
+    需要消费方自己按 ``index`` 记住。真正执行仍然要等完整 JSON 拼好、
+    经过 ``parse_tool_arguments`` 解析之后才会发起（见 ``ToolStarted``）。
+    """
+
+    index: int
+    call_id: str | None
+    name: str | None
+    arguments_delta: str
+
+
+@dataclass
 class ApprovalRequired(AgentEvent):
     """需要外部回传一个 ``ApprovalDecision``。"""
 

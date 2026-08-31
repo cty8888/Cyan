@@ -222,6 +222,25 @@ def _cmd_memory(app: App, args: list[str]) -> bool:
     return False
 
 
+def _cmd_stream(app: App, args: list[str]) -> bool:
+    """查看或切换流式输出。直接改 ``app.settings.llm``——``DeepSeekClient`` 持有的是
+    同一个 ``LLMSettings`` 对象，下一次模型调用立刻生效，不需要重建客户端。
+    """
+    console = app.renderer.console
+    if not args:
+        state = "开" if app.settings.llm.stream else "关"
+        console.print(f"[dim]流式输出当前：{state}（/stream on|off 切换）[/]")
+        return False
+    value = args[0].lower()
+    if value not in {"on", "off"}:
+        console.print("[yellow]用法：/stream on|off[/]")
+        return False
+    app.settings.llm.stream = value == "on"
+    console.print(f"[dim]流式输出已{'开启' if app.settings.llm.stream else '关闭'}[/]")
+    logger.info("切换流式输出：%s", app.settings.llm.stream)
+    return False
+
+
 def _cmd_compact(app: App, args: list[str]) -> bool:
     from ..session.compact import resolve_keep_from
 
@@ -362,6 +381,7 @@ def build_default_commands() -> CommandRegistry:
         )
     )
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
+    registry.register(SlashCommand("/stream", "/stream [on|off]", "查看或切换流式输出", _cmd_stream))
     registry.register(SlashCommand("/instructions", "/instructions", "列出已加载的指令层（cyan.md）", _cmd_instructions))
     registry.register(SlashCommand("/memory", "/memory", "列出项目自动记忆文件", _cmd_memory))
     registry.register(SlashCommand("/compact", "/compact", "把较早的对话压缩成摘要", _cmd_compact))

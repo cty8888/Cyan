@@ -26,10 +26,11 @@ uv run cyan
 | `--resume` | 列出或指定会话 id 恢复 |
 | `--max-iterations` | 单任务最大轮次，默认 30 |
 | `--verbose` | 额外把日志打到 stderr（默认只写文件，不干扰 rich 界面） |
+| `--no-stream` | 关闭流式输出，改为等模型说完整段话再一次性显示（也可用环境变量 `CYAN_STREAM=0`） |
 
-终端界面用 rich 渲染（Markdown、diff、审批面板）。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
+终端界面用 rich 渲染（Markdown、diff、审批面板）。助手回复默认按 SSE 流式打字机效果实时显示，`--no-stream` 可关闭退化成一次性显示。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/instructions`、`/memory`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/history`、`/rewind`、`/sessions`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。
 
 ## 指令层（cyan.md）
 
@@ -128,4 +129,4 @@ uv run pytest
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory 已落地。后续：流式输出、任务规划。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出已落地。后续：任务规划、丰富斜杠命令。

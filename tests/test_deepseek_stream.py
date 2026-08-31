@@ -11,10 +11,15 @@ from cyan.llm.deepseek import DeepSeekClient
 from cyan.settings.llm import LLMSettings
 
 
-def _chunk(content=None, finish_reason=None, usage=None):
-    delta = SimpleNamespace(content=content, tool_calls=None)
+def _chunk(content=None, finish_reason=None, usage=None, tool_calls=None):
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def _tool_call_delta(index, *, call_id=None, name=None, arguments=None):
+    function = SimpleNamespace(name=name, arguments=arguments)
+    return SimpleNamespace(index=index, id=call_id, function=function)
 
 
 def _client(**settings_kwargs) -> DeepSeekClient:
@@ -129,3 +134,41 @@ def test_chat_stream_falls_back_to_chat_when_stream_disabled():
 
     assert [c.text_delta for c in chunks] == ["done"]
     assert response.message.text == "done"
+
+
+def test_chat_stream_yields_tool_call_argument_deltas():
+    client = _client()
+
+    def fake_create(**kwargs):
+        return iter(
+            [
+                _chunk(
+                    tool_calls=[
+                        _tool_call_delta(0, call_id="call_1", name="write_file", arguments='{"path": "a.py", "content": "')
+                    ]
+                ),
+                _chunk(tool_calls=[_tool_call_delta(0, arguments='print(1)"}')]),
+                _chunk(finish_reason="tool_calls"),
+            ]
+        )
+
+    _patch_create(client, fake_create)
+
+    gen = client.chat_stream([{"role": "user", "content": "hi"}])
+    chunks = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as stop:
+        response = stop.value
+
+    assert [c.tool_call_arguments_delta for c in chunks] == [
+        '{"path": "a.py", "content": "',
+        'print(1)"}',
+    ]
+    assert chunks[0].tool_call_name == "write_file"
+    assert chunks[0].tool_call_id == "call_1"
+    assert chunks[1].tool_call_name is None
+    calls = response.message.tool_calls
+    assert len(calls) == 1
+    assert calls[0].name == "write_file"

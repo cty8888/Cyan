@@ -13,7 +13,9 @@ from cyan.core.types import (
     Notice,
     StopReason,
     TaskFinished,
+    ToolCallDelta,
     ToolFinished,
+    ToolStarted,
 )
 from cyan.llm.types import (
     AssistantMessage,
@@ -56,6 +58,27 @@ def test_final_reply_streams_delta_before_full_text(env):
     assert deltas == [AssistantReplyDelta(text="已完成任务。")]
     assert replies == [AssistantReply(text="已完成任务。")]
     assert events.index(deltas[0]) < events.index(replies[0])
+
+
+def test_tool_call_streams_as_delta_before_tool_started(env, tmp_path):
+    """FakeLLM 走兜底 chat_stream：tool_call 的完整参数会先当一次分片以 ToolCallDelta 发出，再触发 ToolStarted。"""
+    llm = FakeLLM([
+        tool_call("write_file", '{"path": "a.py", "content": "x = 1"}', "c1"),
+        AssistantMessage.of("完成。"),
+    ])
+    runtime = make_runtime(env, llm)
+    events, reason = drive(runtime, "写个文件")
+    assert reason is StopReason.COMPLETED
+
+    deltas = [e for e in events if isinstance(e, ToolCallDelta)]
+    started = [e for e in events if isinstance(e, ToolStarted)]
+    assert len(deltas) == 1
+    assert deltas[0].index == 0
+    assert deltas[0].call_id == "c1"
+    assert deltas[0].name == "write_file"
+    assert deltas[0].arguments_delta == '{"path": "a.py", "content": "x = 1"}'
+    assert len(started) == 1
+    assert events.index(deltas[0]) < events.index(started[0])
 
 
 def test_stops_at_max_iterations(make_env):

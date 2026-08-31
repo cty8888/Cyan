@@ -20,6 +20,7 @@ from ..core.types import (
     TaskFinished,
     TaskStarted,
     Thinking,
+    ToolCallDelta,
     ToolFinished,
     ToolStarted,
 )
@@ -209,6 +210,9 @@ class App:
             return None
         if isinstance(event, AssistantReplyDelta):
             self.renderer.assistant_delta(event.text)
+            return None
+        if isinstance(event, ToolCallDelta):
+            self.renderer.tool_call_delta(event.index, event.call_id, event.name, event.arguments_delta)
             return None
         if isinstance(event, AssistantReply):
             self.renderer.assistant(event.text)

@@ -26,6 +26,7 @@ from .types import (
     TaskFinished,
     TaskStarted,
     Thinking,
+    ToolCallDelta,
     ToolFinished,
     ToolStarted,
 )
@@ -379,6 +380,13 @@ class AgentLoop:
                 chunk = next(stream)
                 if chunk.text_delta:
                     yield AssistantReplyDelta(text=chunk.text_delta)
+                if chunk.tool_call_index is not None:
+                    yield ToolCallDelta(
+                        index=chunk.tool_call_index,
+                        call_id=chunk.tool_call_id,
+                        name=chunk.tool_call_name,
+                        arguments_delta=chunk.tool_call_arguments_delta,
+                    )
         except StopIteration as stop:
             return stop.value
 

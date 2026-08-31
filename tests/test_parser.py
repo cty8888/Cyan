@@ -49,8 +49,8 @@ def _tool_call_delta(index, *, call_id=None, name=None, arguments=None):
 
 def test_stream_assembler_accumulates_text():
     assembler = StreamAssembler()
-    assert assembler.feed(_chunk(content="Hello")) == "Hello"
-    assert assembler.feed(_chunk(content=" world")) == " world"
+    assert assembler.feed(_chunk(content="Hello")).text_delta == "Hello"
+    assert assembler.feed(_chunk(content=" world")).text_delta == " world"
     response = assembler.finalize()
     assert response.message.text == "Hello world"
     assert response.message.tool_calls == []
@@ -58,26 +58,38 @@ def test_stream_assembler_accumulates_text():
 
 def test_stream_assembler_ignores_chunks_without_content():
     assembler = StreamAssembler()
-    assert assembler.feed(_chunk()) == ""
+    assert assembler.feed(_chunk()) is None
     assert assembler.finalize().message.text is None
 
 
 def test_stream_assembler_accumulates_tool_call_across_chunks():
     assembler = StreamAssembler()
-    assembler.feed(
+    first = assembler.feed(
         _chunk(
             tool_calls=[
                 _tool_call_delta(0, call_id="call_1", name="read_file", arguments='{"pat')
             ]
         )
     )
-    assembler.feed(_chunk(tool_calls=[_tool_call_delta(0, arguments='h": "a.py"}')]))
+    second = assembler.feed(_chunk(tool_calls=[_tool_call_delta(0, arguments='h": "a.py"}')]))
     response = assembler.finalize()
     calls = response.message.tool_calls
     assert len(calls) == 1
     assert calls[0].id == "call_1"
     assert calls[0].name == "read_file"
     assert calls[0].arguments == '{"path": "a.py"}'
+
+    # feed() 同时把这次分片的增量原样透出，供 CLI 实时预览用。
+    assert first.tool_call_index == 0
+    assert first.tool_call_id == "call_1"
+    assert first.tool_call_name == "read_file"
+    assert first.tool_call_arguments_delta == '{"pat'
+    assert second.tool_call_index == 0
+    assert second.tool_call_id is None
+    assert second.tool_call_name is None
+    assert second.tool_call_arguments_delta == 'h": "a.py"}'
+    assert first.text_delta == ""
+    assert second.text_delta == ""
 
 
 def test_stream_assembler_keeps_tool_call_order_by_index():

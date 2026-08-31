@@ -310,7 +310,8 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 
 ### Phase 2：交互体验
 
-- [ ] 流式输出（`stream=True` + tool_call 分片拼接）
+- [x] 流式输出（`stream=True` + tool_call 分片拼接；`LLMClient.chat_stream()` 默认退化成一次性 `chat()`，`DeepSeekClient` 覆写做真正的 SSE；`--no-stream` / `CYAN_STREAM` 可关闭）
+- [x] tool_call 参数流式可视化（`ToolCallDelta` 事件携带 `index`/`call_id`/`name`/`arguments_delta`；CLI 侧对 `write_file`/`edit_file` 尽力从未解析完的 JSON 里抠出 `content`/`new_string` 字段边生成边展示，其它工具退化成原始 JSON 片段；真正执行仍等完整 JSON 拼好、解析通过后才发起）
 - [x] rich 富渲染：工具卡片、diff 预览、执行输出摘要
 - [x] Ctrl-C 中断（中断时补齐未响应的 tool_call，保证上下文完整）
 - [ ] 丰富斜杠命令：会话中改 Runtime 上的策略副本（compact / loop / tools / context），不写回 `AgentSettings`；先把 loop/tools/context 收成与 compact 相同的「settings 默认 → App 拷贝注入」

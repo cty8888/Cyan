@@ -260,6 +260,19 @@ class LLMResponse:
 
 @dataclass
 class StreamChunk:
-    """流式补全的一次增量。目前只携带文本；完整响应由 generator 的 return 值给出。"""
+    """流式补全的一次增量：文本分片，或者某个 tool_call 参数 JSON 的分片。
 
-    text_delta: str
+    两者不会同时非空——OpenAI 兼容协议里一次 delta 只携带其中一种。完整响应
+    （包括拼好的 tool_calls）由 generator 的 return 值给出，本类只用于向外展示
+    「正在生成什么」的实时预览。
+
+    ``tool_call_index`` 非 None 时表示这是一次 tool_call 分片：``tool_call_id``/
+    ``tool_call_name`` 通常只在该调用的第一个分片里携带，之后为空字符串/None，
+    调用方需要自己按 ``tool_call_index`` 记住。
+    """
+
+    text_delta: str = ""
+    tool_call_index: int | None = None
+    tool_call_id: str | None = None
+    tool_call_name: str | None = None
+    tool_call_arguments_delta: str = ""

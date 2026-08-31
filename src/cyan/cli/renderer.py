@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from rich.console import Console
@@ -49,13 +51,34 @@ _DECISION_BY_KEY = {
     "n": ApprovalDecision.DENY,
     "a": ApprovalDecision.ALLOW_ALWAYS,
 }
+_LIVE_MIN_INTERVAL = 0.08  # 秒；避免每个分片都重新解析整段内容造成 CPU 抖动
+# 这几个工具的哪个参数值得实时预览：write_file 边生成边看新内容，
+# edit_file 边生成边看替换后的新文本——跟 Claude Code 靠 fine-grained tool
+# streaming 展示 Write/Edit 内容"typing"出来的效果一样。
+_TOOL_PREVIEW_FIELD = {
+    "write_file": "content",
+    "edit_file": "new_string",
+}
+
+
+@dataclass
+class _ToolPreviewState:
+    """一次工具调用参数流式拼装过程中的缓冲区，只用于渲染，不参与真正执行。"""
+
+    index: int
+    name: str | None = None
+    call_id: str | None = None
+    arguments: str = ""
 
 
 class Renderer:
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
         self._live: Live | None = None
+        self._live_kind: str | None = None  # "text" | "tool"
         self._live_buffer: str = ""
+        self._live_last_update: float = 0.0
+        self._tool_preview: _ToolPreviewState | None = None
 
     # ------------------------------------------------------------------ 通用
     def banner(
@@ -93,7 +116,7 @@ class Renderer:
 
     def assistant(self, text: str) -> None:
         """一轮文本的定稿输出；若正在流式展示，先收尾再打印完整 Markdown。"""
-        self._stop_live()
+        self.stop_live_preview()
         self.console.print(Markdown(text))
         self.console.print()
         logger.info("助手：\n%s", text)
@@ -103,23 +126,97 @@ class Renderer:
 
         ``transient=True`` 让中间态渲染不残留在终端滚动历史里；
         真正写入历史的是 ``assistant()`` 最后那次完整 Markdown 打印。
+        增量本身立即累积进缓冲区，但重新解析 Markdown 并刷新终端按
+        ``_LIVE_MIN_INTERVAL`` 节流——模型吐字很快时不必每个分片都重绘一次。
+
+        同一个 ``Live`` 区域也被工具参数预览（见 ``tool_call_delta``）复用；
+        如果上一刻还在展示工具预览，这里先收尾切换过去。
         """
+        if self._live is not None and self._live_kind != "text":
+            self.stop_live_preview()
         if self._live is None:
             self._live = Live(console=self.console, refresh_per_second=12, transient=True)
             self._live.start()
+            self._live_kind = "text"
             self._live_buffer = ""
+            self._live_last_update = 0.0
         self._live_buffer += text
-        self._live.update(Markdown(self._live_buffer))
+        now = time.monotonic()
+        if now - self._live_last_update >= _LIVE_MIN_INTERVAL:
+            self._live.update(Markdown(self._live_buffer))
+            self._live_last_update = now
 
-    def abort_live(self) -> None:
-        """Ctrl-C 中断落在流式输出中途时，避免残留一个没关掉的 Live。"""
-        self._stop_live()
+    def tool_call_delta(self, index: int, call_id: str | None, name: str | None, arguments_delta: str) -> None:
+        """工具调用参数 JSON 的一次流式分片：实时预览正在拼装的内容。
 
-    def _stop_live(self) -> None:
+        write_file/edit_file 会尽力从还没解析完的 JSON 里抠出 ``content``/
+        ``new_string`` 字段，边生成边展示；其它工具退化成展示原始 JSON 片段。
+        真正执行仍然等完整 JSON 拼好、由 ``ToolStarted`` 之前的
+        ``stop_live_preview()`` 收尾。
+
+        协议上（Anthropic/OpenAI 兼容都一样）一次只会有一个 tool_call 在吐分片，
+        下一个 tool_call 开始吐之前，上一个必然已经吐完——所以 index 变化就意味着
+        上一个工具的参数已经拼好了，直接把它定格成一条静态记录留在回滚历史里，
+        而不是无声消失，视觉上更接近"一个工具卡片接一个出现"的效果。
+        """
+        if self._live is not None and self._live_kind == "tool" and self._tool_preview is not None and self._tool_preview.index != index:
+            self._freeze_tool_preview()
+        elif self._live is not None and self._live_kind != "tool":
+            self.stop_live_preview()
+
+        if self._tool_preview is None or self._tool_preview.index != index:
+            self._tool_preview = _ToolPreviewState(index=index)
+        state = self._tool_preview
+        if name:
+            state.name = (state.name or "") + name
+        if call_id:
+            state.call_id = call_id
+        state.arguments += arguments_delta
+
+        if self._live is None:
+            self._live = Live(console=self.console, refresh_per_second=12, transient=True)
+            self._live.start()
+            self._live_kind = "tool"
+            self._live_last_update = 0.0
+        now = time.monotonic()
+        if now - self._live_last_update >= _LIVE_MIN_INTERVAL:
+            self._live.update(_tool_preview_panel(state))
+            self._live_last_update = now
+
+    def _freeze_tool_preview(self) -> None:
+        """把当前工具的预览从 ``Live`` 里定格成一条静态记录，留在回滚历史里。
+
+        用于模型在一轮里连续发起多个 tool_call 时——切到下一个 index 前，
+        上一个工具的参数已经拼完，不该无声消失。真正的执行结果
+        （``ToolStarted``/``ToolFinished``）会在执行阶段照常打印，
+        这条记录只是"参数已生成"的定格快照，两者不冲突。
+        """
+        if self._tool_preview is not None:
+            self.console.print(_tool_preview_panel(self._tool_preview, finalized=True))
         if self._live is not None:
             self._live.stop()
             self._live = None
+        self._live_kind = None
         self._live_buffer = ""
+        self._live_last_update = 0.0
+        self._tool_preview = None
+
+    def abort_live(self) -> None:
+        """Ctrl-C 中断落在流式输出中途时，避免残留一个没关掉的 Live。"""
+        self.stop_live_preview()
+
+    def stop_live_preview(self) -> None:
+        """收尾当前活跃的流式预览（文本或工具参数），转入下一阶段渲染前调用。"""
+        if self._live is not None:
+            if self._live_kind == "text":
+                # 节流可能让最后几个分片还没刷到屏幕上，收尾前补一次，避免看起来被截断。
+                self._live.update(Markdown(self._live_buffer))
+            self._live.stop()
+            self._live = None
+        self._live_kind = None
+        self._live_buffer = ""
+        self._live_last_update = 0.0
+        self._tool_preview = None
 
     def thinking(self, iteration: int) -> None:
         self.console.print(f"[dim]· 第 {iteration} 轮，思考中...[/]")
@@ -127,6 +224,7 @@ class Renderer:
 
     # ------------------------------------------------------------------ 工具
     def tool_started(self, name: str, args: dict[str, Any]) -> None:
+        self.stop_live_preview()
         self.console.print(f"[bold blue]▸ {name}[/] [dim]{_format_args(name, args)}[/]")
         logger.info("调用 %s  %s", name, _format_args(name, args))
         logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
@@ -234,6 +332,88 @@ def _render_detail(detail: str, fmt: str) -> Any:
     if fmt == "text":
         return Text(detail)
     return Syntax(detail, fmt, theme="ansi_dark", background_color="default")
+
+
+def _tool_preview_panel(state: _ToolPreviewState, *, finalized: bool = False) -> Any:
+    """把正在流式拼装的工具参数渲成一个 Panel：write_file/edit_file 显示内容本身，其它工具退化成原始 JSON 片段。
+
+    ``finalized=True`` 用于定格快照（见 ``Renderer._freeze_tool_preview``）——
+    换个标记和边框颜色，跟还在实时刷新的预览区分开。
+    """
+    name = state.name or "..."
+    path = extract_partial_string_field(state.arguments, "path")
+    marker = "✓" if finalized else "▸"
+    title = f"{marker} {name}{f' {path}' if path else ''}"
+
+    field = _TOOL_PREVIEW_FIELD.get(state.name or "")
+    body: Any
+    if field is not None:
+        preview = extract_partial_string_field(state.arguments, field)
+        body = (
+            Syntax(preview, "text", theme="ansi_dark", background_color="default", word_wrap=True)
+            if preview
+            else Text("生成参数中...", style="dim")
+        )
+    else:
+        body = Text(_clip(state.arguments, 300) or "...", style="dim")
+    return Panel(body, title=title, border_style="dim" if finalized else "blue", padding=(0, 1))
+
+
+def extract_partial_string_field(partial_json: str, field_name: str) -> str | None:
+    """从还没解析完的 JSON 片段里尽力抠出某个字符串字段目前已经流到的内容。
+
+    只用于 CLI 实时预览——真正执行工具要等完整 JSON 拼好，走
+    ``parse_tool_arguments`` 正经解析。找不到该字段（还没流到）返回 ``None``；
+    字段本身还在流式生成时，返回已经解码出来的部分，遇到还没流完的转义序列
+    （比如 ``\\`` 是最后一个字符，或者 ``\\uXXXX`` 还没写满 4 位）就停在那里，
+    等下一次分片来了再继续，不会展示半个转义字符。
+    """
+    marker = f'"{field_name}"'
+    marker_at = partial_json.find(marker)
+    if marker_at == -1:
+        return None
+    cursor = marker_at + len(marker)
+    length = len(partial_json)
+
+    while cursor < length and partial_json[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= length or partial_json[cursor] != ":":
+        return None
+    cursor += 1
+    while cursor < length and partial_json[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= length or partial_json[cursor] != '"':
+        return None
+    cursor += 1
+
+    simple_escapes = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f"}
+    decoded: list[str] = []
+    while cursor < length:
+        char = partial_json[cursor]
+        if char == '"':
+            break
+        if char != "\\":
+            decoded.append(char)
+            cursor += 1
+            continue
+        if cursor + 1 >= length:
+            break  # 转义序列还没流完，先不展示这半个字符，等下一片
+        escape = partial_json[cursor + 1]
+        if escape in simple_escapes:
+            decoded.append(simple_escapes[escape])
+            cursor += 2
+            continue
+        if escape == "u":
+            if cursor + 6 > length:
+                break  # \uXXXX 还没流完
+            try:
+                decoded.append(chr(int(partial_json[cursor + 2 : cursor + 6], 16)))
+            except ValueError:
+                break
+            cursor += 6
+            continue
+        break  # 未知转义，保守地当成还没流完
+    return "".join(decoded)
 
 
 def _format_args(tool_name: str, args: dict[str, Any]) -> str:

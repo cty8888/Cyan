@@ -155,7 +155,19 @@ class Session:
         elif isinstance(message, SummaryMessage):
             event = self._append_event(SUMMARY, {"text": message.text or ""})
         elif isinstance(message, UserMessage):
-            event = self._append_event(USER, {"text": message.text or ""})
+            payload: dict[str, Any] = {"text": message.text or ""}
+            files = [
+                {
+                    "path": block.path,
+                    "content": block.content,
+                    "start_line": block.start_line,
+                    "end_line": block.end_line,
+                }
+                for block in message.file_blocks
+            ]
+            if files:
+                payload["files"] = files
+            event = self._append_event(USER, payload)
         elif isinstance(message, AssistantMessage):
             event = self._append_event(
                 ASSISTANT,

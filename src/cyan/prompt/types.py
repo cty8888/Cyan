@@ -8,12 +8,13 @@ from pathlib import Path
 
 
 class PromptLayerKind(Enum):
-    """一层 system 提示的来源。以后可加 NESTED_INSTRUCTIONS / AUTO_MEMORY。"""
+    """一层 system 提示的来源。以后可加 NESTED_INSTRUCTIONS。"""
 
     IDENTITY = "identity"
     USER_INSTRUCTIONS = "user_instructions"
     PROJECT_INSTRUCTIONS = "project_instructions"
     AUTO_MEMORY = "auto_memory"
+    SKILL = "skill"
 
 
 @dataclass

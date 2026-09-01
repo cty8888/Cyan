@@ -20,8 +20,6 @@ CHECKPOINT = "checkpoint"
 FILE_OP = "file_op"
 BRANCH_FORKED = "branch_forked"
 
-# 重放时组成对话/工具视图的事件（summary 由 compact 插入，不按文件位置 emit）
-SOURCE_TYPES = frozenset({SESSION_STARTED, USER, CONTINUE, ASSISTANT, TOOL_RESULT})
 # fork 时拷贝的源事件（不含 compact/summary）
 FORK_COPY_TYPES = frozenset({SESSION_STARTED, USER, CONTINUE, ASSISTANT, TOOL_RESULT, CHECKPOINT, FILE_OP})
 

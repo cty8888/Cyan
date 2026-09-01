@@ -9,7 +9,15 @@ from typing import TYPE_CHECKING, Any, Generator
 
 from ..errors import AgentError, InvalidToolArgumentsError, LLMContextOverflowError, LLMError
 from ..llm.parser import parse_tool_arguments
-from ..llm.types import AssistantMessage, ContinueMessage, ToolCallBlock, ToolMessage, UserMessage
+from ..llm.types import (
+    AssistantMessage,
+    ContinueMessage,
+    FileBlock,
+    TextBlock,
+    ToolCallBlock,
+    ToolMessage,
+    UserMessage,
+)
 from ..security.messages import USER_DENIED_MSG
 from ..security.types import ApprovalDecision
 from ..session import TodoAccess, WorkspaceAccess
@@ -66,10 +74,14 @@ class AgentLoop:
             todos=TodoAccess(self.session),
         )
 
-    def run(self, task: str) -> AgentStream:
-        """驱动「调用模型 → 执行工具 → 再调用」直到完成或触发终止条件。"""
+    def run(self, task: str, *, file_refs: list[FileBlock] | None = None) -> AgentStream:
+        """驱动「调用模型 → 执行工具 → 再调用」直到完成或触发终止条件。
+
+        ``file_refs``：任务文本里 ``@path`` 引用的文件快照，跟 ``TextBlock``
+        一起挂进本轮 ``UserMessage``，随对话历史一起存储、重放、压缩。
+        """
         self.session.state.current_task = task
-        self.session.add(UserMessage.of(task))
+        self.session.add(UserMessage(blocks=[TextBlock(text=task), *(file_refs or [])]))
         self.session.consecutive_tool_failures = 0
         self.session.reset_repeat_tracking()
         yield TaskStarted(task=task)

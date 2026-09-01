@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..llm.types import SummaryMessage, UserMessage
 from ..security.types import PermissionMode
-from .events import BRANCH_FORKED, CHECKPOINT, FORK_COPY_TYPES, SUMMARY, USER, SessionEvent, new_event_id
+from .events import BRANCH_FORKED, CHECKPOINT, FORK_COPY_TYPES, USER, SessionEvent, new_event_id
 from .session import Session
 from .store import DiskStore
 from .types import SessionMetadata, SessionPermissions, SessionWorkspace

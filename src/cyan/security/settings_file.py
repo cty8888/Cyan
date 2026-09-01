@@ -67,10 +67,6 @@ class LoadedSettings:
     warnings: list[str] = field(default_factory=list)
 
 
-def builtin_settings_path() -> Path:
-    return DEFAULTS_PATH
-
-
 def project_settings_path(workspace: Path) -> Path:
     return Path(workspace) / ".cyan" / PROJECT_SETTINGS_NAME
 

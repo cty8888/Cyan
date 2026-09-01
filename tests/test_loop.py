@@ -20,9 +20,11 @@ from cyan.core.types import (
 from cyan.llm.types import (
     AssistantMessage,
     ContinueMessage,
+    FileBlock,
     LLMResponse,
     ToolCallBlock,
     ToolMessage,
+    UserMessage,
     Usage,
 )
 from cyan.security.types import ApprovalDecision, PermissionMode
@@ -418,6 +420,33 @@ def test_empty_reply_continues_instead_of_completing(env):
         isinstance(m, ContinueMessage) and m.text == EMPTY_REPLY_CONTINUE_MSG
         for m in runtime.session.messages
     )
+
+
+def test_run_with_file_refs_attaches_file_blocks_to_user_message(env):
+    """``file_refs`` 要跟任务文本一起挂进本轮 ``UserMessage``，供模型与后续会话使用。"""
+    llm = FakeLLM([AssistantMessage.of("看过了。")])
+    runtime = make_runtime(env, llm)
+    refs = [FileBlock(path="a.py", content="x = 1")]
+
+    events, reason = drive(runtime, "看看 @a.py", file_refs=refs)
+
+    assert reason is StopReason.COMPLETED
+    user_messages = [m for m in runtime.session.messages if isinstance(m, UserMessage)]
+    assert len(user_messages) == 1
+    assert [b.path for b in user_messages[0].file_blocks] == ["a.py"]
+    assert user_messages[0].to_api()["content"] == "看看 @a.py\n\n[文件 a.py]\n```\nx = 1\n```"
+
+
+def test_run_without_file_refs_still_works(env):
+    """不传 ``file_refs``（默认 None）时行为跟原来一样，只有 TextBlock。"""
+    llm = FakeLLM([AssistantMessage.of("完成。")])
+    runtime = make_runtime(env, llm)
+
+    events, reason = drive(runtime, "随便做点什么")
+
+    assert reason is StopReason.COMPLETED
+    user_messages = [m for m in runtime.session.messages if isinstance(m, UserMessage)]
+    assert user_messages[0].file_blocks == []
 
 
 def test_loop_stores_validated_tool_arguments(env, tmp_path):

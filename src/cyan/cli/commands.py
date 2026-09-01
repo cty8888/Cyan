@@ -235,7 +235,7 @@ def _cmd_usage(app: App, args: list[str]) -> bool:
 
 
 def _cmd_instructions(app: App, args: list[str]) -> bool:
-    """列出当前 Prompt Layer（身份 + cyan.md + MEMORY.md），不含类型文件全文。"""
+    """列出当前 Prompt Layer（身份 + cyan.md + Skills + MEMORY.md），不含正文全文。"""
     from ..llm.types import SystemMessage
 
     stack = app.runtime.prompt_stack
@@ -253,6 +253,96 @@ def _cmd_instructions(app: App, args: list[str]) -> bool:
         extra = "  [yellow]已截断[/]" if layer.truncated else ""
         app.renderer.console.print(
             f"  [bold]{layer.title}[/]  [dim]{source}[/]  {len(layer.text)} 字{extra}"
+        )
+    return False
+
+
+def _cmd_skills(app: App, args: list[str]) -> bool:
+    """``/skills``：列出发现的 Skills（个人级 ``~/.cyan/skills/`` + 项目级
+    ``.cyan/skills/``），显示 name/层级/启用状态/description/来源路径，不打印正文——
+    正文已经随 ``PromptStack`` 整篇进了 system（仅对启用中的 skill）。
+
+    ``/skills disable <name>`` / ``/skills enable <name>``：开关一个 skill 是否
+    自动叠进 system prompt。开关状态写进跟这个 skill 同一层级的 ``skills.json``
+    （个人级 skill 写 ``~/.cyan/skills.json``，项目级写 ``{workspace}/.cyan/skills.json``），
+    不影响 `SKILL.md` 本身；关掉之后 `/skills` 里仍能看到它（标成"已禁用"），方便随时
+    再开回来。
+    """
+    from ..prompt.skills import discover_skills, set_skill_enabled, skill_settings_path
+
+    home = app.runtime.prompt_stack.home
+    workspace = app.settings.workspace
+
+    if args and args[0] in ("enable", "disable"):
+        if len(args) < 2:
+            app.renderer.console.print("用法：/skills enable|disable <name>")
+            return False
+        enabled = args[0] == "enable"
+        name = args[1]
+        skills = discover_skills(workspace, home=home)
+        meta = next((item for item in skills if item.name == name), None)
+        if meta is None:
+            names = "、".join(item.name for item in skills) or "（无）"
+            app.renderer.console.print(f"[yellow]未找到 skill「{name}」，可用：{names}[/]")
+            return False
+        path = skill_settings_path(meta.scope, workspace, home=home)
+        if path is None:
+            app.renderer.console.print("[yellow]个人级 skill 但当前没有可写入的主目录，无法保存开关状态[/]")
+            return False
+        set_skill_enabled(path, name, enabled)
+        state = "启用" if enabled else "禁用"
+        app.renderer.console.print(f"[green]已{state}「{name}」（写入 {path}）[/]")
+        return False
+
+    skills = discover_skills(workspace, home=home)
+    if not skills:
+        app.renderer.console.print("[dim]当前没有发现任何 skill（个人级 ~/.cyan/skills/，项目级 .cyan/skills/）[/]")
+        return False
+    for meta in skills:
+        status = "[green]启用[/]" if meta.enabled else "[red]已禁用[/]"
+        app.renderer.console.print(
+            f"  [bold]{meta.name}[/]  [dim]({meta.scope_label})[/]  {status}  {meta.description}"
+        )
+        app.renderer.console.print(f"    [dim]{meta.path}[/]")
+    app.renderer.console.print("[dim]用 /skills disable|enable <name> 切换是否自动注入[/]")
+    return False
+
+
+def _cmd_skill(app: App, args: list[str]) -> bool:
+    """``/skill <name>``：手动指定下一条任务要强调的 Skill——跟 4 个 skill 常驻自动
+    注入是两件独立的事：那边是每轮都在、模型自己判断用不用；这里是用户明确要求
+    "这一次请优先照这个 skill 做"，只生效一次，随下一条任务的 ``UserMessage`` 一起
+    发出去就消费掉（``App._execute`` 里拼接、清空）。
+
+    ``/skill`` 不带参数列出可用名字；``/skill clear`` 取消已设置但还没被消费的提醒。
+    """
+    from ..prompt.skills import discover_skills
+
+    home = app.runtime.prompt_stack.home
+    skills = discover_skills(app.settings.workspace, home=home)
+    if not args:
+        names = "、".join(meta.name for meta in skills) or "（无）"
+        app.renderer.console.print(f"用法：/skill <name>｜/skill clear\n可用：{names}")
+        return False
+    if args[0] == "clear":
+        app._pending_skill_reminder = None
+        app.renderer.console.print("[dim]已取消待生效的 skill 提醒[/]")
+        return False
+    name = args[0]
+    meta = next((item for item in skills if item.name == name), None)
+    if meta is None:
+        names = "、".join(item.name for item in skills) or "（无）"
+        app.renderer.console.print(f"[yellow]未找到 skill「{name}」，可用：{names}[/]")
+        return False
+    app._pending_skill_reminder = (
+        f"[手动指定的 Skill · {meta.name}（{meta.scope_label}）——完成下面这个任务时请优先遵循]\n\n"
+        f"触发条件：{meta.description}\n\n{meta.body}"
+    )
+    app.renderer.console.print(f"[green]已指定，将在下一条任务里提醒模型遵循「{meta.name}」[/]")
+    if not meta.enabled:
+        app.renderer.console.print(
+            "[dim]提示：该 skill 当前处于 /skills disable 状态（不会自动注入），"
+            "但这次手动指定仍会生效一次[/]"
         )
     return False
 
@@ -609,6 +699,8 @@ def build_default_commands() -> CommandRegistry:
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
     registry.register(SlashCommand("/stream", "/stream [on|off]", "查看或切换流式输出", _cmd_stream))
     registry.register(SlashCommand("/instructions", "/instructions", "列出已加载的指令层（cyan.md）", _cmd_instructions))
+    registry.register(SlashCommand("/skills", "/skills", "列出发现的 Skills（个人级/项目级）", _cmd_skills))
+    registry.register(SlashCommand("/skill", "/skill", "为下一条任务手动指定一个 Skill（/skill <name>｜clear）", _cmd_skill))
     registry.register(SlashCommand("/memory", "/memory", "列出项目自动记忆文件", _cmd_memory))
     registry.register(
         SlashCommand(

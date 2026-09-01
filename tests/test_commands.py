@@ -17,6 +17,8 @@ from cyan.cli.commands import (
     _cmd_loop,
     _cmd_model,
     _cmd_resume,
+    _cmd_skill,
+    _cmd_skills,
     _cmd_status,
     _cmd_stream,
     _cmd_todos,
@@ -279,6 +281,160 @@ def test_changes_lists_modified_files_relative_to_workspace():
     assert "改动了 2 个文件" in output
     assert "src/core.py" in output
     assert "tests/test_core.py" in output
+
+
+# ---------------------------------------------------------------- /skills
+
+
+def _write_skill(root, name: str, description: str = "desc", body: str = "正文") -> None:
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def _fake_skills_app(workspace: Path, home: Path | None = None) -> SimpleNamespace:
+    app = _fake_policy_app()
+    app.settings.workspace = workspace
+    app.runtime.prompt_stack = SimpleNamespace(home=home)
+    app._pending_skill_reminder = None
+    return app
+
+
+def test_skills_reports_empty_when_none_found(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    app = _fake_skills_app(workspace)
+    assert _cmd_skills(app, []) is False
+    assert "没有发现任何 skill" in _output(app)
+
+
+def test_skills_lists_name_description_and_path(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message", "规范提交信息")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, [])
+    output = _output(app)
+    assert "commit-message" in output
+    assert "项目" in output
+    assert "规范提交信息" in output
+    assert "SKILL.md" in output
+
+
+def test_skills_includes_personal_scope(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _write_skill(home / "skills", "debugging-methodology", "遇到报错时用")
+    app = _fake_skills_app(workspace, home=home)
+    _cmd_skills(app, [])
+    output = _output(app)
+    assert "debugging-methodology" in output
+    assert "个人" in output
+
+
+def test_skills_listing_shows_enabled_status(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, [])
+    assert "启用" in _output(app)
+
+
+def test_skills_disable_writes_project_settings_and_updates_listing(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+
+    _cmd_skills(app, ["disable", "commit-message"])
+    assert "已禁用" in _output(app)
+    assert (workspace / ".cyan" / "skills.json").is_file()
+
+    app2 = _fake_skills_app(workspace)
+    _cmd_skills(app2, [])
+    assert "已禁用" in _output(app2)
+
+
+def test_skills_enable_reverts_disabled_state(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["disable", "commit-message"])
+    _cmd_skills(app, ["enable", "commit-message"])
+
+    app2 = _fake_skills_app(workspace)
+    _cmd_skills(app2, [])
+    output = _output(app2)
+    assert "已禁用" not in output
+
+
+def test_skills_disable_unknown_name_reports_error(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["disable", "does-not-exist"])
+    assert "未找到" in _output(app)
+
+
+def test_skills_disable_missing_name_reports_usage(tmp_path):
+    workspace = tmp_path / "ws"
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["disable"])
+    assert "用法" in _output(app)
+
+
+def test_skill_manual_invoke_warns_when_disabled(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["disable", "commit-message"])
+    _cmd_skill(app, ["commit-message"])
+    output = _output(app)
+    assert app._pending_skill_reminder is not None
+    assert "不会自动注入" in output
+
+
+# ---------------------------------------------------------------- /skill（手动提醒）
+
+
+def test_skill_no_args_lists_available_names():
+    workspace_root = Path(__file__).resolve().parent.parent
+    app = _fake_skills_app(workspace_root / "tests" / "fixtures-does-not-exist")
+    assert _cmd_skill(app, []) is False
+    assert "用法" in _output(app)
+
+
+def test_skill_sets_pending_reminder_for_known_skill(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message", "规范提交信息", body="一次一件事")
+    app = _fake_skills_app(workspace)
+    _cmd_skill(app, ["commit-message"])
+    assert app._pending_skill_reminder is not None
+    assert "commit-message" in app._pending_skill_reminder
+    assert "一次一件事" in app._pending_skill_reminder
+    assert "已指定" in _output(app)
+
+
+def test_skill_unknown_name_reports_available_choices(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skill(app, ["does-not-exist"])
+    assert app._pending_skill_reminder is None
+    assert "未找到" in _output(app)
+    assert "commit-message" in _output(app)
+
+
+def test_skill_clear_cancels_pending_reminder(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skill(app, ["commit-message"])
+    assert app._pending_skill_reminder is not None
+    _cmd_skill(app, ["clear"])
+    assert app._pending_skill_reminder is None
 
 
 # ---------------------------------------------------------------- /resume

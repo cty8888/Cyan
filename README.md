@@ -30,9 +30,11 @@ uv run cyan
 
 终端界面用 rich 渲染（Markdown、diff、审批面板）。助手回复默认按 SSE 流式打字机效果实时显示，`--no-stream` 可关闭退化成一次性显示。运行日志写入工作目录的 `.cyan/logs/agent.log`。会话事件日志在用户主目录 `~/.cyan/projects/<路径编码>/<session-id>.jsonl`（可用 `CYAN_HOME` 覆盖），详见 [docs/session-store.md](docs/session-store.md)。
 
-交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/memory`、`/compact`、`/loop`、`/context`、`/model`、`/status`、`/todos`、`/changes`、`/history`、`/rewind`、`/sessions`、`/resume`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。`/compact`、`/loop`、`/tools`、`/context` 支持不带参数查看当前值，或 `<字段> <值>` 修改本会话的运行时策略（不影响下次启动的默认值）；`/model` 查看或切换模型；`/status` 一屏汇总模型、权限模式、流式开关、上下文占用与调用统计；`/todos` 查看模型用 `todo_write` 维护的当前任务清单，`/todos clear` 手动清空；`/changes` 列出本次会话里被 `write_file`/`edit_file` 改动过的文件；`/resume [<id 或前缀>]`（别名 `/continue`）在 REPL 内部直接切到另一个已保存的会话，不带参数列出可选会话，切换后沿用当前会话的权限模式。全部命令的详细用法、参数与可改字段见 [docs/commands.md](docs/commands.md)。
+交互模式下可用 `/help`、`/tools`、`/usage`、`/stream`、`/instructions`、`/skills`、`/skill`、`/memory`、`/compact`、`/loop`、`/context`、`/model`、`/status`、`/todos`、`/changes`、`/history`、`/rewind`、`/sessions`、`/resume`、`/new`、`/cwd`、`/exit`，任务执行中按 Ctrl-C 中断。`/compact`、`/loop`、`/tools`、`/context` 支持不带参数查看当前值，或 `<字段> <值>` 修改本会话的运行时策略（不影响下次启动的默认值）；`/model` 查看或切换模型；`/status` 一屏汇总模型、权限模式、流式开关、上下文占用与调用统计；`/todos` 查看模型用 `todo_write` 维护的当前任务清单，`/todos clear` 手动清空；`/changes` 列出本次会话里被 `write_file`/`edit_file` 改动过的文件；`/resume [<id 或前缀>]`（别名 `/continue`）在 REPL 内部直接切到另一个已保存的会话，不带参数列出可选会话，切换后沿用当前会话的权限模式。全部命令的详细用法、参数与可改字段见 [docs/commands.md](docs/commands.md)。
 
 输入框基于 `prompt_toolkit`：敲 `/` 后不用按 Tab，随打字自动弹出、实时过滤的命令候选列表（方向键选择、Enter/Tab 确认），历史记录持久化在 `<home>/history`（`home` 同会话存储根，`CYAN_HOME` 可覆盖）跨会话保留。等待模型返回首个响应片段期间会显示一个简单的转圈动画，一旦文本开始流式输出即消失。
+
+任务里可以用 `@path` 引用工作区内的文件，敲 `@` 后同样会弹出实时过滤的文件路径候选。提交时 `@path` 不是简单的文本替换：会被解析成一个结构化的 `FileBlock`，携带引用时刻的文件内容快照，跟当前任务一起构成本轮 `UserMessage`——发给模型时自动展开成 `[文件 path]` + 代码块，随对话历史一起持久化、重放、参与压缩摘要，跟直接把文件内容贴进对话框效果一致，但不用手动复制粘贴。
 
 ## 指令层（cyan.md）
 
@@ -45,6 +47,37 @@ uv run cyan
 | `{workspace}/cyan.md` | 仅当 `.cyan/cyan.md` 不存在时的过渡位置 |
 
 缺文件则跳过。改完下一轮模型调用即生效。用 `/instructions` 查看当前加载了哪些层。
+
+## Skills
+
+跟 cyan.md 同一套磁盘发现 + 组窗叠层机制，但支持多个、各自独立触发，模型自己判断当前
+任务跟哪个 skill 相关。一个 skill 是一个目录 + 一份 `SKILL.md`（极简 frontmatter + 正文）：
+
+```
+---
+name: debugging-methodology
+description: 遇到报错、测试失败、运行结果跟预期不一致时使用
+---
+
+<正文：给模型看的详细步骤/checklist>
+```
+
+同样两层，同名时项目级覆盖个人级：
+
+| 位置 | 作用 |
+| --- | --- |
+| `~/.cyan/skills/<name>/SKILL.md` | 个人级，跨项目复用的通用做法（调试方法论、写测试、commit 规范等） |
+| `{workspace}/.cyan/skills/<name>/SKILL.md` | 项目级，跟这个项目相关的约定，可提交进 git |
+
+每个 skill 的「触发条件 + 完整正文」整篇叠进 Prompt Layer（跟 `read_file` 那种"先给摘要、
+按需拉全文"不同：个人级 skill 存在工作区之外，模型现有的工具本来就读不到它，所以直接整篇
+嵌入，不依赖模型主动去读）。用 `/skills` 查看发现到的 skill 列表（含启用状态）。
+
+这是常驻自动注入；如果想明确要求"这一次任务请优先照某个 skill 做"，用 `/skill <name>`
+手动指定（只对下一条任务生效一次），`/skill clear` 取消。如果想彻底关掉某个 skill、
+不让它继续自动进 system prompt，用 `/skills disable <name>`（`/skills enable <name>`
+重新打开）；开关状态写进跟该 skill 同一层级的 `skills.json`，不影响 `SKILL.md` 本身，
+关掉后 `/skills` 列表里仍能看到它标"已禁用"。
 
 ## 自动记忆
 
@@ -106,7 +139,7 @@ cli/        REPL 与 rich 渲染，消费事件流、处理审批交互
 core/       Agent Loop（Runtime + AgentLoop）、事件定义、identity system prompt
 session/    会话状态、工具执行历史、工作区视图
 context/    把消息历史与工具结果装配成发给模型的格式（叠 Prompt Layer）
-prompt/     Prompt Layer：identity + cyan.md + MEMORY.md 索引
+prompt/     Prompt Layer：identity + cyan.md + Skills + MEMORY.md 索引
 memory/     项目级 Auto Memory 存储与任务结束提取
 llm/        模型客户端抽象与 DeepSeek 实现、输出解析
 tools/      工具契约、注册表、文件系统与 bash 执行工具
@@ -135,8 +168,11 @@ uv sync --group dev
 uv run pytest
 ```
 
-推送到 `main` 或开 pull request 时，GitHub Actions 会按 `uv.lock` 安装依赖并跑同一套测试。
+推送到 `main` 或开 pull request 时，GitHub Actions 会按 `uv.lock` 安装依赖，依次跑
+`ruff check`（未用 import/变量）、`vulture`（未被引用的函数/常量，误报记在 `vulture_whitelist.py`）
+和同一套 pytest 测试。本地可以 `uv run ruff check src/ tests/` / `uv run vulture src/ tests/
+vulture_whitelist.py --min-confidence 60` 单独跑。
 
 ## 开发状态
 
-Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、项目级 Auto Memory、流式输出、丰富斜杠命令、任务规划工具 `todo_write`、斜杠命令实时下拉补全与等待动画、任务收尾摘要卡片（含总用时）、`read_file` 结果的语法高亮预览、`/changes` 改动文件清单均已落地。
+Phase 1（最小可用闭环）已完成。会话事件日志、compact overlay、`--continue` / `--resume` 与 rewind fork、cyan.md Prompt Layer、Skills（个人级 + 项目级）、项目级 Auto Memory、流式输出、丰富斜杠命令、任务规划工具 `todo_write`、斜杠命令与 `@path` 文件引用的实时下拉补全、等待动画、任务收尾摘要卡片（含总用时）、`read_file` 结果的语法高亮预览、`/changes` 改动文件清单均已落地。

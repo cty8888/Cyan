@@ -14,7 +14,9 @@
 | [`/permissions`](#permissions) | | `/permissions [allow\|ask\|deny\|remove] <规则>` | 列出或增删权限规则 |
 | [`/usage`](#usage) | | `/usage` | 显示本会话的 token 与调用统计 |
 | [`/stream`](#stream) | | `/stream [on\|off]` | 查看或切换流式输出 |
-| [`/instructions`](#instructions) | | `/instructions` | 列出已加载的指令层（cyan.md） |
+| [`/instructions`](#instructions) | | `/instructions` | 列出已加载的指令层（cyan.md + Skills） |
+| [`/skills`](#skills) | | `/skills [enable\|disable <name>]` | 列出发现的 Skills；开关某个 skill 是否自动注入 |
+| [`/skill`](#skill) | | `/skill [<name>\|clear]` | 为下一条任务手动指定/取消强调一个 Skill |
 | [`/memory`](#memory) | | `/memory` | 列出项目自动记忆文件 |
 | [`/compact`](#compact) | | `/compact [show\|set <字段> <值>]` | 压缩较早对话；查看/修改压缩策略 |
 | [`/loop`](#loop) | | `/loop [<字段> <值>]` | 查看或修改循环限制（轮次上限等） |
@@ -42,6 +44,60 @@
 输入框敲 `/` 后会自动弹出候选列表（随打字实时过滤，不用按 Tab，方向键选择、
 Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/completion.py` 的
 `SlashCommandCompleter` 实现，数据直接来自这份注册表，新增命令不需要再手动同步。
+
+## `@` 文件引用
+
+不是斜杠命令，而是自然语言任务里可以混用的引用语法：敲 `@` 后同样会弹出工作区内
+文件路径的实时候选（`cli/completion.py` 的 `FileReferenceCompleter`），补全或直接手打
+`@relative/path.py` 都可以。
+
+提交任务时，`cli/file_refs.py` 的 `extract_file_refs()` 会从任务文本里挑出所有
+`@path` 引用，读出当时的文件内容，打包成结构化的 `FileBlock`（不是简单的文本替换）。
+这些 `FileBlock` 跟任务文本的 `TextBlock` 一起构成本轮 `UserMessage`：
+
+- 发给模型前，`UserMessage.to_api()` 会把每个 `FileBlock` 展开成
+  `[文件 path]` + 代码块，拼在任务文本后面；
+- 随事件日志一起持久化（`session/session.py`），resume 时能从磁盘完整重建
+  （`session/view.py`）；
+- 压缩摘要按渲染后的完整内容（文本 + 文件快照）判断是否超限、如何截断
+  （`session/compact.py`），不会因为文件很大就漏判。
+
+引用只在工作区沙箱内、指向真实存在的文件时才生效；不存在、逃出工作区、或看起来
+像邮箱地址一类正常文本里的 `@`，会原样当自然语言处理，不报错也不中断输入。单个
+文件超过 `/tools` 里的 `max_file_bytes` 上限会被跳过，超过 `max_file_read_chars`
+的内容会截尾（截断规则跟 `read_file` 工具一致）。
+
+---
+
+## Skills
+
+跟 `cyan.md` 一样是磁盘上的文件、组窗时自动叠进 system prompt，不需要专门的命令去
+"激活"——放对目录，下一次组窗就会生效。一个 Skill 是一个目录 + 一份 `SKILL.md`：
+
+```
+---
+name: debugging-methodology
+description: 遇到报错、测试失败、运行结果跟预期不一致时使用
+---
+
+<正文：给模型看的详细步骤/checklist>
+```
+
+两层发现，跟 `cyan.md` 的用户级/项目级完全对齐：
+
+- 个人级：`~/.cyan/skills/<name>/SKILL.md`（跨项目共享的个人偏好，不进 git）
+- 项目级：`{workspace}/.cyan/skills/<name>/SKILL.md`（跟这个项目相关的约定，可以进 git）
+- 同名冲突时项目级覆盖个人级
+
+发现到的每个 skill，其「触发条件（description）+ 完整正文」会整篇渲成一层塞进
+`PromptStack`（跟 `read_file` 那种"先给摘要、按需再读全文"的机制不同：个人级 skill
+存在工作区之外，`read_file` 的沙箱本来就读不到它，所以选择直接整篇嵌入，不依赖模型
+主动去读）。缺 frontmatter、缺 `name`/`description` 字段的目录会被静默跳过。
+
+这是"常驻自动注入"——每一轮请求都带着，模型自己判断用不用。如果想明确要求"这一次
+任务请优先照某个 skill 做"，用 `/skill <name>` 手动指定；如果想彻底关掉某个 skill
+不让它进 system prompt，用 `/skills disable <name>`。两者是独立的旋钮，详见下方
+`/skills` 与 `/skill` 命令说明。
 
 ---
 
@@ -142,8 +198,48 @@ Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/c
 /instructions
 ```
 
-列出当前加载的 Prompt Layer（身份 system prompt + `cyan.md` 各层 + `MEMORY.md` 索引），
-显示每层的来源路径、字数，以及是否被截断；不打印全文。
+列出当前加载的 Prompt Layer（身份 system prompt + `cyan.md` 各层 + Skills 各层 +
+`MEMORY.md` 索引），显示每层的来源路径、字数，以及是否被截断；不打印全文。
+
+---
+
+## `/skills` {#skills}
+
+```
+/skills                          # 列出发现的 skill（含启用/禁用状态）
+/skills disable <name>           # 关掉某个 skill，不再自动叠进 system prompt
+/skills enable <name>            # 重新打开
+```
+
+列出模式下每条显示 name、层级（个人/项目）、启用状态、description 与来源路径；不打印
+正文——正文已经随 `PromptStack` 整篇进了 system（仅限启用中的），用 `/instructions`
+能看到对应层的字数与是否被截断。
+
+`disable`/`enable` 只是加/删一个开关标记，不动 `SKILL.md` 本身：开关状态写进跟该
+skill 同一层级的 `skills.json`——个人级 skill 写 `~/.cyan/skills.json`，项目级写
+`{workspace}/.cyan/skills.json`（内容形如 `{"disabled": ["name1", "name2"]}`）。
+关掉之后 `/skills` 列表里仍能看到它（标"已禁用"），方便随时切回来；`/instructions`
+和实际发给模型的 system prompt 里则完全看不到它的正文了。项目级 `skills.json` 可以
+提交进 git，相当于团队约定"这个项目里不要用某个 skill"。
+
+---
+
+## `/skill` {#skill}
+
+```
+/skill                 # 列出可用 skill 名字
+/skill <name>          # 手动指定：下一条任务额外强调这个 skill
+/skill clear           # 取消已设置但还没被消费的提醒
+```
+
+跟自动注入的常驻层是两件独立的事：那边每轮都在、模型自己判断相关不相关；这里是
+用户明确要求"这一次请优先照这个 skill 做"。指定后只对**下一条**任务生效一次——
+提醒文本会拼进那条任务的 `UserMessage`（对话历史里能看到），发出去就自动清空，
+不需要手动 `clear`（`clear` 是给"设置了但改主意不想用了"的场景用的）。
+
+如果目标 skill 当前被 `/skills disable` 关掉了，`/skill <name>` 仍然会生效（手动
+指定被当作一次明确的例外），但会额外提示一句"该 skill 当前处于禁用状态"，避免
+误以为它一直都在生效。
 
 ---
 

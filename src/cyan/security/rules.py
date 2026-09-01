@@ -35,11 +35,6 @@ def restricted_command(command: str) -> str | None:
     return None
 
 
-def sensitive_command(command: str) -> str | None:
-    """兼容旧导入。敏感命令已是内置 ask 规则，由 PermissionManager 匹配。"""
-    return None
-
-
 def reject_restricted_write(relative_path: str) -> None:
     """执行层二次拦截：命中内置 write deny（如 ``.git/``）时抛 ``SecurityError``。"""
     reason = restricted_path(relative_path)

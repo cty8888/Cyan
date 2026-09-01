@@ -130,10 +130,10 @@ def make_runtime(env: Env, llm: LLMClient, session: Session | None = None) -> Ru
     return Runtime.create(env.settings, llm, env.registry, env.permissions, session)
 
 
-def drive(runtime: Runtime, task: str, decision=ApprovalDecision.ALLOW_ONCE):
+def drive(runtime: Runtime, task: str, decision=ApprovalDecision.ALLOW_ONCE, *, file_refs=None):
     """消费事件流，返回 (事件列表, 终止原因)。"""
     events, reply, reason = [], None, None
-    stream = runtime.run(task)
+    stream = runtime.run(task, file_refs=file_refs)
     while True:
         try:
             event = stream.send(reply)

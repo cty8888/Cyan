@@ -30,7 +30,6 @@ class DenyReason(Enum):
     POLICY_BLOCKED = "policy"  # 命中黑名单
     RESTRICTED = "restricted"  # 强硬限制，不出审批 UI
     UNKNOWN = "unknown"
-    USER_DENIED = "user"
 
 
 @dataclass

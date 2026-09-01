@@ -61,7 +61,6 @@ _DECISION_BY_KEY = {
     "n": ApprovalDecision.DENY,
     "a": ApprovalDecision.ALLOW_ALWAYS,
 }
-_BANNER_WIDTH = 64  # 启动横幅固定宽度，不随终端宽度变化（终端比这个还窄时才会被迫收窄）
 _LIVE_MIN_INTERVAL = 0.08  # 秒；避免每个分片都重新解析整段内容造成 CPU 抖动
 # 这几个工具的哪个参数值得实时预览：write_file 边生成边看新内容，
 # edit_file 边生成边看替换后的新文本——跟 Claude Code 靠 fine-grained tool
@@ -103,12 +102,13 @@ class Renderer:
         不再跟正文混在一起当第一/最后一行——留白更清爽，字段名对不齐的问题也顺带解决了
         （grid 按最宽的那列自动对齐，不用手动拼空格）。
 
-        宽度定死成 ``_BANNER_WIDTH``，不随终端宽度变化：光靠 ``expand=False`` 不够——
-        那只是「不主动撑满终端」，遇到终端比内容还窄（比如工作目录路径很长）时还是
-        会被 clamp 到终端宽度，看起来就像跟着终端在变。第二列加
-        ``no_wrap`` + ``overflow="ellipsis"``，长路径会被截断成省略号，而不是把
-        box 撑宽；第一列显式给 ``width``（按实际标签宽度算，中文按 2 算），不然
-        总宽度不够时 Table 会连着标签列一起等比例缩，短标签也会被截断。
+        横幅横跨整个终端宽度（``width=self.console.width``），指令层/Skill 摘要这种
+        本来就长的内容能多显示一些，不用早早截断。为了让第二列（值）真正把多出来的
+        横向空间用起来而不是留一片空白，grid 本身开 ``expand=True``；单条内容仍然
+        可能比整行还长（比如 skill 很多时的「指令层」），所以第二列继续保留
+        ``no_wrap`` + ``overflow="ellipsis"``，超长就截断成省略号而不是把 Panel 撑爆；
+        第一列显式给 ``width``（按实际标签宽度算，中文按 2 算），不然 grid 会把两列
+        一起等比例分配，短标签也会被拉宽或截断。
         """
         rows = [
             ("模型", f"[green]{settings.llm.model}[/]"),
@@ -119,9 +119,9 @@ class Renderer:
             rows.append(("指令层", f"[dim]{' · '.join(instruction_labels)}[/]"))
         label_width = max(cell_len(label) for label, _ in rows)
 
-        grid = Table.grid(padding=(0, 2))
+        grid = Table.grid(padding=(0, 2), expand=True)
         grid.add_column(style="bold", no_wrap=True, width=label_width)
-        grid.add_column(overflow="ellipsis")
+        grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
         for label, value in rows:
             grid.add_row(label, value)
 
@@ -135,7 +135,7 @@ class Renderer:
                 border_style="cyan",
                 box=box.HEAVY,
                 padding=(1, 2),
-                width=min(_BANNER_WIDTH, self.console.width),
+                width=self.console.width,
             )
         )
         logger.info("启动 模型=%s workspace=%s tools=%s", settings.llm.model, settings.workspace, ", ".join(tool_names))

@@ -47,12 +47,6 @@ def remember(workspace: Path, tool: Tool, args: dict[str, Any], always_allowed: 
     always_allowed.update(always_keys(workspace, tool, args))
 
 
-def persistable_allow_rule(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
-    """兼容旧接口：只返回第一条可落盘的 Bash 规则。"""
-    rules = persistable_allow_rules(workspace, tool, args)
-    return rules[0] if rules else None
-
-
 def persistable_allow_rules(workspace: Path, tool: Tool, args: dict[str, Any]) -> list[str]:
     """bash 的「始终允许」写成 ``Bash(pytest *)``；写入不落盘。复合命令每段一条，最多 5 条。"""
     if tool.capability is not ToolCapability.EXEC:
@@ -65,12 +59,6 @@ def persistable_allow_rules(workspace: Path, tool: Tool, args: dict[str, Any]) -
         if head:
             rules.append(f"Bash({head} *)")
     return rules
-
-
-def always_key(workspace: Path, tool: Tool, args: dict[str, Any]) -> str | None:
-    """单条白名单键；复合命令有多段时返回 None（请用 ``always_keys``）。"""
-    keys = always_keys(workspace, tool, args)
-    return keys[0] if len(keys) == 1 else None
 
 
 def always_keys(workspace: Path, tool: Tool, args: dict[str, Any]) -> list[str]:

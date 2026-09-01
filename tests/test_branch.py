@@ -8,7 +8,7 @@ from cyan.session.compact import CompactPolicy, try_compact
 from cyan.session.events import USER
 from cyan.session.store import DiskStore
 
-from .test_compact import _add_turn, _three_turns
+from .test_compact import _three_turns
 
 
 def test_overlay_keeps_events_after_compact(tmp_path):

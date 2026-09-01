@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING
 
 from ..llm.types import (
     AssistantMessage,
+    Block,
     ContinueMessage,
+    FileBlock,
     SummaryMessage,
     SystemMessage,
+    TextBlock,
     ToolCallBlock,
     ToolMessage,
     UserMessage,
@@ -126,7 +129,19 @@ def _system_message(event: SessionEvent) -> SystemMessage:
 
 
 def _user_message(event: SessionEvent) -> UserMessage:
-    message = UserMessage.of(str(event.payload.get("text") or ""))
+    blocks: list[Block] = [TextBlock(text=str(event.payload.get("text") or ""))]
+    for item in event.payload.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        blocks.append(
+            FileBlock(
+                path=str(item.get("path") or ""),
+                content=item.get("content"),
+                start_line=item.get("start_line"),
+                end_line=item.get("end_line"),
+            )
+        )
+    message = UserMessage(blocks=blocks)
     message.id = event.id
     return message
 

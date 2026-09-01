@@ -281,19 +281,6 @@ def _placement_id(session: Session, message: Message) -> str:
     return message.id or ""
 
 
-def _user_to_preserve(messages: list[Message], dropped_start: int, keep_from: int) -> UserMessage | None:
-    """被压段若含当前用户任务，返回那条 UserMessage，供写回保留段。"""
-    last_index: int | None = None
-    last_message: UserMessage | None = None
-    for index, message in enumerate(messages):
-        if _is_real_user(message):
-            last_index = index
-            last_message = message
-    if last_index is not None and dropped_start <= last_index < keep_from:
-        return last_message
-    return None
-
-
 def _trailing_continues(messages: list[Message]) -> list[ContinueMessage]:
     """最后一条真实用户任务之后的续写指令，紧急压缩时也要留给模型。"""
     last_user = -1
@@ -309,22 +296,28 @@ def _trailing_continues(messages: list[Message]) -> list[ContinueMessage]:
     ]
 
 
+def _rendered_user_content(message: Message) -> str:
+    """用户消息的完整 wire 内容（含 ``@path`` 引用的文件快照），用于估算体积。"""
+    content = message.to_api().get("content")
+    return content if isinstance(content, str) else (message.text or "")
+
+
 def _is_oversized_user(message: Message, limit: int = DEFAULT_TOOL_RESULT_CHARS) -> bool:
-    """首条用户粘贴就能撑爆窗口：没有 Assistant 时也要能压。
+    """首条用户粘贴（或引用的文件）就能撑爆窗口：没有 Assistant 时也要能压。
 
     已经按上限截过的副本不再当成 oversized，避免每轮紧急压缩。
     """
     if not _is_real_user(message):
         return False
-    text = message.text or ""
+    text = _rendered_user_content(message)
     if text.endswith(_TRUNCATE_MARKER):
         return False
     return len(text) > limit
 
 
 def _truncate_preserved_user(message: UserMessage, limit: int = DEFAULT_TOOL_RESULT_CHARS) -> UserMessage:
-    """紧急压缩后若把原文整段插回，窗口还是满的。超限只留开头。"""
-    text = message.text or ""
+    """紧急压缩后若把原文整段插回，窗口还是满的。超限只留开头（含文件引用内容）。"""
+    text = _rendered_user_content(message)
     if len(text) <= limit:
         return message
     return UserMessage.of(_truncate_tool_text(text, limit))

@@ -21,7 +21,6 @@ from .shell import peel_leading_assignments, split_command_segments, tokenize, u
 PathAnchor = Literal["relative", "settings", "home", "abs"]
 
 FAMILIES = frozenset({"bash", "read", "write"})
-FAMILY_DISPLAY = {"bash": "Bash", "read": "Read", "write": "Edit"}
 _NAME_TO_FAMILY = {
     "bash": "bash",
     "read": "read",

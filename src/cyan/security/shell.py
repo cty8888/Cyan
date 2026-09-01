@@ -437,16 +437,6 @@ def command_head(command: str) -> str:
     return tokens[0]
 
 
-def command_heads(command: str) -> list[str]:
-    """复合命令里每一段的执行头，供白名单按段核对。"""
-    heads: list[str] = []
-    for segment in split_command_segments(command):
-        head = command_head(segment)
-        if head:
-            heads.append(head)
-    return heads
-
-
 def _is_readonly_segment(segment: str) -> bool:
     if "`" in segment or "$(" in segment or "<(" in segment or ">(" in segment:
         return False  # 命令替换 / 进程替换可能嵌套任意命令，无法保证只读

@@ -5,7 +5,12 @@ from __future__ import annotations
 from prompt_toolkit.document import Document
 
 from cyan.cli.commands import CommandRegistry, SlashCommand
-from cyan.cli.completion import SlashCommandCompleter
+from cyan.cli.completion import (
+    FileReferenceCompleter,
+    InputCompleter,
+    SlashCommandCompleter,
+    at_reference_prefix,
+)
 
 
 def _noop_handler(app, args):
@@ -75,3 +80,101 @@ def test_not_starting_with_slash_yields_nothing():
 def test_space_after_command_name_stops_completing():
     """已经进入参数阶段（出现空格）时不再弹候选，不干扰参数输入。"""
     assert _complete("/todos ") == []
+
+
+# ------------------------------------------------------------ at_reference_prefix
+
+
+def test_at_reference_prefix_extracts_text_after_at():
+    assert at_reference_prefix("看看 @src/a") == "src/a"
+
+
+def test_at_reference_prefix_none_without_at():
+    assert at_reference_prefix("普通任务") is None
+
+
+def test_at_reference_prefix_none_when_at_is_mid_word():
+    """"foo@bar" 这种邮箱一样的写法，"@" 前一个字符不是空白，不算文件引用。"""
+    assert at_reference_prefix("联系 foo@bar") is None
+
+
+def test_at_reference_prefix_allows_start_of_line():
+    assert at_reference_prefix("@a") == "a"
+
+
+def test_at_reference_prefix_none_after_space_in_token():
+    assert at_reference_prefix("@a.py 之后还有话") is None
+
+
+def test_at_reference_prefix_empty_right_after_at():
+    assert at_reference_prefix("看看 @") == ""
+
+
+# ------------------------------------------------------------ FileReferenceCompleter
+
+
+def _complete_files(workspace, text: str) -> list[str]:
+    completer = FileReferenceCompleter(workspace)
+    document = Document(text=text, cursor_position=len(text))
+    return [c.text for c in completer.get_completions(document, complete_event=None)]
+
+
+def test_file_reference_lists_matching_files(tmp_path):
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    (tmp_path / "b.py").write_text("", encoding="utf-8")
+
+    names = _complete_files(tmp_path, "看看 @a")
+
+    assert names == ["a.py"]
+
+
+def test_file_reference_finds_nested_files(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("", encoding="utf-8")
+
+    names = _complete_files(tmp_path, "@src/main")
+
+    assert names == ["src/main.py"]
+
+
+def test_file_reference_skips_ignored_dirs(tmp_path):
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("", encoding="utf-8")
+
+    names = _complete_files(tmp_path, "@")
+
+    assert names == []
+
+
+def test_file_reference_no_completions_without_at():
+    completer = FileReferenceCompleter("/tmp")
+    document = Document(text="普通任务", cursor_position=4)
+    assert list(completer.get_completions(document, complete_event=None)) == []
+
+
+# ------------------------------------------------------------ InputCompleter
+
+
+def test_input_completer_dispatches_slash_when_line_starts_with_slash(tmp_path):
+    completer = InputCompleter(_registry(), tmp_path)
+    text = "/to"
+    document = Document(text=text, cursor_position=len(text))
+    names = [c.text for c in completer.get_completions(document, complete_event=None)]
+    assert names == ["/todos"]
+
+
+def test_input_completer_dispatches_file_when_at_prefix(tmp_path):
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    completer = InputCompleter(_registry(), tmp_path)
+    text = "看看 @a"
+    document = Document(text=text, cursor_position=len(text))
+    names = [c.text for c in completer.get_completions(document, complete_event=None)]
+    assert names == ["a.py"]
+
+
+def test_input_completer_yields_nothing_for_plain_text(tmp_path):
+    completer = InputCompleter(_registry(), tmp_path)
+    text = "普通任务"
+    document = Document(text=text, cursor_position=len(text))
+    assert list(completer.get_completions(document, complete_event=None)) == []

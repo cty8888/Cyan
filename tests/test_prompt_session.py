@@ -21,11 +21,17 @@ from cyan.cli.app import App
 from cyan.cli.commands import build_default_commands
 
 
-class _FakeCommandsApp:
-    """够 ``App._build_prompt_session`` 用 duck typing 调用的最小 App：只装 commands。"""
+class _FakeSettings:
+    def __init__(self, workspace) -> None:
+        self.workspace = workspace
 
-    def __init__(self, commands) -> None:
+
+class _FakeCommandsApp:
+    """够 ``App._build_prompt_session`` 用 duck typing 调用的最小 App：装 commands 与 settings.workspace。"""
+
+    def __init__(self, commands, workspace) -> None:
         self.commands = commands
+        self.settings = _FakeSettings(workspace)
 
 
 def _completion_names(session) -> list[str]:
@@ -37,7 +43,7 @@ def test_backspace_recomputes_completions(tmp_path):
     """退格删字符后，候选要跟着更新，不能停留在删除前的那一份上。"""
 
     async def scenario() -> tuple[list[str], list[str], str]:
-        fake_app = _FakeCommandsApp(build_default_commands())
+        fake_app = _FakeCommandsApp(build_default_commands(), tmp_path)
 
         with create_pipe_input() as pipe_input:
             with create_app_session(input=pipe_input, output=DummyOutput()):
@@ -76,7 +82,7 @@ def test_no_completions_reserved_space_clears_when_prefix_stops_matching(tmp_pat
     """删到不再以 "/" 开头（或者压根没匹配的候选）时，不该再挂着一份候选状态。"""
 
     async def scenario() -> object:
-        fake_app = _FakeCommandsApp(build_default_commands())
+        fake_app = _FakeCommandsApp(build_default_commands(), tmp_path)
 
         with create_pipe_input() as pipe_input:
             with create_app_session(input=pipe_input, output=DummyOutput()):

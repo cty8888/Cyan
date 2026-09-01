@@ -26,9 +26,14 @@ def _renderer() -> Renderer:
 
 
 def _render_banner(width: int, workspace: Path) -> str:
-    """在给定终端宽度下渲染一次启动横幅，返回纯文本输出，供跨宽度对比。"""
+    """在给定终端宽度下渲染一次启动横幅，返回纯文本输出，供跨宽度对比。
+
+    ``width`` 和 ``height`` 要一起传：rich 的 ``Console.size`` 只有两个都显式给了
+    才会用这两个值，否则会去探测真实终端尺寸（在非 tty 的测试环境里探测不到，会
+    悄悄退回默认的 80），传了 ``width`` 却没传 ``height`` 就会被这条规则坑到。
+    """
     buf = io.StringIO()
-    console = Console(file=buf, force_terminal=True, width=width, color_system=None)
+    console = Console(file=buf, force_terminal=True, width=width, height=24, color_system=None)
     renderer = Renderer(console)
     settings = AgentSettings(
         workspace=workspace,
@@ -256,17 +261,20 @@ def test_tool_finished_reports_cleared_checklist():
     assert "任务清单已清空" in renderer.console.file.getvalue()
 
 
-def test_banner_width_is_fixed_regardless_of_terminal_width(tmp_path):
-    """横幅宽度是定死的常量，不该随终端宽度变化——只要终端够宽，输出要完全一样。"""
+def test_banner_width_spans_full_terminal_width(tmp_path):
+    """横幅横跨整个终端宽度：终端多宽横幅就多宽，不再是定死的常量。"""
     narrow = _render_banner(70, tmp_path)
     wide = _render_banner(220, tmp_path)
-    assert narrow == wide
+    narrow_widths = {cell_len(line) for line in narrow.splitlines() if line.strip()}
+    wide_widths = {cell_len(line) for line in wide.splitlines() if line.strip()}
+    assert narrow_widths == {70}
+    assert wide_widths == {220}
 
 
 def test_banner_truncates_long_workspace_path_instead_of_growing(tmp_path):
-    """工作目录路径很长时，靠省略号截断，而不是把横幅撑得比固定宽度还宽。"""
+    """工作目录路径很长时，靠省略号截断，而不是把横幅撑得比终端还宽。"""
     long_dir = tmp_path
-    for part in ("a-very-long-directory-name",) * 4:
+    for part in ("a-very-long-directory-name",) * 10:
         long_dir = long_dir / part
     long_dir.mkdir(parents=True)
 
@@ -274,6 +282,7 @@ def test_banner_truncates_long_workspace_path_instead_of_growing(tmp_path):
     lines = [line for line in output.splitlines() if line.strip()]
     widths = {cell_len(line) for line in lines}
     assert len(widths) == 1  # 每一行（包括长路径那一行）打印宽度都跟横幅整体宽度一致
+    assert widths == {200}
     assert "…" in output
     assert str(long_dir) not in output  # 完整路径太长，必须被截断，不能整段塞进去
 

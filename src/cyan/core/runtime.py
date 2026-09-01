@@ -22,7 +22,7 @@ from .types import AgentStream
 if TYPE_CHECKING:
     from typing import Generator
 
-    from ..llm.types import LLMResponse, StreamChunk
+    from ..llm.types import FileBlock, LLMResponse, StreamChunk
     from ..security.types import ApprovalDecision, PermissionOutcome
     from ..tools.base import Tool
     from ..tools.types import ToolContext, ToolRunResult
@@ -96,9 +96,13 @@ class Runtime:
             prompt_stack=stack,
         )
 
-    def run(self, task: str) -> AgentStream:
-        """启动一次任务，返回事件流供 CLI 消费。"""
-        return self.loop.run(task)
+    def run(self, task: str, *, file_refs: list[FileBlock] | None = None) -> AgentStream:
+        """启动一次任务，返回事件流供 CLI 消费。
+
+        ``file_refs``：CLI 从任务文本里解析出的 ``@path`` 引用，随本轮
+        ``UserMessage`` 一起进入会话（见 ``AgentLoop.run``）。
+        """
+        return self.loop.run(task, file_refs=file_refs)
 
     def schemas_for_mode(self) -> list[dict]:
         """按当前权限模式与裸名 deny 导出要交给模型的工具 schema。

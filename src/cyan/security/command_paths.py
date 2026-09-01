@@ -75,16 +75,6 @@ def outside_workspace_reason(workspace: Path, command: str, cwd: Path | None = N
     return _outside_with_cwd_tracking(workspace, command, cwd or workspace)
 
 
-def restricted_write_reason(workspace: Path, command: str, cwd: Path | None = None) -> str | None:
-    """写入目标命中 write/read deny（如 ``.git/``、``Read`` deny 连带挡写）时返回理由。"""
-    for relative, kind in _resolved_touches(workspace, command, cwd or workspace):
-        if kind == "write":
-            reason = rules.restricted_path(relative)
-            if reason:
-                return reason
-    return None
-
-
 def denied_path_reason(workspace: Path, command: str, cwd: Path | None = None) -> str | None:
     """bash 能看清的读/写路径命中 deny 规则。read deny 也挡住写入。"""
     for relative, kind in _resolved_touches(workspace, command, cwd or workspace):

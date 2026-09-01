@@ -158,6 +158,37 @@ def test_emergency_cut_without_assistant_when_user_is_huge(tmp_path):
     assert find_keep_from(session.messages, keep_recent_turns=0) is None
 
 
+def test_emergency_cut_when_file_reference_makes_user_huge(tmp_path):
+    """任务文本本身很短，但 ``@`` 引用的文件内容把整条消息撑爆，也要能识别为超大。"""
+    from cyan.llm.types import FileBlock, TextBlock
+
+    session = Session.create(workspace=tmp_path, system_prompt="sys")
+    huge_file = "x" * (DEFAULT_TOOL_RESULT_CHARS + 100)
+    session.add(
+        UserMessage(
+            blocks=[
+                TextBlock(text="看看这个文件"),
+                FileBlock(path="a.py", content=huge_file),
+            ]
+        )
+    )
+    assert find_keep_from(session.messages, keep_recent_turns=0) == len(session.messages)
+
+    def call_llm(messages, tools=None):
+        blob = str(messages)
+        assert huge_file not in blob
+        return LLMResponse(message=AssistantMessage.of("超长文件引用摘要"), usage=Usage(10, 4, 14))
+
+    assert try_compact(session, call_llm, CompactPolicy(), max_keep=0) is True
+    users = [m for m in session.messages if isinstance(m, UserMessage) and not isinstance(m, SummaryMessage)]
+    assert len(users) == 1
+    # 紧急压缩后原样插回的是截断过的纯文本，FileBlock 结构本身不再保留。
+    assert users[0].file_blocks == []
+    assert users[0].text is not None
+    assert users[0].text.endswith("...[truncated]")
+    assert len(users[0].text) <= DEFAULT_TOOL_RESULT_CHARS
+
+
 def test_emergency_compact_preserves_task_not_continue_prompt(tmp_path):
     session = Session.create(workspace=tmp_path, system_prompt="sys")
     session.add(UserMessage.of("给 utils.py 加类型标注"))

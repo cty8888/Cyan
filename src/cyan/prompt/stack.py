@@ -9,6 +9,7 @@ from ..memory.settings import auto_memory_enabled
 from ..memory.store import load_memory_index_layer
 from ..settings.tools import DEFAULT_TOOL_RESULT_CHARS
 from .files import load_instruction_layers
+from .skills import load_skill_layers
 from .types import PromptLayer, PromptLayerKind
 
 
@@ -33,9 +34,12 @@ class PromptStack:
         )
 
     def refresh_files(self) -> None:
-        """从磁盘重读 cyan.md 与 MEMORY.md 索引。"""
+        """从磁盘重读 cyan.md、Skills 与 MEMORY.md 索引。"""
         self.extra = load_instruction_layers(
             self.workspace, home=self.home, max_chars=self.max_chars
+        )
+        self.extra.extend(
+            load_skill_layers(self.workspace, home=self.home, max_chars=self.max_chars)
         )
         if self.auto_memory and auto_memory_enabled():
             memory = load_memory_index_layer(self.workspace)

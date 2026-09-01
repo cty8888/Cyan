@@ -45,7 +45,8 @@ from ..session.view import apply_system_prompt
 from ..settings import AgentSettings
 from ..tools.registry import build_default_registry
 from .commands import CommandRegistry, build_default_commands
-from .completion import SlashCommandCompleter
+from .completion import InputCompleter, at_reference_prefix
+from .file_refs import extract_file_refs
 from .renderer import Renderer
 
 logger = get_logger("cli")
@@ -86,10 +87,13 @@ class App:
             ),
         )
         self._startup_warning = warning
+        # /skill <name> 设的"这一次额外强调"提醒：只消费一次，紧跟着下一条任务的
+        # UserMessage 一起发出去，跟 4 个 skill 常驻自动注入是两件独立的事。
+        self._pending_skill_reminder: str | None = None
 
     def _build_prompt_session(self, home: Path) -> PromptSession[str]:
-        """输入 "/" 后不用按 Tab，随打字（含删除字符）实时更新候选列表，可用方向
-        键选择；历史记录持久化到 ``<home>/history``，跨会话保留。
+        """输入 "/" 或 "@" 后不用按 Tab，随打字（含删除字符）实时更新候选列表，
+        可用方向键选择；历史记录持久化到 ``<home>/history``，跨会话保留。
 
         没用内置的 ``complete_while_typing``：它只在插入字符时才重新补全，删除
         字符不会重算（比如打完 "/he" 删掉一个字符变成 "/h"，候选就卡死不动了）；
@@ -101,14 +105,15 @@ class App:
         """
         home.mkdir(parents=True, exist_ok=True)
         session: PromptSession[str] = PromptSession(
-            completer=SlashCommandCompleter(self.commands),
+            completer=InputCompleter(self.commands, self.settings.workspace),
             complete_while_typing=False,
             history=FileHistory(str(home / "history")),
         )
 
         def _retrigger_completion(_: Any) -> None:
             buffer = session.default_buffer
-            if buffer.text.startswith("/"):
+            text = buffer.text
+            if text.startswith("/") or at_reference_prefix(text) is not None:
                 buffer.start_completion(select_first=False)
 
         session.default_buffer.on_text_changed += _retrigger_completion
@@ -207,7 +212,14 @@ class App:
     def _execute(self, task: str) -> StopReason:
         """消费 Loop 事件流：普通事件只渲染；审批事件把用户选择 send 回去。"""
         logger.info("收到任务：%s", task)
-        stream = self.runtime.run(task)
+        file_refs = extract_file_refs(task, self.settings.workspace, self.runtime.tool_limits)
+        if file_refs:
+            self.renderer.notice("已附加文件：" + "、".join(block.path for block in file_refs))
+        effective_task = task
+        if self._pending_skill_reminder is not None:
+            effective_task = f"{self._pending_skill_reminder}\n\n{task}"
+            self._pending_skill_reminder = None
+        stream = self.runtime.run(effective_task, file_refs=file_refs)
         reply: Any = None
         reason = StopReason.FATAL_ERROR
         # 只用于结束面板里展示「用时」，不进 session.stats()——那是模型/工具调用次数的
@@ -315,9 +327,26 @@ class App:
         return command.handler(self, parts[1:])
 
     def _instruction_labels(self) -> list[str]:
-        """当前已加载的文件指令层标题，供 banner 使用。"""
+        """当前已加载的文件指令层标题，供 banner 使用。
+
+        Skill 不逐条列出：skill 数量一多，横幅那一行就被塞满、还得截断，价值不大——
+        这里只汇总成"Skill 已启用 N 个"一句话，具体清单跟启用/禁用状态看 ``/skills``。
+        （`prompt_stack.extra` 里出现的 Skill 层本来就已经是启用中的——被
+        ``/skills disable`` 关掉的不会生成层，见 ``prompt/skills.py.load_skill_layers``。）
+        """
+        from ..prompt.types import PromptLayerKind
+
         self.runtime.prompt_stack.refresh_files()
-        return [layer.title for layer in self.runtime.prompt_stack.extra]
+        labels: list[str] = []
+        skill_count = 0
+        for layer in self.runtime.prompt_stack.extra:
+            if layer.kind is PromptLayerKind.SKILL:
+                skill_count += 1
+                continue
+            labels.append(layer.title)
+        if skill_count:
+            labels.append(f"Skill 已启用 {skill_count} 个")
+        return labels
 
     def _on_llm_retry(self, attempt: int, delay: float, message: str) -> None:
         self.renderer.notice(f"模型调用失败（{message}），{delay:.1f}s 后第 {attempt} 次重试", level="warning")

@@ -72,12 +72,24 @@ class ToolResultBlock(Block):
 
 @dataclass
 class FileBlock(Block):
-    """对某个文件的引用（用户或 Agent 提及了它），不携带文件内容本身。"""
+    """对某个文件的引用（用户 ``@path`` 提及了它），``content`` 是引用时刻的快照。
+
+    快照而非实时路径：会话重放、压缩摘要都要看到「用户当时看到的内容」，
+    不能因为文件之后被改写而让历史对话变得不可复现。
+    """
 
     type: ClassVar[BlockType] = BlockType.FILE
     path: str
+    content: str | None = None
     start_line: int | None = None
     end_line: int | None = None
+
+    def render(self) -> str:
+        """转成给模型看的纯文本形式，随 ``UserMessage.to_api()`` 一起拼进 content。"""
+        header = f"[文件 {self.path}]"
+        if self.content is None:
+            return header
+        return f"{header}\n```\n{self.content}\n```"
 
 
 @dataclass
@@ -113,6 +125,11 @@ class Message(ABC):
         return [b for b in self.blocks if isinstance(b, ToolCallBlock)]
 
     @property
+    def file_blocks(self) -> list[FileBlock]:
+        """从 blocks 里滤出 ``@path`` 引用的文件（目前只有 UserMessage 会携带）。"""
+        return [b for b in self.blocks if isinstance(b, FileBlock)]
+
+    @property
     def tool_result(self) -> ToolResultBlock | None:
         return next((b for b in self.blocks if isinstance(b, ToolResultBlock)), None)
 
@@ -146,7 +163,12 @@ class UserMessage(Message):
         return cls(blocks=[TextBlock(text=text)])
 
     def to_api(self) -> dict[str, Any]:
-        return {"role": self.role.value, "content": self.text or ""}
+        parts = []
+        text = self.text
+        if text:
+            parts.append(text)
+        parts.extend(block.render() for block in self.file_blocks)
+        return {"role": self.role.value, "content": "\n\n".join(parts)}
 
 
 @dataclass

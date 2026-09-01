@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterable
 
 from rich.console import Console
@@ -25,6 +27,8 @@ from cyan.core.types import (
     Thinking,
     ToolCallDelta,
 )
+from cyan.prompt.types import PromptLayer, PromptLayerKind
+from cyan.settings import ToolLimits
 
 
 class _FakeApp:
@@ -88,19 +92,30 @@ class _SpyRenderer(Renderer):
 class _FakeRuntime:
     """``run(task)`` 直接把预先准备好的事件序列吐出来，不跑真正的 Agent Loop。"""
 
+    tool_limits = ToolLimits()
+
     def __init__(self, events: Iterable[AgentEvent]) -> None:
         self._events = list(events)
+        self.received_tasks: list[str] = []
 
-    def run(self, task: str):
+    def run(self, task: str, *, file_refs=None):
+        self.received_tasks.append(task)
         yield from self._events
 
 
+class _FakeSettings:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+
+
 class _FakeExecuteApp:
-    """够 ``App._execute`` 用 duck typing 调用的最小 App：只装 renderer/runtime。"""
+    """够 ``App._execute`` 用 duck typing 调用的最小 App：只装 renderer/runtime/settings。"""
 
     def __init__(self, renderer: Renderer, events: Iterable[AgentEvent]) -> None:
         self.renderer = renderer
         self.runtime = _FakeRuntime(events)
+        self.settings = _FakeSettings(Path("."))
+        self._pending_skill_reminder: str | None = None
 
     def _render(self, event: AgentEvent, *, started_at: float | None = None):
         return None
@@ -160,7 +175,9 @@ def test_execute_keyboard_interrupt_inside_spinner_still_aborts():
     """转圈动画包住的那次 send() 里抛 KeyboardInterrupt，中断路径要照常触发。"""
 
     class _InterruptingRuntime:
-        def run(self, task: str):
+        tool_limits = ToolLimits()
+
+        def run(self, task: str, *, file_refs=None):
             yield Thinking(iteration=1)
             raise KeyboardInterrupt()
 
@@ -172,3 +189,81 @@ def test_execute_keyboard_interrupt_inside_spinner_still_aborts():
 
     assert reason == StopReason.USER_ABORT
     assert renderer.spinner_calls == 1
+
+
+# ---------------------------------------------------------------- /skill 手动提醒
+
+
+def test_execute_prepends_pending_skill_reminder_once():
+    """``/skill <name>`` 设的提醒要拼进下一条任务的文本，且只消费这一次。"""
+    renderer = _SpyRenderer(Console(file=io.StringIO(), force_terminal=True, width=80))
+    events = [TaskFinished(reason=StopReason.COMPLETED)]
+    app = _FakeExecuteApp(renderer, events)
+    app._pending_skill_reminder = "[手动指定的 Skill · demo]\n触发条件：x\n\n正文"
+
+    App._execute(app, "第一条任务")
+    App._execute(app, "第二条任务")
+
+    assert app.runtime.received_tasks[0] == "[手动指定的 Skill · demo]\n触发条件：x\n\n正文\n\n第一条任务"
+    assert app.runtime.received_tasks[1] == "第二条任务"
+    assert app._pending_skill_reminder is None
+
+
+def test_execute_without_pending_reminder_sends_task_unchanged():
+    renderer = _SpyRenderer(Console(file=io.StringIO(), force_terminal=True, width=80))
+    events = [TaskFinished(reason=StopReason.COMPLETED)]
+    app = _FakeExecuteApp(renderer, events)
+
+    App._execute(app, "普通任务")
+
+    assert app.runtime.received_tasks == ["普通任务"]
+
+
+# ---------------------------------------------------------------- _instruction_labels
+
+
+class _FakePromptStack:
+    """够 ``App._instruction_labels`` 用 duck typing 调用的最小替身。"""
+
+    def __init__(self, extra: list[PromptLayer]) -> None:
+        self.extra = extra
+
+    def refresh_files(self) -> None:
+        pass
+
+
+class _FakeInstructionLabelsApp:
+    def __init__(self, extra: list[PromptLayer]) -> None:
+        self.runtime = SimpleNamespace(prompt_stack=_FakePromptStack(extra))
+
+
+def test_instruction_labels_summarizes_skill_count_instead_of_listing():
+    """Skill 层不逐条列标题，汇总成一句"启用了几个"，避免横幅那一行被塞满。"""
+    extra = [
+        PromptLayer(kind=PromptLayerKind.USER_INSTRUCTIONS, title="用户指令", text="x"),
+        PromptLayer(kind=PromptLayerKind.SKILL, title="Skill · a（个人）", text="x"),
+        PromptLayer(kind=PromptLayerKind.SKILL, title="Skill · b（项目）", text="x"),
+    ]
+    app = _FakeInstructionLabelsApp(extra)
+
+    labels = App._instruction_labels(app)
+
+    assert labels == ["用户指令", "Skill 已启用 2 个"]
+
+
+def test_instruction_labels_omits_skill_summary_when_none_enabled():
+    extra = [PromptLayer(kind=PromptLayerKind.USER_INSTRUCTIONS, title="用户指令", text="x")]
+    app = _FakeInstructionLabelsApp(extra)
+
+    labels = App._instruction_labels(app)
+
+    assert labels == ["用户指令"]
+
+
+def test_instruction_labels_only_skill_summary_when_no_other_layers():
+    extra = [PromptLayer(kind=PromptLayerKind.SKILL, title="Skill · a（个人）", text="x")]
+    app = _FakeInstructionLabelsApp(extra)
+
+    labels = App._instruction_labels(app)
+
+    assert labels == ["Skill 已启用 1 个"]

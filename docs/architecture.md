@@ -37,6 +37,7 @@ src/cyan/
   prompt/                # Prompt Layer（组窗时叠进 system，不进 Session）
     types.py             # PromptLayerKind / PromptLayer
     files.py             # 发现并读取 ~/.cyan/cyan.md 与 {workspace}/.cyan/cyan.md
+    skills.py            # 发现并读取 ~/.cyan/skills/ 与 {workspace}/.cyan/skills/ 下的 SKILL.md
     stack.py             # PromptStack：顺序、按层截断、render_system()
   memory/                # 项目级 Auto Memory（.cyan/memory/）
     types.py             # MemoryKind / MEMORY.md 上限
@@ -140,7 +141,7 @@ token 预算触发压缩后任务继续，压缩失败不中断循环。
 ```
 Message (ABC dataclass：role: ClassVar[Role] + blocks: list[Block])
 ├── SystemMessage      # 只放一个 TextBlock
-├── UserMessage        # TextBlock，未来可以混入 FileBlock / CodeBlock
+├── UserMessage        # TextBlock + 用户 "@path" 引用的若干 FileBlock
 ├── SummaryMessage     # 压缩后的区间摘要；to_api 仍是 user
 ├── AssistantMessage   # TextBlock + 若干 ToolCallBlock，覆写 to_api() 处理 tool_calls
 └── ToolMessage        # 只放一个 ToolResultBlock（只有 call id）
@@ -149,8 +150,8 @@ Block (ABC：type: ClassVar[BlockType])
 ├── TextBlock        # 文本
 ├── ToolCallBlock    # 一次工具调用（id / name / arguments）
 ├── ToolResultBlock  # 对一次工具调用结果的引用，只有 tool_call_id
-├── FileBlock        # 文件引用（path / start_line / end_line），不携带文件内容
-└── CodeBlock        # 独立代码片段（language / code）
+├── FileBlock        # "@path" 文件引用（path / content 快照 / start_line / end_line）
+└── CodeBlock        # 独立代码片段（language / code），暂无代码路径构造
 
 session.tool_history（与 Message 完全解耦，挂在 Session 上，只负责保存与查询）
 ├── ToolResult      # content —— 工具输出原文
@@ -161,13 +162,65 @@ context.builder.ContextBuilder（装配层，由 Runtime 持有）
 └── build_messages()  # 反查 ToolHistory；第一条 system 叠 PromptStack；工具正文按上限截尾
 ```
 
+**`@path` 文件引用全链路**：CLI 提交任务时（`cli/app.py._execute`），
+`cli/file_refs.py.extract_file_refs()` 从任务文本里解析出 `@path`，读出引用时刻的文件
+内容快照，打包成 `FileBlock` 列表，随任务字符串一起传给 `Runtime.run(task, file_refs=...)`
+→ `AgentLoop.run()`，构造成 `UserMessage(blocks=[TextBlock(task), *file_refs])`。
+之后完全走既有的 `UserMessage` 管线：`to_api()` 把 `FileBlock` 渲染成
+`[文件 path]` + 代码块拼进 wire content；`Session.add()` 把 `file_blocks` 序列化进
+`USER` 事件 payload 的 `files` 字段；`session/view.py._user_message()` 重放时反序列化
+回 `FileBlock`；`session/compact.py` 判断超大、截断保留段都按渲染后的完整内容（文本 +
+文件快照）计算，不会漏算文件体积。补全侧由 `cli/completion.py.FileReferenceCompleter`
+提供实时候选，跟斜杠命令补全共用同一套 `on_text_changed` 重触发机制。
+
+### Skills 机制
+
+跟 cyan.md 同一套「磁盘文件 → 组窗时叠进 system」的模式，但支持多个、各自独立触发：一个
+Skill 是一个目录 + 一份 `SKILL.md`，文件开头是手写的极简 frontmatter（不引入 PyYAML）：
+
+```
+---
+name: debugging-methodology
+description: 遇到报错、测试失败、运行结果跟预期不一致时使用
+---
+
+<正文：给模型看的详细步骤/checklist>
+```
+
+两层发现（[`prompt/skills.py`](src/cyan/prompt/skills.py).`discover_skills()`），跟
+cyan.md 的用户级/项目级完全对齐：
+
+- 个人级：`{home}/skills/<name>/SKILL.md`，默认 `~/.cyan/skills/`
+- 项目级：`{workspace}/.cyan/skills/<name>/SKILL.md`
+- 同名冲突时项目级覆盖个人级
+
+**为什么整篇正文直接嵌进 system，而不是像 Claude Code 那样先给摘要、模型按需调用工具去读全文**：
+项目级 skill 落在工作区沙箱内，`read_file` 能读到；但个人级 skill 存在工作区之外，天然越出
+`security/paths.py.resolve_path` 只认工作区的沙箱——模型没有任何现有工具能读到它。直接把
+「触发条件 + 正文」整段渲染成一个 `PromptLayer`（`PromptLayerKind.SKILL`）塞进
+`PromptStack.refresh_files()`，复用跟 cyan.md 完全一样的按 `max_chars` 截断、不写回 Session
+的逻辑，既不用给沙箱开洞，也不用为此单独起一个工具。因为 skill 数量少且正文精简，这个取舍
+在当前规模下成本可忽略；`/skills` 命令列出发现的 skill（name / description / 层级 / 路径 /
+启用状态）。
+
+**开关（`/skills enable|disable <name>`）**：跟 skill 内容本身解耦的一份独立小配置——
+`SkillMeta.enabled` 由 `discover_skills()` 在扫描后按开关文件计算得出，`load_skill_layers()`
+只把 `enabled=True` 的转成层，被关掉的 skill 依然会被 `discover_skills()` 扫到（`/skills`
+列表里能看到它标"已禁用"，方便随时切回来），只是不再叠进 system prompt。开关状态写进跟
+该 skill 同一层级的 `skills.json`（个人级 `~/.cyan/skills.json`，项目级
+`{workspace}/.cyan/skills.json`，形如 `{"disabled": [...]}`），两层各自独立、取并集判断
+是否禁用，不像内容那样"项目级覆盖个人级"——这样项目可以强制关掉某个个人偏好 skill（写进
+项目 `skills.json`，可提交进 git 当团队约定），而不影响该 skill 在其它项目里的状态。
+`/skill <name>`（单数，手动指定下一条任务强调某个 skill）不受这个开关限制：即使被
+disable，手动指定依然生效一次，只是会额外提示一句"当前处于禁用状态"。
+
 ### Session 与 Runtime
 
 ```
 Runtime（执行层，不保存长期状态）
  ├── LLMClient
  ├── ContextBuilder / ContextPolicy   # 装配 wire；叠 PromptStack
- ├── PromptStack                      # identity + cyan.md + MEMORY.md
+ ├── PromptStack                      # identity + cyan.md + Skills + MEMORY.md
  ├── CompactPolicy                    # 何时压、留几轮
  ├── ToolRegistry
  ├── ToolExecutor
@@ -291,6 +344,7 @@ MVP 工具集：
 - 不做滑动窗口：对话变瘦只靠 compact overlay。
 - 会话持久化：`~/.cyan/projects/<编码>/<id>.jsonl`；`--continue` / `--resume`；rewind 为 fork。
 - **Prompt Layer**：identity（`build_system_prompt`）写入 `session_started`；用户级 `~/.cyan/cyan.md` 与项目级 `{workspace}/.cyan/cyan.md`（没有则回退根目录 `cyan.md`）是独立层。`MEMORY.md` 索引作为 `AUTO_MEMORY` 层叠进 wire，类型文件按需 `memory_read`。cyan.md / memory **不进 jsonl**。`/instructions` 看层，`/memory` 看记忆文件。
+- **Skills**：跟 cyan.md 同一套磁盘发现 + 组窗叠层模式，支持多个、按需触发。个人级 `~/.cyan/skills/<name>/SKILL.md`，项目级 `{workspace}/.cyan/skills/<name>/SKILL.md`，同名项目级覆盖个人级；`prompt/skills.py.discover_skills()` 解析极简 frontmatter（name/description），正文整篇渲成一层塞进 `PromptStack`（个人级 skill 在工作区沙箱外，`read_file` 读不到，所以不走"先摘要、按需 read_file 拉全文"这条路，直接整篇嵌入）。不进 jsonl。`/skills` 看发现到的 skill 列表。
 - **Auto Memory**：只做项目级，目录 `{workspace}/.cyan/memory/`（gitignore）。任务中 `memory_write` 即时写（非 Plan 免审批）；`COMPLETED` 后再提取一次。`USER_ABORT` / `FATAL_ERROR` / 轮次上限 / 连续失败不沉淀。`CYAN_DISABLE_AUTO_MEMORY=1` 关闭。
 - **任务规划（`todo_write`）**：对齐 Claude Code 的 TodoWrite——模型自己判断何时用（3 步以上/多文件），每次调用传入**完整**清单（覆盖式更新，不是增量 patch），同一时刻最多一项 `in_progress`。数据模型是 `Session.todos: list[TodoItem]`（`content` / `status: TodoStatus` / `active_form`），随 `checkpoint` 事件与 sidecar `meta.json` 走，不单独进事件表；`/rewind` 回溯时随 checkpoint 一起恢复到当时的清单状态。工具侧不直接拿 `Session`：`ToolContext.todos` 是 `TodoAccess`（跟 `WorkspaceAccess` 同构的最小包装，只转发 `items`/`set()`），在 `core/loop.py` 的 `tool_ctx` 里注入。权限上跟 `memory_write` 同构——`_family_for_tool` 对它返回 `None`（没有路径参数，走不了按路径匹配的 family 规则），`PermissionManager.evaluate()` 里特判成始终 `allow`（比 `memory_write` 更宽：不受 Plan 模式限制，因为规划本身就是 Plan 模式该干的事），`BARE_DENY_TOOLS["write"]` 仍收着它，用户配置裸 `deny: write` 时会把它从模型可见工具列表里摘掉（`hidden_tool_names()`）。CLI 侧 `tool_finished` 对 `todo_write` 特判，把 `ToolRunResult.metadata["todos"]` 渲成打勾清单（`cli/renderer.py` 的 `render_todo_lines()`），`/todos` 命令复用同一个渲染函数查看当前清单，`/todos clear` 手动清空。
 
@@ -323,6 +377,7 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] 上下文 token 预算与历史摘要压缩（compact overlay，事件表保留原文）
 - [x] 会话持久化与 `--continue` / `--resume` / rewind fork
 - [x] Prompt Layer：用户级 / 项目级 `cyan.md`（组窗叠层，不进 Session）
+- [x] Skills：个人级 `~/.cyan/skills/` + 项目级 `{workspace}/.cyan/skills/`，`SKILL.md` 正文整篇叠进 Prompt Layer；`/skills` 查看/开关，`/skill` 手动指定单次强调
 - [x] Auto Memory：项目级 `.cyan/memory/`（即时写入 + COMPLETED 提取）
 
 ### Phase 4：规划与检索
@@ -335,7 +390,25 @@ MVP（Phase 1）交付后即可端到端跑通「用户任务 → 分析 → 调
 - [x] 把离线测试改写为按模块拆分的 pytest 用例
 - [x] README
 - [x] 最小 GitHub Actions：push / PR 跑 pytest
-- [ ] 整体打磨
+- [x] 整体打磨：`ruff`（未用 import/变量）+ `vulture`（未被引用的函数/常量）接入 CI，
+      清理掉历次重构留下的死代码（详见下方「死代码清理」）
+
+### 死代码清理（2026-09-01）
+
+多轮迭代（尤其是复合命令白名单、路径分析那几次重构）留下了一批「新接口写好了、旧接口忘了删」
+的遗留代码：`security/allowlist.py` 的 `persistable_allow_rule`/`always_key`（单数版，早被复数版
+`persistable_allow_rules`/`always_keys` 取代）、`security/rules.py` 的 `sensitive_command`（自称
+"兼容旧导入"但已无人导入）、`security/command_paths.py` 的 `restricted_write_reason`（逻辑被更全面
+的 `denied_path_reason` 覆盖）、`security/shell.py` 的 `command_heads` 复数版、`security/
+settings_file.py` 的 `builtin_settings_path` 包装、`security/messages.py` 的 `OPAQUE_EXEC_MSG`、
+`security/rule_syntax.py` 的 `FAMILY_DISPLAY`、`security/types.py` 的 `DenyReason.USER_DENIED`、
+`session/compact.py` 的 `_user_to_preserve`（保留当前用户任务的逻辑被内联进了 `_apply_compact`）、
+`session/events.py` 的 `SOURCE_TYPES`。全部确认无引用后删除，`ruff` + `vulture` 接入 CI 防止再积累。
+
+`vulture_whitelist.py` 记录了几个确认是误报或有意保留的例外（`+=` 注册的事件处理器、
+`prompt_toolkit` 接口要求的参数签名、`FileBlock` 预留但暂时始终为 `None` 的行号字段、还没被
+任何代码路径构造过的 `CodeBlock`、只写不读的 `ToolExecution.finished_at`），逐条写了理由，
+不是随手加白名单。
 
 ## 8. 依赖
 

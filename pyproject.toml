@@ -18,10 +18,15 @@ dependencies = [
 cyan = "cyan:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.14", "vulture>=2.14"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# 只挑 pyflakes 里跟「代码是不是真的被用上」相关的规则（未用 import / 变量 / 重复定义 /
+# 未定义名字）；不管代码风格（行长、格式），那些交给编辑器，不在 CI 里卡。
+select = ["F401", "F811", "F841", "F821"]
 
 [build-system]
 requires = ["uv_build>=0.12.6,<0.13.0"]

@@ -35,13 +35,34 @@ MODE_LABELS = {
     PermissionMode.DEFAULT: "Default (默认)",
     PermissionMode.ACCEPT_EDITS: "AcceptEdits (自动批准编辑)",
 }
-# 横幅专用的短版本（不带中文括注），跟 /mode /status 用的 MODE_LABELS 分开：
-# 横幅追求一屏扫过去的简洁，那两个命令追求讲清楚这个模式是干什么的。
+
 _BANNER_MODE_LABELS = {
-    PermissionMode.PLAN: "Plan",
-    PermissionMode.DEFAULT: "Default",
-    PermissionMode.ACCEPT_EDITS: "AcceptEdits",
+    PermissionMode.PLAN: "plan",
+    PermissionMode.DEFAULT: "default",
+    PermissionMode.ACCEPT_EDITS: "acceptEdits",
 }
+
+
+def _banner_logo() -> Text:
+    """启动画面的品牌标记：带明暗面的六边形晶体 + 三行盒线字 CYAN。"""
+    logo = Text()
+    for line, style in (
+        ("     ▄▄▄", "bright_cyan"),
+        ("   ▄▀███▀▄", "bright_cyan"),
+        ("  ▄█▀   ▀█▄", "cyan"),
+        ("  ██  ◆  ██", "cyan"),
+        ("  ▀█▄   ▄█▀", "dark_cyan"),
+        ("   ▀▄███▄▀", "dark_cyan"),
+        ("     ▀▀▀", "dark_cyan"),
+        ("", ""),
+        (" ╔═╗╦ ╦╔═╗╔╗╔", "bold cyan"),
+        (" ║  ╚╦╝╠═╣║║║", "bold cyan"),
+        (" ╚═╝ ╩ ╩ ╩╝╚╝", "bold cyan"),
+    ):
+        if logo.plain:
+            logo.append("\n")
+        logo.append(line, style=style or "cyan")
+    return logo
 
 
 def _format_home_relative(path: Path) -> str:
@@ -121,13 +142,13 @@ class Renderer:
         from .. import __version__
 
         fields = [
-            ("model", f"[blue]{settings.llm.model}[/]"),
+            ("model", f"[white]{settings.llm.model}[/]"),
             ("mode", f"[green]{_BANNER_MODE_LABELS[permission_mode]}[/]"),
+            ("status", "[green]ready[/]"),
             ("project", f"[dim]{_format_home_relative(settings.workspace)}[/]"),
         ]
         if skill_count:
             fields.append(("skills", f"[dim]{skill_count} enabled[/]"))
-        fields.append(("status", "[green]ready[/]"))
 
         fields_grid = Table.grid(padding=(0, 2), expand=True)
         fields_grid.add_column(style="bold", no_wrap=True, width=max(len(label) for label, _ in fields))
@@ -135,8 +156,7 @@ class Renderer:
         for label, value in fields:
             fields_grid.add_row(label, value)
         left = Group(
-            Text("◇ CYAN", style="bold cyan"),
-            Text("AI Coding Agent", style="dim"),
+            _banner_logo(),
             Text(""),
             fields_grid,
         )
@@ -145,14 +165,18 @@ class Renderer:
         tips_grid.add_column(style="bold cyan", no_wrap=True)
         tips_grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
         tips_grid.add_row("/help", "[dim]show commands[/]")
+        tips_grid.add_row("/usage", "[dim]show usage[/]")
+        tips_grid.add_row("/mode", "[dim]switch permissions[/]")
         tips_grid.add_row("Ctrl-C", "[dim]cancel task[/]")
 
         whats_new_grid = Table.grid(padding=(0, 1), expand=True)
         whats_new_grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
         whats_new_grid.add_row("[dim]· Skills (personal & project)[/]")
-        whats_new_grid.add_row("[dim]· @path references[/]")
+        whats_new_grid.add_row("[dim]· @path file references[/]")
+        whats_new_grid.add_row("[dim]· Task planning & auto memory[/]")
 
-        right = Group(
+        right_parts: list[Any] = [
+            Text(""),
             Text("Welcome back!", style="bold"),
             Text(""),
             Text.from_markup("[bold cyan]Tips[/]"),
@@ -160,7 +184,22 @@ class Renderer:
             Text(""),
             Text.from_markup("[bold cyan]What's new[/]"),
             whats_new_grid,
+        ]
+        if instruction_labels:
+            right_parts.extend(
+                [
+                    Text(""),
+                    Text.from_markup("[bold cyan]Instructions[/]"),
+                    Text(" · ".join(instruction_labels), style="dim", overflow="ellipsis"),
+                ]
+            )
+        right_parts.extend(
+            [
+                Text(""),
+                Text.from_markup("[italic cyan]An intelligent agent for developers.[/]"),
+            ]
         )
+        right = Group(*right_parts)
 
         # Table 列分隔线才能画通高竖线；grid 中间塞 "│" 只会印在第一行。
         layout = Table(
@@ -179,7 +218,7 @@ class Renderer:
         self.console.print(
             Panel(
                 layout,
-                title=f"[bold cyan]◆ Cyan Agent v{__version__}[/]",
+                title=f"[dark_cyan]◆ Cyan Agent v{__version__}[/]",
                 title_align="left",
                 border_style="cyan",
                 box=box.ROUNDED,

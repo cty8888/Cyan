@@ -39,7 +39,7 @@ def _render_banner(width: int, workspace: Path) -> str:
     悄悄退回默认的 80），传了 ``width`` 却没传 ``height`` 就会被这条规则坑到。
     """
     buf = io.StringIO()
-    console = Console(file=buf, force_terminal=True, width=width, height=24, color_system=None)
+    console = Console(file=buf, force_terminal=True, width=width, height=40, color_system=None)
     renderer = Renderer(console)
     settings = AgentSettings(
         workspace=workspace,
@@ -317,7 +317,7 @@ def test_banner_uses_english_labels_and_short_mode_name(tmp_path):
     assert "model" in output
     assert "mode" in output
     assert "project" in output
-    assert "Default" in output
+    assert "default" in output
     assert "默认" not in output
 
 
@@ -370,13 +370,44 @@ def test_banner_shows_status_ready_and_tips_and_whats_new(tmp_path):
     assert "ready" in output
     assert "Tips" in output
     assert "/help" in output
+    assert "@path" in output
+    assert "/mode" in output
     assert "Ctrl-C" in output
     assert "What's new" in output
+    assert "Task planning" in output
+    assert "auto memory" in output
 
 
 def test_banner_greets_with_welcome_back(tmp_path):
     output = _render_banner(100, tmp_path)
     assert "Welcome back!" in output
+
+
+def test_banner_shows_instruction_labels_when_provided(tmp_path):
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=100, height=40, color_system=None)
+    renderer = Renderer(console)
+    settings = AgentSettings(
+        workspace=tmp_path,
+        llm=LLMSettings(model="deepseek-chat", api_key="x", base_url="http://x"),
+    )
+    renderer.banner(
+        settings,
+        PermissionMode.DEFAULT,
+        instruction_labels=["personal", "project"],
+    )
+    output = buf.getvalue()
+    assert "Instructions" in output
+    assert "personal" in output
+    assert "project" in output
+
+
+def test_banner_shows_crystal_and_cyan_wordmark(tmp_path):
+    """左栏是带切面的晶体标记，下面跟三行盒线字 CYAN。"""
+    output = _render_banner(100, tmp_path)
+    assert "▄▀███▀▄" in output
+    assert "╔═╗" in output
+    assert "╚╦╝" in output
 
 
 def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():

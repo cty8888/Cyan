@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,18 @@ SKILL_FILENAME = "SKILL.md"
 _PERSONAL_SKILLS_DIRNAME = "skills"
 _PROJECT_SKILLS_DIR = Path(".cyan") / "skills"
 _FRONTMATTER_DELIM = "---"
+
+# Skills 的常驻自动注入默认关闭：跟 cyan.md/MEMORY.md 不同，Skill 正文往往偏长、
+# 数量也可能不少，默认全量塞进 system 对 token 开销不友好，所以改成显式 opt-in。
+# 关掉的只是"每轮自动叠层"这一条路径——发现（``/skills``）与手动指定单次强调
+# （``/skill <name>``）都不受影响，见 ``PromptStack.refresh_files()``。
+ENV_ENABLE_SKILLS = "CYAN_ENABLE_SKILLS"
+
+
+def skills_layer_enabled() -> bool:
+    """是否把发现到的 Skills 自动叠进 system prompt；默认 False，需显式开启。"""
+    raw = os.environ.get(ENV_ENABLE_SKILLS, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 # 开关状态是独立于 SKILL.md 本身的一份小配置：``{"disabled": ["name", ...]}``。跟
 # cyan.md/权限规则一样按个人级/项目级两层存，互不覆盖——两边都能各自把某个 skill

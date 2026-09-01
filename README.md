@@ -22,8 +22,8 @@ uv run cyan
 | --- | --- |
 | `-w, --workspace` | 工作目录，默认当前目录；Agent 只能访问该目录内的文件 |
 | `-m, --model` | 模型名称，默认 `deepseek-chat` |
-| `-c, --continue` | 恢复本工作区最近一次会话（`~/.cyan/projects/.../last`） |
-| `--resume` | 列出或指定会话 id 恢复 |
+| `-c, --continue` | 恢复本工作区最近一次会话（`~/.cyan/projects/.../last`），恢复成功后会先把之前的对话回放一遍 |
+| `--resume` | 列出或指定会话 id 恢复，同样会回放该会话之前的对话 |
 | `--max-iterations` | 单任务最大轮次，默认 30 |
 | `--verbose` | 额外把日志打到 stderr（默认只写文件，不干扰 rich 界面） |
 | `--no-stream` | 关闭流式输出，改为等模型说完整段话再一次性显示（也可用环境变量 `CYAN_STREAM=0`） |
@@ -51,7 +51,9 @@ uv run cyan
 ## Skills
 
 跟 cyan.md 同一套磁盘发现 + 组窗叠层机制，但支持多个、各自独立触发，模型自己判断当前
-任务跟哪个 skill 相关。一个 skill 是一个目录 + 一份 `SKILL.md`（极简 frontmatter + 正文）：
+任务跟哪个 skill 相关。**自动叠层默认关闭**：需要设置环境变量 `CYAN_ENABLE_SKILLS=1`
+才会把发现到的 skill 自动叠进 system prompt（`/skills`、`/skill` 命令本身不受影响，
+随时可用来查看/管理）。一个 skill 是一个目录 + 一份 `SKILL.md`（极简 frontmatter + 正文）：
 
 ```
 ---
@@ -73,7 +75,7 @@ description: 遇到报错、测试失败、运行结果跟预期不一致时使�
 按需拉全文"不同：个人级 skill 存在工作区之外，模型现有的工具本来就读不到它，所以直接整篇
 嵌入，不依赖模型主动去读）。用 `/skills` 查看发现到的 skill 列表（含启用状态）。
 
-这是常驻自动注入；如果想明确要求"这一次任务请优先照某个 skill 做"，用 `/skill <name>`
+总开关打开后是常驻自动注入；如果想明确要求"这一次任务请优先照某个 skill 做"，用 `/skill <name>`
 手动指定（只对下一条任务生效一次），`/skill clear` 取消。如果想彻底关掉某个 skill、
 不让它继续自动进 system prompt，用 `/skills disable <name>`（`/skills enable <name>`
 重新打开）；开关状态写进跟该 skill 同一层级的 `skills.json`，不影响 `SKILL.md` 本身，

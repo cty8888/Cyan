@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from cyan.prompt.skills import (
+    ENV_ENABLE_SKILLS,
     SKILL_FILENAME,
     discover_skills,
     load_skill_layers,
     project_skills_settings_path,
     set_skill_enabled,
     skill_settings_path,
+    skills_layer_enabled,
     user_skills_settings_path,
 )
 from cyan.prompt.types import PromptLayerKind
@@ -220,3 +222,26 @@ def test_malformed_settings_file_is_treated_as_no_disabled(tmp_path):
     project_skills_settings_path(workspace).write_text("not json", encoding="utf-8")
     skills = discover_skills(workspace, home=None)
     assert skills[0].enabled is True
+
+
+# ---------------------------------------------------------------- skills_layer_enabled
+
+
+def test_skills_layer_disabled_by_default(monkeypatch):
+    monkeypatch.delenv(ENV_ENABLE_SKILLS, raising=False)
+    assert skills_layer_enabled() is False
+
+
+def test_skills_layer_enabled_via_env(monkeypatch):
+    monkeypatch.setenv(ENV_ENABLE_SKILLS, "1")
+    assert skills_layer_enabled() is True
+
+
+def test_skills_layer_env_value_is_case_insensitive(monkeypatch):
+    monkeypatch.setenv(ENV_ENABLE_SKILLS, "TRUE")
+    assert skills_layer_enabled() is True
+
+
+def test_skills_layer_env_other_value_stays_disabled(monkeypatch):
+    monkeypatch.setenv(ENV_ENABLE_SKILLS, "0")
+    assert skills_layer_enabled() is False

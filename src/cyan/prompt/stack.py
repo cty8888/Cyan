@@ -21,6 +21,7 @@ class PromptStack:
     home: Path | None = None
     max_chars: int = DEFAULT_TOOL_RESULT_CHARS
     auto_memory: bool = False
+    skills_enabled: bool = False
     identity: PromptLayer | None = None
     extra: list[PromptLayer] = field(default_factory=list)
 
@@ -34,13 +35,14 @@ class PromptStack:
         )
 
     def refresh_files(self) -> None:
-        """从磁盘重读 cyan.md、Skills 与 MEMORY.md 索引。"""
+        """从磁盘重读 cyan.md、Skills（若开启）与 MEMORY.md 索引。"""
         self.extra = load_instruction_layers(
             self.workspace, home=self.home, max_chars=self.max_chars
         )
-        self.extra.extend(
-            load_skill_layers(self.workspace, home=self.home, max_chars=self.max_chars)
-        )
+        if self.skills_enabled:
+            self.extra.extend(
+                load_skill_layers(self.workspace, home=self.home, max_chars=self.max_chars)
+            )
         if self.auto_memory and auto_memory_enabled():
             memory = load_memory_index_layer(self.workspace)
             if memory is not None:

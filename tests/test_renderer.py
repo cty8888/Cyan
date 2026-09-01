@@ -478,3 +478,89 @@ def test_task_finished_formats_elapsed_over_a_minute_as_minutes_and_seconds():
     renderer = _renderer()
     renderer.task_finished(StopReason.MAX_ITERATIONS, {"llm_calls": 1, "tool_calls": 1, "total_tokens": 1}, elapsed=125)
     assert "2分5秒" in renderer.console.file.getvalue()
+
+
+# ---------------------------------------------------------------- render_transcript
+
+
+class _StubSession:
+    """够 ``render_transcript`` 用的最小假会话：只需要 ``messages`` + ``tool_history``。"""
+
+    def __init__(self, messages, tool_history=None):
+        from cyan.session.types import ToolHistory
+
+        self.messages = messages
+        self.tool_history = tool_history if tool_history is not None else ToolHistory()
+
+
+def test_render_transcript_shows_user_and_assistant_turns(tmp_path):
+    from cyan.llm.types import AssistantMessage, UserMessage
+    from cyan.session import Session
+
+    renderer = _renderer()
+    session = Session.create(workspace=tmp_path, system_prompt="identity-only")
+    session.add(UserMessage.of("帮我看看这个 bug"))
+    session.add(AssistantMessage.of(text="我先跑一下测试"))
+    session.add(AssistantMessage.of(text="测试通过了"))
+
+    renderer.render_transcript(session)
+    output = _plain(renderer.console.file.getvalue())
+    assert "帮我看看这个 bug" in output
+    assert "我先跑一下测试" in output
+    assert "测试通过了" in output
+
+
+def test_render_transcript_shows_tool_call_and_result():
+    from cyan.llm.types import AssistantMessage, ToolCallBlock
+    from cyan.session.types import ToolExecution, ToolHistory, ToolResult, ToolResultStatus
+
+    renderer = _renderer()
+    history = ToolHistory()
+    history.record(
+        ToolExecution(
+            id="call_1",
+            tool_name="bash",
+            arguments='{"command": "pytest"}',
+            status=ToolResultStatus.OK,
+            result=ToolResult(content="退出码 0\n\n1 passed"),
+            duration=0.4,
+        )
+    )
+    call = ToolCallBlock(id="call_1", name="bash", arguments='{"command": "pytest"}')
+    session = _StubSession(messages=[AssistantMessage.of(tool_calls=[call])], tool_history=history)
+
+    renderer.render_transcript(session)
+    output = _plain(renderer.console.file.getvalue())
+    assert "bash" in output
+    assert "pytest" in output
+    assert "退出码 0" in output
+
+
+def test_render_transcript_marks_summary_message():
+    from cyan.llm.types import SummaryMessage
+
+    renderer = _renderer()
+    session = _StubSession(messages=[SummaryMessage.of("早前讨论了需求范围")])
+
+    renderer.render_transcript(session)
+    output = _plain(renderer.console.file.getvalue())
+    assert "对话摘要" in output
+    assert "早前讨论了需求范围" in output
+
+
+def test_render_transcript_skips_system_and_continue_messages():
+    from cyan.llm.types import ContinueMessage, SystemMessage
+
+    renderer = _renderer()
+    session = _StubSession(messages=[SystemMessage.of("你是 Cyan"), ContinueMessage.of("请继续")])
+
+    renderer.render_transcript(session)
+    assert renderer.console.file.getvalue() == ""
+
+
+def test_render_transcript_noop_when_no_turns():
+    renderer = _renderer()
+    session = _StubSession(messages=[])
+
+    renderer.render_transcript(session)
+    assert renderer.console.file.getvalue() == ""

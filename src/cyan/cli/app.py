@@ -35,6 +35,7 @@ from ..errors import ConfigError
 from ..llm.deepseek import DeepSeekClient
 from ..logutil import get_logger
 from ..memory.settings import auto_memory_enabled
+from ..prompt.skills import skills_layer_enabled
 from ..prompt.stack import PromptStack
 from ..security.permissions import PermissionManager, initial_permission_mode
 from ..security.types import PermissionMode
@@ -69,7 +70,7 @@ class App:
         self.registry = build_default_registry()
         self.commands: CommandRegistry = build_default_commands()
         self._permission_mode_override = permission_mode_override
-        self.session, warning = self._open_session(resume=resume, continue_last=continue_last)
+        self.session, warning, self._resumed = self._open_session(resume=resume, continue_last=continue_last)
         self.llm = DeepSeekClient(settings.llm, on_retry=self._on_llm_retry)
         home = self.session.store.home if self.session.store is not None else cyan_home()
         self._prompt_session: PromptSession[str] = self._build_prompt_session(home)
@@ -84,6 +85,7 @@ class App:
                 workspace=settings.workspace,
                 home=home,
                 auto_memory=auto_memory_enabled(),
+                skills_enabled=skills_layer_enabled(),
             ),
         )
         self._startup_warning = warning
@@ -121,7 +123,10 @@ class App:
 
     def _open_session(
         self, *, resume: str | None, continue_last: bool
-    ) -> tuple[Session, str | None]:
+    ) -> tuple[Session, str | None, bool]:
+        """第三个返回值标记这次是否真的接上了一个已有会话（供启动时回放历史用）；
+        ``continue_last`` 在没有可接的会话时会静默退化成新建，不算 resumed。
+        """
         from ..session.branch import continue_session, load_session
         from ..session.store import resolve_session_id
 
@@ -130,11 +135,11 @@ class App:
             if session_id is None:
                 raise ConfigError(f"找不到会话 {resume}")
             session, warning = load_session(self.settings.workspace, session_id)
-            return self._after_load(session, warning)
+            return (*self._after_load(session, warning), True)
         if continue_last:
             loaded = continue_session(self.settings.workspace)
             if loaded is not None:
-                return self._after_load(*loaded)
+                return (*self._after_load(*loaded), True)
         store = DiskStore.create(self.settings.workspace)
         session = Session.create(
             workspace=self.settings.workspace,
@@ -147,7 +152,7 @@ class App:
             store=store,
             model=self.settings.llm.model,
         )
-        return self._after_load(session, None)
+        return (*self._after_load(session, None), False)
 
     def _after_load(self, session: Session, warning: str | None) -> tuple[Session, str | None]:
         """resume 时刷新系统提示（日期等）；命令行 ``--mode`` 覆盖 meta 里的权限模式。"""
@@ -191,6 +196,8 @@ class App:
         if self.session.metadata.title:
             short = self.session.metadata.session_id[:8]
             self.renderer.notice(f"当前会话 {short}  {self.session.metadata.title}")
+        if self._resumed:
+            self.renderer.render_transcript(self.session)
         while True:
             self.renderer.console.print()
             try:

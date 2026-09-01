@@ -174,17 +174,36 @@ def test_messages_for_request_rereads_disk(tmp_path):
     assert session.messages[0].text == "id"
 
 
-def test_wire_includes_skill_layer(tmp_path):
-    home = tmp_path / "home"
-    workspace = tmp_path / "ws"
+def _write_commit_skill(workspace):
     skill_dir = workspace / ".cyan" / "skills" / "commit-message"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: commit-message\ndescription: 创建 commit 时用\n---\n\n一个 commit 只做一件事",
         encoding="utf-8",
     )
+
+
+def test_wire_excludes_skill_layer_by_default(tmp_path):
+    """Skills 自动注入默认关闭：不显式传 ``skills_enabled=True`` 就不会进 system。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    _write_commit_skill(workspace)
     session = Session.create(workspace=workspace, system_prompt="identity-only")
     stack = PromptStack(workspace=workspace, home=home)
+    payloads = ContextBuilder.from_policy(ContextPolicy()).build_messages(
+        session.messages, session.tool_history, stack=stack
+    )
+    system = payloads[0]["content"]
+    assert "commit-message" not in system
+    assert system == "identity-only"
+
+
+def test_wire_includes_skill_layer_when_enabled(tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    _write_commit_skill(workspace)
+    session = Session.create(workspace=workspace, system_prompt="identity-only")
+    stack = PromptStack(workspace=workspace, home=home, skills_enabled=True)
     payloads = ContextBuilder.from_policy(ContextPolicy()).build_messages(
         session.messages, session.tool_history, stack=stack
     )

@@ -308,7 +308,7 @@ def _write_skill(root, name: str, description: str = "desc", body: str = "正文
 def _fake_skills_app(workspace: Path, home: Path | None = None) -> SimpleNamespace:
     app = _fake_policy_app()
     app.settings.workspace = workspace
-    app.runtime.prompt_stack = SimpleNamespace(home=home)
+    app.runtime.prompt_stack = SimpleNamespace(home=home, skills_enabled=False)
     app._pending_skill_reminder = None
     return app
 

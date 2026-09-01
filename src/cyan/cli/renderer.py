@@ -18,13 +18,26 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
 from ..core.types import StopReason
+from ..llm.parser import parse_tool_arguments
+from ..llm.types import (
+    AssistantMessage,
+    ContinueMessage,
+    SummaryMessage,
+    SystemMessage,
+    ToolCallBlock,
+    ToolMessage,
+    UserMessage,
+)
 from ..logutil import get_logger
 from ..security.types import ApprovalDecision, ApprovalRequest, PermissionMode
+from ..session import Session
+from ..session.types import ToolResultStatus
 from ..settings import AgentSettings
 from ..tools.types import ToolRunResult
 
@@ -147,8 +160,8 @@ class Renderer:
             ("status", "[green]ready[/]"),
             ("project", f"[dim]{_format_home_relative(settings.workspace)}[/]"),
         ]
-        if skill_count:
-            fields.append(("skills", f"[dim]{skill_count} enabled[/]"))
+    
+        fields.append(("skills", f"[dim]{skill_count} enabled[/]"))
 
         fields_grid = Table.grid(padding=(0, 2), expand=True)
         fields_grid.add_column(style="bold", no_wrap=True, width=max(len(label) for label, _ in fields))
@@ -227,6 +240,73 @@ class Renderer:
             )
         )
         logger.info("启动 模型=%s workspace=%s", settings.llm.model, settings.workspace)
+
+    def render_transcript(self, session: Session) -> None:
+        """``--continue``/``--resume`` 恢复会话时，把之前的对话整体回放一遍。
+
+        跟 Claude Code 的 resume 体验对齐：先看到上文再继续输入，而不是打开一个
+        看起来什么都没发生过的空白 REPL。identity 用的 ``SystemMessage`` 不是
+        对话内容，跳过；``ContinueMessage``（模型输出被截断时内部补的续写指令）
+        也不是真实用户轮次，一并跳过；``ToolMessage`` 只是"指向哪次调用"的占位，
+        真正的结果随对应 assistant 消息的 tool_call 一起展示。压缩产生的
+        ``SummaryMessage`` 单独用一个提示面板标出来，避免被误认成真实用户输入。
+        """
+        turns = [
+            message
+            for message in session.messages
+            if not isinstance(message, (SystemMessage, ContinueMessage, ToolMessage))
+        ]
+        if not turns:
+            return
+        self.console.print(Rule("[dim]之前的对话[/]", style="dim"))
+        self.console.print()
+        for message in turns:
+            if isinstance(message, SummaryMessage):
+                self._render_history_summary(message)
+            elif isinstance(message, UserMessage):
+                self._render_history_user(message)
+            elif isinstance(message, AssistantMessage):
+                self._render_history_assistant(message, session)
+        self.console.print(Rule("[dim]继续对话[/]", style="dim"))
+        self.console.print()
+
+    def _render_history_user(self, message: UserMessage) -> None:
+        self.console.print(Text.from_markup("[bold cyan]›[/] ") + Text(message.text or ""))
+        for block in message.file_blocks:
+            self.console.print(f"  [dim]@{block.path}[/]")
+        self.console.print()
+
+    def _render_history_summary(self, message: SummaryMessage) -> None:
+        self.console.print(
+            Panel(
+                Text(message.text or "", style="dim italic"),
+                title="[dim]对话摘要（更早内容已压缩）[/]",
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
+        self.console.print()
+
+    def _render_history_assistant(self, message: AssistantMessage, session: Session) -> None:
+        text = message.text
+        if text:
+            self.console.print(Markdown(text))
+        for call in message.tool_calls:
+            self._render_history_tool_call(call, session)
+        self.console.print()
+
+    def _render_history_tool_call(self, call: ToolCallBlock, session: Session) -> None:
+        try:
+            args = parse_tool_arguments(call.arguments or "{}", call.name)
+        except Exception:
+            args = {}
+        self.console.print(f"[bold cyan]▸ {call.name}[/] [dim]{_format_args(call.name, args)}[/]")
+        execution = session.tool_history.get(call.id)
+        if execution is None or execution.status is ToolResultStatus.RUNNING:
+            return
+        text = (execution.result.content if execution.result else None) or execution.error or ""
+        mark = "[green]✓[/]" if execution.status is ToolResultStatus.OK else "[red]✗[/]"
+        self.console.print(f"  {mark} {_first_line(text)} [dim]({execution.duration:.1f}s)[/]")
 
     def notice(self, message: str, level: str = "info") -> None:
         style = {"error": "bold red", "warning": "yellow", "info": "dim"}.get(level, "dim")

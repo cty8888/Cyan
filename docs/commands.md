@@ -71,8 +71,11 @@ Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/c
 
 ## Skills
 
-跟 `cyan.md` 一样是磁盘上的文件、组窗时自动叠进 system prompt，不需要专门的命令去
-"激活"——放对目录，下一次组窗就会生效。一个 Skill 是一个目录 + 一份 `SKILL.md`：
+跟 `cyan.md` 一样是磁盘上的文件，但**自动叠进 system prompt 这条路径默认是关闭的**：
+需要设置环境变量 `CYAN_ENABLE_SKILLS=1` 并重启进程才会生效（`/skills`、`/skill`
+命令本身不受影响，随时能用来查看/管理）。默认关闭是因为 Skill 正文往往不短、数量
+也可能不少，默认全量塞进 system 对 token 开销不友好，改成显式 opt-in 更稳妥。总开关
+打开之后，一个 Skill 是一个目录 + 一份 `SKILL.md`：
 
 ```
 ---
@@ -94,10 +97,11 @@ description: 遇到报错、测试失败、运行结果跟预期不一致时使�
 存在工作区之外，`read_file` 的沙箱本来就读不到它，所以选择直接整篇嵌入，不依赖模型
 主动去读）。缺 frontmatter、缺 `name`/`description` 字段的目录会被静默跳过。
 
-这是"常驻自动注入"——每一轮请求都带着，模型自己判断用不用。如果想明确要求"这一次
-任务请优先照某个 skill 做"，用 `/skill <name>` 手动指定；如果想彻底关掉某个 skill
-不让它进 system prompt，用 `/skills disable <name>`。两者是独立的旋钮，详见下方
-`/skills` 与 `/skill` 命令说明。
+总开关打开后是"常驻自动注入"——每一轮请求都带着，模型自己判断用不用。如果想明确
+要求"这一次任务请优先照某个 skill 做"，用 `/skill <name>` 手动指定（不受总开关与
+per-skill 开关限制，见下）；如果想彻底关掉某个 skill 不让它进 system prompt，用
+`/skills disable <name>`。总开关、per-skill 开关、`/skill` 手动指定是三个独立的
+旋钮，详见下方 `/skills` 与 `/skill` 命令说明。
 
 ---
 
@@ -212,8 +216,10 @@ description: 遇到报错、测试失败、运行结果跟预期不一致时使�
 ```
 
 列出模式下每条显示 name、层级（个人/项目）、启用状态、description 与来源路径；不打印
-正文——正文已经随 `PromptStack` 整篇进了 system（仅限启用中的），用 `/instructions`
-能看到对应层的字数与是否被截断。
+正文——正文已经随 `PromptStack` 整篇进了 system（仅限总开关打开、且该 skill 本身
+启用中的），用 `/instructions` 能看到对应层的字数与是否被截断。若总开关
+（`CYAN_ENABLE_SKILLS`）当前关闭，列表顶部会额外提示一行，此时下面各 skill 的
+启用状态只是"预配置"，还没真正生效。
 
 `disable`/`enable` 只是加/删一个开关标记，不动 `SKILL.md` 本身：开关状态写进跟该
 skill 同一层级的 `skills.json`——个人级 skill 写 `~/.cyan/skills.json`，项目级写
@@ -423,6 +429,9 @@ sidecar `meta.json`），`/rewind restore` 分叉新会话时会恢复到锚点�
   `/resume` 行为，避免切完一个旧会话后权限模式莫名其妙变了。
 - 底层复用 `session.branch.load_session()` + `App.attach_session()`，跟 `/new`、
   `/rewind restore` 是同一套装配逻辑。
+- 切换成功后会把目标会话之前的对话整体回放一遍（用户消息、assistant 回复、工具
+  调用与结果摘要），跟启动时 `--continue`/`--resume` 的回放是同一套渲染
+  （`Renderer.render_transcript()`），先看到上下文再继续输入。
 
 ---
 

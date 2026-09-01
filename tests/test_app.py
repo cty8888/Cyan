@@ -270,3 +270,89 @@ def test_instruction_summary_empty_labels_when_only_skills():
 
     assert labels == []
     assert skill_count == 1
+
+
+# ---------------------------------------------------------------- --continue / --resume 回放历史
+
+
+def _app_settings(tmp_path):
+    from cyan.settings import AgentSettings, LLMSettings
+
+    return AgentSettings(workspace=tmp_path, llm=LLMSettings(api_key="test"))
+
+
+def test_fresh_start_is_not_marked_resumed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    app = App(_app_settings(tmp_path), console)
+    assert app._resumed is False
+
+
+def test_continue_last_without_prior_session_is_not_resumed(tmp_path, monkeypatch):
+    """还没有任何存过用户消息的会话时，``--continue`` 静默退化成新建，不算 resumed。"""
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    app = App(_app_settings(tmp_path), console, continue_last=True)
+    assert app._resumed is False
+
+
+def test_continue_last_with_prior_session_is_resumed(tmp_path, monkeypatch):
+    from cyan.llm.types import UserMessage
+
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+
+    first = App(_app_settings(tmp_path), console)
+    first.session.add(UserMessage.of("第一轮的问题"))
+    first.session.persist_head()
+
+    second = App(_app_settings(tmp_path), console, continue_last=True)
+    assert second._resumed is True
+    assert second.session.metadata.session_id == first.session.metadata.session_id
+
+
+def test_resume_by_id_is_resumed(tmp_path, monkeypatch):
+    from cyan.llm.types import UserMessage
+
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+
+    first = App(_app_settings(tmp_path), console)
+    first.session.add(UserMessage.of("第一轮的问题"))
+    first.session.persist_head()
+
+    second = App(_app_settings(tmp_path), console, resume=first.session.metadata.session_id)
+    assert second._resumed is True
+
+
+def test_run_interactive_shows_transcript_when_resumed(tmp_path, monkeypatch):
+    from cyan.llm.types import UserMessage
+
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=80)
+
+    first = App(_app_settings(tmp_path), console)
+    first.session.add(UserMessage.of("第一轮的问题"))
+    first.session.persist_head()
+
+    second = App(_app_settings(tmp_path), console, continue_last=True)
+    second._prompt_session.prompt = lambda *args, **kwargs: (_ for _ in ()).throw(EOFError())
+
+    second.run_interactive()
+
+    assert "之前的对话" in buf.getvalue()
+    assert "第一轮的问题" in buf.getvalue()
+
+
+def test_run_interactive_hides_transcript_for_fresh_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("CYAN_HOME", str(tmp_path / "home"))
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=80)
+
+    app = App(_app_settings(tmp_path), console)
+    app._prompt_session.prompt = lambda *args, **kwargs: (_ for _ in ()).throw(EOFError())
+
+    app.run_interactive()
+
+    assert "之前的对话" not in buf.getvalue()

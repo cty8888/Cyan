@@ -260,15 +260,20 @@ def _cmd_instructions(app: App, args: list[str]) -> bool:
 def _cmd_skills(app: App, args: list[str]) -> bool:
     """``/skills``：列出发现的 Skills（个人级 ``~/.cyan/skills/`` + 项目级
     ``.cyan/skills/``），显示 name/层级/启用状态/description/来源路径，不打印正文——
-    正文已经随 ``PromptStack`` 整篇进了 system（仅对启用中的 skill）。
+    正文已经随 ``PromptStack`` 整篇进了 system（仅对启用中的 skill，且总开关需开启，
+    见下）。
 
     ``/skills disable <name>`` / ``/skills enable <name>``：开关一个 skill 是否
     自动叠进 system prompt。开关状态写进跟这个 skill 同一层级的 ``skills.json``
     （个人级 skill 写 ``~/.cyan/skills.json``，项目级写 ``{workspace}/.cyan/skills.json``），
     不影响 `SKILL.md` 本身；关掉之后 `/skills` 里仍能看到它（标成"已禁用"），方便随时
     再开回来。
+
+    这里的启用/禁用是"per-skill"的细粒度开关，独立于全局总开关：Skills 自动注入
+    默认整体关闭（``CYAN_ENABLE_SKILLS`` 未设置时），需要显式设置该环境变量再重启
+    才会真正叠进 system；总开关关闭时这里仍按原样列出发现到的 skill 供预览/管理。
     """
-    from ..prompt.skills import discover_skills, set_skill_enabled, skill_settings_path
+    from ..prompt.skills import ENV_ENABLE_SKILLS, discover_skills, set_skill_enabled, skill_settings_path
 
     home = app.runtime.prompt_stack.home
     workspace = app.settings.workspace
@@ -294,6 +299,11 @@ def _cmd_skills(app: App, args: list[str]) -> bool:
         app.renderer.console.print(f"[green]已{state}「{name}」（写入 {path}）[/]")
         return False
 
+    if not app.runtime.prompt_stack.skills_enabled:
+        app.renderer.console.print(
+            f"[yellow]Skills 自动注入总开关当前关闭（默认关闭），设置环境变量 "
+            f"{ENV_ENABLE_SKILLS}=1 后重启才会生效；下面各 skill 的启用状态不受影响[/]"
+        )
     skills = discover_skills(workspace, home=home)
     if not skills:
         app.renderer.console.print("[dim]当前没有发现任何 skill（个人级 ~/.cyan/skills/，项目级 .cyan/skills/）[/]")
@@ -611,6 +621,7 @@ def _cmd_resume(app: App, args: list[str]) -> bool:
     title = session.metadata.title or "(无标题)"
     console.print(f"[dim]已切换到会话 {short}  {title}[/]")
     logger.info("切换会话：%s", session.metadata.session_id)
+    app.renderer.render_transcript(session)
     return False
 
 

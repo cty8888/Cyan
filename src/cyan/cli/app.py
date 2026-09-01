@@ -118,7 +118,8 @@ class App:
             if text.startswith("/") or at_reference_prefix(text) is not None:
                 buffer.start_completion(select_first=False)
 
-        session.default_buffer.on_text_changed += _retrigger_completion
+        # vulture 认不出 += 注册的事件处理器
+        session.default_buffer.on_text_changed += _retrigger_completion  # noqa
         return session
 
     def _open_session(

@@ -171,9 +171,9 @@ uv run pytest
 ```
 
 推送到 `main` 或开 pull request 时，GitHub Actions 会按 `uv.lock` 安装依赖，依次跑
-`ruff check`（未用 import/变量）、`vulture`（未被引用的函数/常量，误报记在 `vulture_whitelist.py`）
+`ruff check`（未用 import/变量）、`vulture`（未被引用的函数/常量）
 和同一套 pytest 测试。本地可以 `uv run ruff check src/ tests/` / `uv run vulture src/ tests/
-vulture_whitelist.py --min-confidence 60` 单独跑。
+--min-confidence 60` 单独跑。
 
 ## 开发状态
 

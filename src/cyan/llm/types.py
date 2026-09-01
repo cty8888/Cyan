@@ -97,7 +97,7 @@ class CodeBlock(Block):
     """独立的代码片段，不必对应磁盘上的真实文件。"""
 
     type: ClassVar[BlockType] = BlockType.CODE
-    language: str
+    language: str  # noqa  内容模型预留字段，目前还没有代码路径构造 CodeBlock
     code: str
 
 

@@ -161,7 +161,7 @@ class ToolExecution:
     status: ToolResultStatus = ToolResultStatus.RUNNING
     result: ToolResult | None = None
     started_at: float = field(default_factory=time.time)
-    finished_at: float | None = None
+    finished_at: float | None = None  # noqa  目前只写入，duration 才是被读取的派生值
     duration: float = 0.0
     error: str | None = None
 

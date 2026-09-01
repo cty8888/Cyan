@@ -248,7 +248,7 @@ class Session:
         if not ok and error is None:
             error = content
         execution.error = error
-        execution.finished_at = now
+        execution.finished_at = now  # noqa  与 types.ToolExecution.finished_at 同步写入，暂无读取方
         execution.duration = duration if duration is not None else (now - execution.started_at)
 
         self.usage.tool_calls += 1

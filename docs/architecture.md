@@ -416,11 +416,8 @@ settings_file.py` 的 `builtin_settings_path` 包装、`security/messages.py` �
 `security/rule_syntax.py` 的 `FAMILY_DISPLAY`、`security/types.py` 的 `DenyReason.USER_DENIED`、
 `session/compact.py` 的 `_user_to_preserve`（保留当前用户任务的逻辑被内联进了 `_apply_compact`）、
 `session/events.py` 的 `SOURCE_TYPES`。全部确认无引用后删除，`ruff` + `vulture` 接入 CI 防止再积累。
-
-`vulture_whitelist.py` 记录了几个确认是误报或有意保留的例外（`+=` 注册的事件处理器、
-`prompt_toolkit` 接口要求的参数签名、`FileBlock` 预留但暂时始终为 `None` 的行号字段、还没被
-任何代码路径构造过的 `CodeBlock`、只写不读的 `ToolExecution.finished_at`），逐条写了理由，
-不是随手加白名单。
+确认是误报或有意保留的符号（例如 `+=` 注册的事件处理器、尚未构造的 `CodeBlock.language`、
+只写不读的 `ToolExecution.finished_at`）在源码行尾用 `# noqa` 标出，不再单独维护白名单文件。
 
 ## 8. 依赖
 

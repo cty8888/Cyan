@@ -350,9 +350,11 @@ def test_banner_shows_skill_count_line(tmp_path):
     assert "4 enabled" in output
 
 
-def test_banner_omits_skills_line_when_count_is_zero(tmp_path):
+def test_banner_shows_skills_line_when_count_is_zero(tmp_path):
+    """没有启用 skill 时仍画出这一行，数量为 0。"""
     output = _render_banner(100, tmp_path)
-    assert "enabled" not in output
+    assert "skills" in output
+    assert "0 enabled" in output
 
 
 def test_banner_shows_version_and_rounded_corners(tmp_path):

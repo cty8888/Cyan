@@ -456,12 +456,11 @@ class _FakeResumeApp:
     （换系统提示 + 换 self.session），不涉及 Runtime。
     """
 
-    def __init__(self, workspace, session: Session, home) -> None:
+    def __init__(self, workspace, session: Session) -> None:
         console = Console(file=io.StringIO(), force_terminal=True, width=80)
         self.settings = SimpleNamespace(workspace=workspace)
         self.renderer = Renderer(console)
         self.session = session
-        self._home = home
 
     def attach_session(self, session: Session) -> None:
         from cyan.core.prompts import build_system_prompt
@@ -489,7 +488,7 @@ def test_resume_no_args_lists_sessions(tmp_path):
     home = tmp_path / "home"
     session_a = _make_disk_session(tmp_path, home, title="会话A")
     session_b = _make_disk_session(tmp_path, home, title="会话B")
-    app = _FakeResumeApp(tmp_path, session_b, home)
+    app = _FakeResumeApp(tmp_path, session_b)
 
     assert _cmd_resume(app, []) is False
     output = _output(app)
@@ -501,7 +500,7 @@ def test_resume_switches_to_target_session_by_prefix(tmp_path):
     home = tmp_path / "home"
     session_a = _make_disk_session(tmp_path, home, title="会话A")
     session_b = _make_disk_session(tmp_path, home, title="会话B")
-    app = _FakeResumeApp(tmp_path, session_a, home)
+    app = _FakeResumeApp(tmp_path, session_a)
 
     _cmd_resume(app, [session_b.metadata.session_id[:8]])
 
@@ -513,7 +512,7 @@ def test_resume_keeps_current_permission_mode_not_targets(tmp_path):
     home = tmp_path / "home"
     session_a = _make_disk_session(tmp_path, home, title="会话A", permission_mode=PermissionMode.ACCEPT_EDITS)
     session_b = _make_disk_session(tmp_path, home, title="会话B", permission_mode=PermissionMode.PLAN)
-    app = _FakeResumeApp(tmp_path, session_a, home)
+    app = _FakeResumeApp(tmp_path, session_a)
 
     _cmd_resume(app, [session_b.metadata.session_id[:8]])
 
@@ -523,7 +522,7 @@ def test_resume_keeps_current_permission_mode_not_targets(tmp_path):
 def test_resume_unknown_token_reports_error_and_does_not_switch(tmp_path):
     home = tmp_path / "home"
     session_a = _make_disk_session(tmp_path, home, title="会话A")
-    app = _FakeResumeApp(tmp_path, session_a, home)
+    app = _FakeResumeApp(tmp_path, session_a)
 
     _cmd_resume(app, ["nope000"])
 
@@ -534,7 +533,7 @@ def test_resume_unknown_token_reports_error_and_does_not_switch(tmp_path):
 def test_resume_to_current_session_is_a_noop(tmp_path):
     home = tmp_path / "home"
     session_a = _make_disk_session(tmp_path, home, title="会话A")
-    app = _FakeResumeApp(tmp_path, session_a, home)
+    app = _FakeResumeApp(tmp_path, session_a)
 
     _cmd_resume(app, [session_a.metadata.session_id[:8]])
 

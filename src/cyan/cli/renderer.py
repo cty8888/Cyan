@@ -11,12 +11,15 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from rich import box
+from rich.cells import cell_len
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 
 from ..core.types import StopReason
@@ -46,11 +49,19 @@ _CAPABILITY_LABEL = {
     "write": "写入",
     "exec": "执行",
 }
+# 审批面板边框按能力上色：exec 风险最高用红，write 居中用黄，read 很少走到这里用青，
+# 跟 banner/工具起始行共用的青色主题呼应，一眼能分出「这次要批准的是什么级别的操作」。
+_CAPABILITY_BORDER_COLOR = {
+    "read": "cyan",
+    "write": "yellow",
+    "exec": "red",
+}
 _DECISION_BY_KEY = {
     "y": ApprovalDecision.ALLOW_ONCE,
     "n": ApprovalDecision.DENY,
     "a": ApprovalDecision.ALLOW_ALWAYS,
 }
+_BANNER_WIDTH = 64  # 启动横幅固定宽度，不随终端宽度变化（终端比这个还窄时才会被迫收窄）
 _LIVE_MIN_INTERVAL = 0.08  # 秒；避免每个分片都重新解析整段内容造成 CPU 抖动
 # 这几个工具的哪个参数值得实时预览：write_file 边生成边看新内容，
 # edit_file 边生成边看替换后的新文本——跟 Claude Code 靠 fine-grained tool
@@ -88,21 +99,45 @@ class Renderer:
         permission_mode: PermissionMode,
         instruction_labels: list[str] | None = None,
     ) -> None:
-        lines = [
-            Text.from_markup(f"[bold cyan]Cyan[/]  模型 [green]{settings.llm.model}[/]"),
-            Text.from_markup(
-                f"权限模式  [green]{MODE_LABELS[permission_mode]}[/]"
-            ),
-            Text.from_markup(f"工作目录  [dim]{settings.workspace}[/]"),
-            Text.from_markup(f"可用工具  [dim]{', '.join(tool_names)}[/]"),
-            Text.from_markup(f"日志文件  [dim]{settings.log_dir / 'agent.log'}[/]"),
+        """启动横幅：用 grid 对齐键值对，标题/提示挪到 Panel 的 title/subtitle 上，
+        不再跟正文混在一起当第一/最后一行——留白更清爽，字段名对不齐的问题也顺带解决了
+        （grid 按最宽的那列自动对齐，不用手动拼空格）。
+
+        宽度定死成 ``_BANNER_WIDTH``，不随终端宽度变化：光靠 ``expand=False`` 不够——
+        那只是「不主动撑满终端」，遇到终端比内容还窄（比如工作目录路径很长）时还是
+        会被 clamp 到终端宽度，看起来就像跟着终端在变。第二列加
+        ``no_wrap`` + ``overflow="ellipsis"``，长路径会被截断成省略号，而不是把
+        box 撑宽；第一列显式给 ``width``（按实际标签宽度算，中文按 2 算），不然
+        总宽度不够时 Table 会连着标签列一起等比例缩，短标签也会被截断。
+        """
+        rows = [
+            ("模型", f"[green]{settings.llm.model}[/]"),
+            ("权限模式", f"[green]{MODE_LABELS[permission_mode]}[/]"),
+            ("工作目录", f"[dim]{settings.workspace}[/]"),
         ]
         if instruction_labels:
-            lines.append(
-                Text.from_markup(f"指令层  [dim]{' · '.join(instruction_labels)}[/]")
+            rows.append(("指令层", f"[dim]{' · '.join(instruction_labels)}[/]"))
+        label_width = max(cell_len(label) for label, _ in rows)
+
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold", no_wrap=True, width=label_width)
+        grid.add_column(overflow="ellipsis")
+        for label, value in rows:
+            grid.add_row(label, value)
+
+        self.console.print(
+            Panel(
+                grid,
+                title="[bold cyan]Cyan[/]",
+                title_align="left",
+                subtitle="[dim]/help 查看命令 · Ctrl-C 中断当前任务[/]",
+                subtitle_align="left",
+                border_style="cyan",
+                box=box.HEAVY,
+                padding=(1, 2),
+                width=min(_BANNER_WIDTH, self.console.width),
             )
-        lines.append(Text.from_markup("[dim]输入任务开始，/help 查看命令，Ctrl-C 中断当前任务[/]"))
-        self.console.print(Panel(Text("\n").join(lines), border_style="cyan", padding=(0, 1)))
+        )
         logger.info("启动 模型=%s workspace=%s tools=%s", settings.llm.model, settings.workspace, ", ".join(tool_names))
 
     def notice(self, message: str, level: str = "info") -> None:
@@ -219,13 +254,22 @@ class Renderer:
         self._tool_preview = None
 
     def thinking(self, iteration: int) -> None:
-        self.console.print(f"[dim]· 第 {iteration} 轮，思考中...[/]")
+        self.console.print(f"[dim italic]· 第 {iteration} 轮，思考中...[/]")
         logger.info("第 %s 轮，思考中", iteration)
+
+    def waiting_spinner(self) -> Any:
+        """等待模型返回下一个事件期间的转圈动画。
+
+        只是个简单的 spinner，没有状态词轮换也没有计时——``Console.status()``
+        自带独立的刷新线程，只负责重绘动画帧，包住的那次调用仍在主线程同步执行，
+        不影响 Ctrl-C 中断的现有语义。
+        """
+        return self.console.status("[dim]等待模型响应…[/]", spinner="dots")
 
     # ------------------------------------------------------------------ 工具
     def tool_started(self, name: str, args: dict[str, Any]) -> None:
         self.stop_live_preview()
-        self.console.print(f"[bold blue]▸ {name}[/] [dim]{_format_args(name, args)}[/]")
+        self.console.print(f"[bold cyan]▸ {name}[/] [dim]{_format_args(name, args)}[/]")
         logger.info("调用 %s  %s", name, _format_args(name, args))
         logger.debug("工具参数 %s: %s", name, json.dumps(args, ensure_ascii=False, default=str))
 
@@ -254,6 +298,25 @@ class Renderer:
             for line in _output_excerpt(text):
                 self.console.print(f"    [dim]{line}[/]")
 
+        if name == "read_file" and result.metadata.get("preview"):
+            preview = result.metadata["preview"]
+            preview_start = int(result.metadata.get("preview_start", 1))
+            lexer = Syntax.guess_lexer(str(result.metadata.get("path") or ""), code=preview)
+            self.console.print(
+                Syntax(
+                    preview,
+                    lexer,
+                    theme="ansi_dark",
+                    background_color="default",
+                    line_numbers=True,
+                    start_line=preview_start,
+                )
+            )
+            last_previewed_line = preview_start - 1 + len(preview.splitlines())
+            if int(result.metadata.get("total_lines", 0)) > last_previewed_line:
+                self.console.print("  [dim]...[/]")
+            self.console.print()
+
         diff = result.metadata.get("diff")
         if diff and diff != "(无变化)":
             self.console.print(Syntax(diff, "diff", theme="ansi_dark", background_color="default"))
@@ -268,6 +331,7 @@ class Renderer:
         """
         capability = _CAPABILITY_LABEL.get(request.capability, request.capability)
         title = f"需要确认 · {capability}"
+        border_style = _CAPABILITY_BORDER_COLOR.get(request.capability, "yellow")
         body: list[Any] = [Text.from_markup(f"[bold]{request.summary}[/]")]
 
         if request.detail:
@@ -281,7 +345,7 @@ class Renderer:
             Panel(
                 _stack(body),
                 title=title,
-                border_style="yellow",
+                border_style=border_style,
                 padding=(0, 1),
             )
         )
@@ -312,18 +376,41 @@ class Renderer:
         return decision
 
     # ------------------------------------------------------------------ 收尾
-    def task_finished(self, reason: StopReason, stats: dict[str, Any]) -> None:
-        summary = (
-            f"{stats.get('llm_calls', 0)} 次模型调用 · "
-            f"{stats.get('tool_calls', 0)} 次工具调用 · "
-            f"{stats.get('total_tokens', 0)} tokens"
-        )
+    def task_finished(self, reason: StopReason, stats: dict[str, Any], elapsed: float | None = None) -> None:
+        """任务收尾用一张卡片而不是一行灰字——录屏/演示时这是最后一帧画面，
+        值得比"运行中"的普通行更醒目一点。正常结束绿色打勾，异常终止黄色叹号
+        （不用 ``✗``，那个符号已经被工具失败占用了，这里不是失败，是提前停）。
+        """
+        parts = [
+            f"[bold]{stats.get('llm_calls', 0)}[/] 次模型调用",
+            f"[bold]{stats.get('tool_calls', 0)}[/] 次工具调用",
+            f"[bold]{stats.get('total_tokens', 0)}[/] tokens",
+        ]
+        if elapsed is not None:
+            parts.append(f"用时 [bold]{_format_duration(elapsed)}[/]")
+        summary = " · ".join(parts)
+        plain_summary = summary.replace("[bold]", "").replace("[/]", "")
+
         if reason is StopReason.COMPLETED:
-            self.console.print(f"[dim]{summary}[/]")
-            logger.info("%s", summary)
+            title = "[bold green]✓ 任务完成[/]"
+            border_style = "green"
+            logger.info("%s", plain_summary)
         else:
-            self.console.print(f"[yellow]{STOP_REASON_TEXT[reason]}[/] [dim]（{summary}）[/]")
-            logger.warning("%s（%s）", STOP_REASON_TEXT[reason], summary)
+            title = f"[bold yellow]! {STOP_REASON_TEXT[reason]}[/]"
+            border_style = "yellow"
+            logger.warning("%s（%s）", STOP_REASON_TEXT[reason], plain_summary)
+
+        self.console.print(
+            Panel(
+                Text.from_markup(summary),
+                title=title,
+                title_align="left",
+                border_style=border_style,
+                box=box.ROUNDED,
+                padding=(0, 2),
+                expand=False,
+            )
+        )
         self.console.print()
 
 
@@ -367,7 +454,7 @@ def _tool_preview_panel(state: _ToolPreviewState, *, finalized: bool = False) ->
             body = Syntax(preview, "text", theme="ansi_dark", background_color="default", word_wrap=True)
     else:
         body = Text(_clip(state.arguments, 300) or "...", style="dim")
-    return Panel(body, title=title, border_style="dim" if finalized else "blue", padding=(0, 1))
+    return Panel(body, title=title, border_style="dim" if finalized else "cyan", padding=(0, 1))
 
 
 def extract_partial_string_field(partial_json: str, field_name: str) -> str | None:
@@ -490,3 +577,11 @@ def _output_excerpt(text: str, max_lines: int = 8) -> list[str]:
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(int(seconds), 60)
+    return f"{minutes}分{rest}秒"

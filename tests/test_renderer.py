@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
+from rich.cells import cell_len
 from rich.console import Console
 
 from cyan.cli.renderer import (
@@ -14,11 +16,26 @@ from cyan.cli.renderer import (
     extract_partial_string_field,
     render_todo_lines,
 )
+from cyan.security.types import PermissionMode
+from cyan.settings import AgentSettings, LLMSettings
 from cyan.tools.types import ToolRunResult
 
 
 def _renderer() -> Renderer:
     return Renderer(Console(file=io.StringIO(), force_terminal=True, width=80))
+
+
+def _render_banner(width: int, workspace: Path) -> str:
+    """在给定终端宽度下渲染一次启动横幅，返回纯文本输出，供跨宽度对比。"""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=width, color_system=None)
+    renderer = Renderer(console)
+    settings = AgentSettings(
+        workspace=workspace,
+        llm=LLMSettings(model="deepseek-chat", api_key="x", base_url="http://x"),
+    )
+    renderer.banner(settings, ["read_file", "write_file"], PermissionMode.DEFAULT)
+    return buf.getvalue()
 
 
 def test_assistant_delta_starts_live_and_buffers():
@@ -239,6 +256,38 @@ def test_tool_finished_reports_cleared_checklist():
     assert "任务清单已清空" in renderer.console.file.getvalue()
 
 
+def test_banner_width_is_fixed_regardless_of_terminal_width(tmp_path):
+    """横幅宽度是定死的常量，不该随终端宽度变化——只要终端够宽，输出要完全一样。"""
+    narrow = _render_banner(70, tmp_path)
+    wide = _render_banner(220, tmp_path)
+    assert narrow == wide
+
+
+def test_banner_truncates_long_workspace_path_instead_of_growing(tmp_path):
+    """工作目录路径很长时，靠省略号截断，而不是把横幅撑得比固定宽度还宽。"""
+    long_dir = tmp_path
+    for part in ("a-very-long-directory-name",) * 4:
+        long_dir = long_dir / part
+    long_dir.mkdir(parents=True)
+
+    output = _render_banner(200, long_dir)
+    lines = [line for line in output.splitlines() if line.strip()]
+    widths = {cell_len(line) for line in lines}
+    assert len(widths) == 1  # 每一行（包括长路径那一行）打印宽度都跟横幅整体宽度一致
+    assert "…" in output
+    assert str(long_dir) not in output  # 完整路径太长，必须被截断，不能整段塞进去
+
+
+def test_banner_keeps_short_labels_intact_even_when_value_column_is_squeezed(tmp_path):
+    """标签列（模型/权限模式/工作目录/指令层）不该因为另一列内容太长被一起截断。"""
+    long_dir = tmp_path / ("x" * 200)
+    long_dir.mkdir()
+
+    output = _render_banner(80, long_dir)
+    for label in ("模型", "权限模式", "工作目录"):
+        assert label in output
+
+
 def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():
     """content 字段还没流到（None）和已经流到但值是空字符串（""）要展示不同的提示，不能混为一谈。"""
     pending = _ToolPreviewState(index=0, name="write_file", arguments='{"path": "a.py"')
@@ -250,3 +299,60 @@ def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():
     console = Console(file=io.StringIO(), force_terminal=True, width=80)
     console.print(_tool_preview_panel(empty))
     assert "内容为空" in console.file.getvalue()
+
+
+def test_tool_finished_shows_code_preview_for_read_file():
+    """read_file 成功后要把 preview 元数据渲成语法高亮片段，而不是只有一行摘要。"""
+    renderer = _renderer()
+    result = ToolRunResult.success(
+        "mod.py（共 2 行，当前展示 1-2 行）\n1 | def add(a, b):\n2 |     return a - b",
+        total_lines=2,
+        path="mod.py",
+        preview="def add(a, b):\n    return a - b",
+        preview_start=1,
+    )
+    renderer.tool_finished("read_file", result, 0.1)
+    output = renderer.console.file.getvalue()
+    assert "def add" in output
+    assert "return a - b" in output
+
+
+def test_tool_finished_read_file_marks_truncated_preview_with_ellipsis():
+    """预览只截了文件的一部分时，要留个「...」提示还有更多内容，不能看起来像文件就这么长。"""
+    renderer = _renderer()
+    result = ToolRunResult.success(
+        "big.py（共 50 行，当前展示 1-50 行）\n...",
+        total_lines=50,
+        path="big.py",
+        preview="\n".join(f"x = {i}" for i in range(20)),
+        preview_start=1,
+    )
+    renderer.tool_finished("read_file", result, 0.1)
+    assert "..." in renderer.console.file.getvalue()
+
+
+def test_tool_finished_skips_preview_panel_when_metadata_absent():
+    """旧格式的 result（没有 preview 元数据）不该因为多读了 metadata 而报错。"""
+    renderer = _renderer()
+    result = ToolRunResult.success("some.py 文件存在，但内容为空。")
+    renderer.tool_finished("read_file", result, 0.1)
+    assert "文件存在" in renderer.console.file.getvalue()
+
+
+def test_task_finished_renders_completed_panel_with_elapsed_time():
+    from cyan.core.types import StopReason
+
+    renderer = _renderer()
+    renderer.task_finished(StopReason.COMPLETED, {"llm_calls": 3, "tool_calls": 4, "total_tokens": 999}, elapsed=5.2)
+    output = renderer.console.file.getvalue()
+    assert "任务完成" in output
+    assert "5.2s" in output
+    assert "999" in output
+
+
+def test_task_finished_formats_elapsed_over_a_minute_as_minutes_and_seconds():
+    from cyan.core.types import StopReason
+
+    renderer = _renderer()
+    renderer.task_finished(StopReason.MAX_ITERATIONS, {"llm_calls": 1, "tool_calls": 1, "total_tokens": 1}, elapsed=125)
+    assert "2分5秒" in renderer.console.file.getvalue()

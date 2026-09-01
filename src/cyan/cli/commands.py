@@ -378,6 +378,24 @@ def _cmd_todos(app: App, args: list[str]) -> bool:
     return False
 
 
+def _cmd_changes(app: App, args: list[str]) -> bool:
+    """列出本次会话里被写入/编辑过的文件——数据来自 ``session.workspace.modified_files``，
+    由 ``write_file``/``edit_file`` 在落盘时标记（见 ``mark_modified``）。bash 里执行
+    ``rm``/重定向等改动不在这份清单里：看不清目标文件是什么，宁可不追踪也不乱标。
+    """
+    from ..security.paths import display
+
+    console = app.renderer.console
+    paths = sorted(app.session.workspace.modified_files, key=str)
+    if not paths:
+        console.print("[dim]本次会话还没有通过 write_file/edit_file 修改过文件[/]")
+        return False
+    console.print(f"[bold]本次会话改动了 {len(paths)} 个文件：[/]")
+    for path in paths:
+        console.print(f"  [yellow]•[/] {display(app.settings.workspace, path)}")
+    return False
+
+
 def _cmd_compact(app: App, args: list[str]) -> bool:
     """不带参数立即触发一次压缩（原有行为）；``show``/``set <字段> <值>`` 查看或改
     ``runtime.compact_policy``（会话中途的副本，不动 ``AgentSettings.compact``）。
@@ -605,6 +623,7 @@ def build_default_commands() -> CommandRegistry:
     registry.register(SlashCommand("/model", "/model [<名字>]", "查看或切换模型", _cmd_model))
     registry.register(SlashCommand("/status", "/status", "一屏汇总模型/权限/流式/上下文/统计", _cmd_status))
     registry.register(SlashCommand("/todos", "/todos [clear]", "查看当前任务清单（todo_write 维护）", _cmd_todos))
+    registry.register(SlashCommand("/changes", "/changes", "列出本次会话改动过的文件", _cmd_changes))
     registry.register(SlashCommand("/history", "/history", "列出用户消息（完整日志）", _cmd_history))
     registry.register(
         SlashCommand(

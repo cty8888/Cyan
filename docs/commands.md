@@ -22,6 +22,7 @@
 | [`/model`](#model) | | `/model [<名字>]` | 查看或切换模型 |
 | [`/status`](#status) | | `/status` | 一屏汇总模型/权限/流式/上下文/统计 |
 | [`/todos`](#todos) | | `/todos [clear]` | 查看当前任务清单（`todo_write` 维护） |
+| [`/changes`](#changes) | | `/changes` | 列出本次会话改动过的文件 |
 | [`/history`](#history) | | `/history` | 列出用户消息（完整日志） |
 | [`/rewind`](#rewind) | | `/rewind <序号或id> [restore\|summarize-up\|summarize-from]` | 回退到某条用户消息 |
 | [`/sessions`](#sessions) | | `/sessions` | 列出本工作区已保存的会话 |
@@ -37,6 +38,10 @@
 恢复启动时的默认值。它们的 `<字段> <值>` 语法也完全一致：字段名按 dataclass 声明的
 类型自动转换（`bool` 认 `1/true/on/yes`，`int`/`float` 按对应类型解析，其它当字符串），
 类型转换失败或字段不存在都会报错且不改动任何值。
+
+输入框敲 `/` 后会自动弹出候选列表（随打字实时过滤，不用按 Tab，方向键选择、
+Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/completion.py` 的
+`SlashCommandCompleter` 实现，数据直接来自这份注册表，新增命令不需要再手动同步。
 
 ---
 
@@ -250,6 +255,19 @@
 完整清单，不是增量修改；同一时刻最多一项 `in_progress`。清单跟随会话持久化（checkpoint +
 sidecar `meta.json`），`/rewind restore` 分叉新会话时会恢复到锚点当时的清单状态。清单为空时
 提示"当前没有任务清单"。
+
+---
+
+## `/changes` {#changes}
+
+```
+/changes           # 列出本次会话改动过的文件
+```
+
+数据来自 `session.workspace.modified_files`，由 `write_file`/`edit_file` 在成功落盘时标记
+（`mark_modified`），路径按工作目录收成相对路径展示。`bash` 里执行 `rm`/重定向等改动不计入这份
+清单——工具看不清目标文件到底是什么，宁可不追踪也不乱标。适合任务跑完之后快速确认"这次到底
+改了哪些文件"，不需要跳出去手动 `git status`。
 
 ---
 

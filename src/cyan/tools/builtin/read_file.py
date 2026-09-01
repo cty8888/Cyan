@@ -19,6 +19,7 @@ READ_FILE_DESCRIPTION = (
     "按提示传 offset 续读, 或显式传 limit 分段读取."
 )
 READ_FILE_DEFAULT_OFFSET = 1
+_PREVIEW_MAX_LINES = 20  # CLI 渲染代码预览面板时最多展示的行数，避免长文件把终端刷屏
 READ_FILE_PARAMETERS = {
     "type": "object",
     "properties": {
@@ -109,7 +110,17 @@ class ReadFileTool(Tool):
         elif hit_eof and shown_to < total:
             header += f"\n... 还有 {total - shown_to} 行未显示"
 
-        return ToolRunResult.success(f"{header}\n{body}", total_lines=total, partial=truncated_by_budget)
+        preview_count = min(len(all_lines), shown_to - offset + 1, _PREVIEW_MAX_LINES)
+        preview = "\n".join(all_lines[:preview_count]) if preview_count > 0 else ""
+
+        return ToolRunResult.success(
+            f"{header}\n{body}",
+            total_lines=total,
+            partial=truncated_by_budget,
+            path=display(ctx.workspace, target),
+            preview=preview,
+            preview_start=offset,
+        )
 
 
 def _read_lines(

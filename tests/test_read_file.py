@@ -13,6 +13,32 @@ def test_reads_with_line_numbers(env, tmp_path):
     assert env.ctx.workspace_access.has_read((tmp_path / "mod.py").resolve())
 
 
+def test_preview_metadata_matches_content_without_line_numbers(env, tmp_path):
+    (tmp_path / "mod.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "mod.py"}, env.ctx)
+    assert result.ok
+    assert result.metadata["preview"] == "def add(a, b):\n    return a - b"
+    assert result.metadata["preview_start"] == 1
+    assert result.metadata["path"] == "mod.py"
+
+
+def test_preview_capped_at_twenty_lines_for_long_files(env, tmp_path):
+    (tmp_path / "big.py").write_text("\n".join(f"x = {i}" for i in range(50)), encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "big.py"}, env.ctx)
+    assert result.ok
+    assert len(result.metadata["preview"].splitlines()) == 20
+    assert result.metadata["preview"].splitlines()[0] == "x = 0"
+    assert result.metadata["total_lines"] == 50
+
+
+def test_preview_starts_at_offset_for_partial_reads(env, tmp_path):
+    (tmp_path / "mod.py").write_text("a\nb\nc\nd\n", encoding="utf-8")
+    result = env.registry.execute("read_file", {"path": "mod.py", "offset": 3}, env.ctx)
+    assert result.ok
+    assert result.metadata["preview"] == "c\nd"
+    assert result.metadata["preview_start"] == 3
+
+
 def test_empty_file(env, tmp_path):
     (tmp_path / "empty.txt").write_text("", encoding="utf-8")
     result = env.registry.execute("read_file", {"path": "empty.txt"}, env.ctx)

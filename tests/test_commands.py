@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 from rich.console import Console
 
 from cyan.cli.commands import (
+    _cmd_changes,
     _cmd_compact,
     _cmd_context,
     _cmd_loop,
@@ -52,6 +54,7 @@ def _fake_policy_app() -> SimpleNamespace:
         },
         permissions=SimpleNamespace(permission_mode=PermissionMode.DEFAULT),
         metadata=SimpleNamespace(session_id="abcdef1234567890", title="测试会话"),
+        workspace=SimpleNamespace(modified_files=set()),
     )
     session.set_todos = lambda items: setattr(session, "todos", items)
     runtime = SimpleNamespace(
@@ -63,7 +66,10 @@ def _fake_policy_app() -> SimpleNamespace:
         compact=lambda **kwargs: True,
     )
     return SimpleNamespace(
-        settings=SimpleNamespace(llm=LLMSettings(api_key="k", model="deepseek-chat", stream=True)),
+        settings=SimpleNamespace(
+            llm=LLMSettings(api_key="k", model="deepseek-chat", stream=True),
+            workspace=Path("/tmp/cyan-test-workspace"),
+        ),
         renderer=Renderer(console),
         runtime=runtime,
         session=session,
@@ -251,6 +257,28 @@ def test_todos_unknown_argument_reports_usage():
     app = _fake_policy_app()
     _cmd_todos(app, ["bogus"])
     assert "用法" in _output(app)
+
+
+# ---------------------------------------------------------------- /changes
+
+
+def test_changes_reports_empty_when_nothing_modified():
+    app = _fake_policy_app()
+    assert _cmd_changes(app, []) is False
+    assert "还没有" in _output(app)
+
+
+def test_changes_lists_modified_files_relative_to_workspace():
+    app = _fake_policy_app()
+    app.session.workspace.modified_files = {
+        app.settings.workspace / "src" / "core.py",
+        app.settings.workspace / "tests" / "test_core.py",
+    }
+    _cmd_changes(app, [])
+    output = _output(app)
+    assert "改动了 2 个文件" in output
+    assert "src/core.py" in output
+    assert "tests/test_core.py" in output
 
 
 # ---------------------------------------------------------------- /resume

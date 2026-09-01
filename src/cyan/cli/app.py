@@ -6,9 +6,14 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
 from rich.console import Console
 
 from ..core.types import (
@@ -40,12 +45,8 @@ from ..session.view import apply_system_prompt
 from ..settings import AgentSettings
 from ..tools.registry import build_default_registry
 from .commands import CommandRegistry, build_default_commands
+from .completion import SlashCommandCompleter
 from .renderer import Renderer
-
-try:  # 让输入框支持上下键历史与行编辑
-    import readline  # noqa: F401
-except ImportError:  # pragma: no cover - Windows 原生终端没有 readline
-    pass
 
 logger = get_logger("cli")
 
@@ -70,6 +71,7 @@ class App:
         self.session, warning = self._open_session(resume=resume, continue_last=continue_last)
         self.llm = DeepSeekClient(settings.llm, on_retry=self._on_llm_retry)
         home = self.session.store.home if self.session.store is not None else cyan_home()
+        self._prompt_session: PromptSession[str] = self._build_prompt_session(home)
         self.runtime = Runtime.create(
             settings=settings,
             llm=self.llm,
@@ -84,6 +86,33 @@ class App:
             ),
         )
         self._startup_warning = warning
+
+    def _build_prompt_session(self, home: Path) -> PromptSession[str]:
+        """输入 "/" 后不用按 Tab，随打字（含删除字符）实时更新候选列表，可用方向
+        键选择；历史记录持久化到 ``<home>/history``，跨会话保留。
+
+        没用内置的 ``complete_while_typing``：它只在插入字符时才重新补全，删除
+        字符不会重算（比如打完 "/he" 删掉一个字符变成 "/h"，候选就卡死不动了）；
+        而且只要这个开关是 True，不管当前有没有候选，布局都会预留一块
+        ``reserve_space_for_menu`` 空白菜单区域，看起来像个挥之不去的空灰框。
+        改成自己监听 ``on_text_changed``（插入、删除都会触发）手动
+        ``start_completion()``——没有候选时 prompt_toolkit 会把 ``complete_state``
+        收回 ``None``，那块预留空白也就跟着消失了。
+        """
+        home.mkdir(parents=True, exist_ok=True)
+        session: PromptSession[str] = PromptSession(
+            completer=SlashCommandCompleter(self.commands),
+            complete_while_typing=False,
+            history=FileHistory(str(home / "history")),
+        )
+
+        def _retrigger_completion(_: Any) -> None:
+            buffer = session.default_buffer
+            if buffer.text.startswith("/"):
+                buffer.start_completion(select_first=False)
+
+        session.default_buffer.on_text_changed += _retrigger_completion
+        return session
 
     def _open_session(
         self, *, resume: str | None, continue_last: bool
@@ -157,8 +186,9 @@ class App:
             short = self.session.metadata.session_id[:8]
             self.renderer.notice(f"当前会话 {short}  {self.session.metadata.title}")
         while True:
+            self.renderer.console.print()
             try:
-                raw = self.renderer.console.input("\n[bold cyan]›[/] ").strip()
+                raw = self._prompt_session.prompt(HTML("<b><ansicyan>› </ansicyan></b>")).strip()
             except (EOFError, KeyboardInterrupt):
                 self.renderer.console.print("\n[dim]再见[/]")
                 logger.info("再见")
@@ -180,28 +210,40 @@ class App:
         stream = self.runtime.run(task)
         reply: Any = None
         reason = StopReason.FATAL_ERROR
+        # 只用于结束面板里展示「用时」，不进 session.stats()——那是模型/工具调用次数的
+        # 领域统计，跟这次任务花了多少墙钟时间是两件事，不该混进同一个持久化结构里。
+        started_at = time.monotonic()
+        # 上一次渲染的事件是不是 Thinking：是的话，下一次 send() 大概率会卡在等模型
+        # 返回第一个 chunk 上，用转圈动画包一下；send() 本身仍在主线程同步执行，
+        # 不影响 Ctrl-C 中断的现有语义。
+        waiting_for_model = False
 
         while True:
             try:
-                event = stream.send(reply)
+                if waiting_for_model:
+                    with self.renderer.waiting_spinner():
+                        event = stream.send(reply)
+                else:
+                    event = stream.send(reply)
             except StopIteration:
                 break
             except KeyboardInterrupt:
-                reason = self._abort(stream)
+                reason = self._abort(stream, started_at=started_at)
                 break
 
+            waiting_for_model = isinstance(event, Thinking)
             reply = None
             try:
                 if isinstance(event, TaskFinished):
                     reason = event.reason
-                reply = self._render(event)
+                reply = self._render(event, started_at=started_at)
             except KeyboardInterrupt:
-                reason = self._abort(stream)
+                reason = self._abort(stream, started_at=started_at)
                 break
 
         return reason
 
-    def _render(self, event: Any) -> Any:
+    def _render(self, event: Any, *, started_at: float | None = None) -> Any:
         """把事件画到终端。只有 ``ApprovalRequired`` 会返回 ``ApprovalDecision``。
 
         除了两种流式分片事件本身会管理 ``Live`` 的生命周期，其它任何事件渲染前
@@ -237,11 +279,12 @@ class App:
             self.renderer.notice(event.message, event.level)
             return None
         if isinstance(event, TaskFinished):
-            self.renderer.task_finished(event.reason, event.stats)
+            elapsed = None if started_at is None else time.monotonic() - started_at
+            self.renderer.task_finished(event.reason, event.stats, elapsed=elapsed)
             return None
         return None
 
-    def _abort(self, stream: Any) -> StopReason:
+    def _abort(self, stream: Any, *, started_at: float | None = None) -> StopReason:
         """把中断抛回 generator，让它清理未完成的工具调用。"""
         self.renderer.abort_live()
         try:
@@ -251,7 +294,8 @@ class App:
             return StopReason.USER_ABORT
 
         if isinstance(event, TaskFinished):
-            self.renderer.task_finished(event.reason, event.stats)
+            elapsed = None if started_at is None else time.monotonic() - started_at
+            self.renderer.task_finished(event.reason, event.stats, elapsed=elapsed)
             stream.close()
             return event.reason
 

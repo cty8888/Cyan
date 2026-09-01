@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "openai>=3.5.0",
+    "prompt-toolkit>=3.0.53",
     "python-dotenv>=1.2.3",
     "rich>=15.0.0",
 ]

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rich.console import Console
+from rich.text import Text
 
 from cyan.cli.commands import (
     _cmd_changes,
@@ -79,8 +80,17 @@ def _fake_policy_app() -> SimpleNamespace:
     )
 
 
+def _plain(text: str) -> str:
+    """去掉 rich 色码，按终端可见字符做断言。
+
+    ``force_terminal=True`` 时 rich 会给数字单独上色，``"改动了 2 个文件"``
+    这种整句匹配会被 ANSI 拆开；CI 的非 TTY 环境同样会走到这条路径。
+    """
+    return Text.from_ansi(text).plain
+
+
 def _output(app: SimpleNamespace) -> str:
-    return app.renderer.console.file.getvalue()
+    return _plain(app.renderer.console.file.getvalue())
 
 
 def test_stream_no_args_only_reports_state():

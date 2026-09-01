@@ -219,11 +219,11 @@ def test_execute_without_pending_reminder_sends_task_unchanged():
     assert app.runtime.received_tasks == ["普通任务"]
 
 
-# ---------------------------------------------------------------- _instruction_labels
+# ---------------------------------------------------------------- _instruction_summary
 
 
 class _FakePromptStack:
-    """够 ``App._instruction_labels`` 用 duck typing 调用的最小替身。"""
+    """够 ``App._instruction_summary`` 用 duck typing 调用的最小替身。"""
 
     def __init__(self, extra: list[PromptLayer]) -> None:
         self.extra = extra
@@ -237,8 +237,8 @@ class _FakeInstructionLabelsApp:
         self.runtime = SimpleNamespace(prompt_stack=_FakePromptStack(extra))
 
 
-def test_instruction_labels_summarizes_skill_count_instead_of_listing():
-    """Skill 层不逐条列标题，汇总成一句"启用了几个"，避免横幅那一行被塞满。"""
+def test_instruction_summary_separates_cyan_md_titles_from_skill_count():
+    """cyan.md 标题照常列出；Skill 层不逐条列标题，只汇总成数量，两者分开返回。"""
     extra = [
         PromptLayer(kind=PromptLayerKind.USER_INSTRUCTIONS, title="用户指令", text="x"),
         PromptLayer(kind=PromptLayerKind.SKILL, title="Skill · a（个人）", text="x"),
@@ -246,24 +246,27 @@ def test_instruction_labels_summarizes_skill_count_instead_of_listing():
     ]
     app = _FakeInstructionLabelsApp(extra)
 
-    labels = App._instruction_labels(app)
+    labels, skill_count = App._instruction_summary(app)
 
-    assert labels == ["用户指令", "Skill 已启用 2 个"]
+    assert labels == ["用户指令"]
+    assert skill_count == 2
 
 
-def test_instruction_labels_omits_skill_summary_when_none_enabled():
+def test_instruction_summary_zero_skill_count_when_none_enabled():
     extra = [PromptLayer(kind=PromptLayerKind.USER_INSTRUCTIONS, title="用户指令", text="x")]
     app = _FakeInstructionLabelsApp(extra)
 
-    labels = App._instruction_labels(app)
+    labels, skill_count = App._instruction_summary(app)
 
     assert labels == ["用户指令"]
+    assert skill_count == 0
 
 
-def test_instruction_labels_only_skill_summary_when_no_other_layers():
+def test_instruction_summary_empty_labels_when_only_skills():
     extra = [PromptLayer(kind=PromptLayerKind.SKILL, title="Skill · a（个人）", text="x")]
     app = _FakeInstructionLabelsApp(extra)
 
-    labels = App._instruction_labels(app)
+    labels, skill_count = App._instruction_summary(app)
 
-    assert labels == ["Skill 已启用 1 个"]
+    assert labels == []
+    assert skill_count == 1

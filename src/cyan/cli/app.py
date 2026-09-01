@@ -179,11 +179,12 @@ class App:
     # ------------------------------------------------------------------ 入口
     def run_interactive(self) -> int:
         """REPL：读一行任务或斜杠命令，直到 /exit 或 Ctrl-D。"""
+        instruction_labels, skill_count = self._instruction_summary()
         self.renderer.banner(
             self.settings,
-            [tool.name for tool in self.registry],
             self.session.permissions.permission_mode,
-            instruction_labels=self._instruction_labels(),
+            instruction_labels=instruction_labels,
+            skill_count=skill_count,
         )
         if self._startup_warning:
             self.renderer.notice(self._startup_warning, level="warning")
@@ -326,13 +327,14 @@ class App:
             return False
         return command.handler(self, parts[1:])
 
-    def _instruction_labels(self) -> list[str]:
-        """当前已加载的文件指令层标题，供 banner 使用。
+    def _instruction_summary(self) -> tuple[list[str], int]:
+        """当前已加载的 cyan.md 指令层标题 + 启用中的 skill 数量，供 banner 使用。
 
-        Skill 不逐条列出：skill 数量一多，横幅那一行就被塞满、还得截断，价值不大——
-        这里只汇总成"Skill 已启用 N 个"一句话，具体清单跟启用/禁用状态看 ``/skills``。
-        （`prompt_stack.extra` 里出现的 Skill 层本来就已经是启用中的——被
-        ``/skills disable`` 关掉的不会生成层，见 ``prompt/skills.py.load_skill_layers``。）
+        两者分开返回，banner 里各占一行：cyan.md 数量少、每层就一份，直接列标题；
+        Skill 可能有很多个，列全名字会把这一行撑满，所以只给个数字，具体清单跟
+        启用/禁用状态看 ``/skills``。（`prompt_stack.extra` 里出现的 Skill 层本来就
+        已经是启用中的——被 ``/skills disable`` 关掉的不会生成层，见
+        ``prompt/skills.py.load_skill_layers``。）
         """
         from ..prompt.types import PromptLayerKind
 
@@ -342,11 +344,9 @@ class App:
         for layer in self.runtime.prompt_stack.extra:
             if layer.kind is PromptLayerKind.SKILL:
                 skill_count += 1
-                continue
-            labels.append(layer.title)
-        if skill_count:
-            labels.append(f"Skill 已启用 {skill_count} 个")
-        return labels
+            else:
+                labels.append(layer.title)
+        return labels, skill_count
 
     def _on_llm_retry(self, attempt: int, delay: float, message: str) -> None:
         self.renderer.notice(f"模型调用失败（{message}），{delay:.1f}s 后第 {attempt} 次重试", level="warning")

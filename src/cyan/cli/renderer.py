@@ -9,11 +9,11 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from rich import box
-from rich.cells import cell_len
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -35,6 +35,25 @@ MODE_LABELS = {
     PermissionMode.DEFAULT: "Default (默认)",
     PermissionMode.ACCEPT_EDITS: "AcceptEdits (自动批准编辑)",
 }
+# 横幅专用的短版本（不带中文括注），跟 /mode /status 用的 MODE_LABELS 分开：
+# 横幅追求一屏扫过去的简洁，那两个命令追求讲清楚这个模式是干什么的。
+_BANNER_MODE_LABELS = {
+    PermissionMode.PLAN: "Plan",
+    PermissionMode.DEFAULT: "Default",
+    PermissionMode.ACCEPT_EDITS: "AcceptEdits",
+}
+
+
+def _format_home_relative(path: Path) -> str:
+    """用户主目录内的路径显示成 ``~`` 前缀，跟 shell 提示符的习惯一致，比绝对路径短。"""
+    home = Path.home()
+    try:
+        relative = path.relative_to(home)
+    except ValueError:
+        return str(path)
+    return "~" if str(relative) == "." else f"~/{relative}"
+
+
 STOP_REASON_TEXT = {
     StopReason.COMPLETED: "任务结束",
     StopReason.MAX_ITERATIONS: "达到最大轮次上限，已停止",
@@ -94,51 +113,81 @@ class Renderer:
     def banner(
         self,
         settings: AgentSettings,
-        tool_names: list[str],
         permission_mode: PermissionMode,
         instruction_labels: list[str] | None = None,
+        skill_count: int = 0,
     ) -> None:
-        """启动横幅：用 grid 对齐键值对，标题/提示挪到 Panel 的 title/subtitle 上，
-        不再跟正文混在一起当第一/最后一行——留白更清爽，字段名对不齐的问题也顺带解决了
-        （grid 按最宽的那列自动对齐，不用手动拼空格）。
+        """Startup banner."""
+        from .. import __version__
 
-        横幅横跨整个终端宽度（``width=self.console.width``），指令层/Skill 摘要这种
-        本来就长的内容能多显示一些，不用早早截断。为了让第二列（值）真正把多出来的
-        横向空间用起来而不是留一片空白，grid 本身开 ``expand=True``；单条内容仍然
-        可能比整行还长（比如 skill 很多时的「指令层」），所以第二列继续保留
-        ``no_wrap`` + ``overflow="ellipsis"``，超长就截断成省略号而不是把 Panel 撑爆；
-        第一列显式给 ``width``（按实际标签宽度算，中文按 2 算），不然 grid 会把两列
-        一起等比例分配，短标签也会被拉宽或截断。
-        """
-        rows = [
-            ("模型", f"[green]{settings.llm.model}[/]"),
-            ("权限模式", f"[green]{MODE_LABELS[permission_mode]}[/]"),
-            ("工作目录", f"[dim]{settings.workspace}[/]"),
+        fields = [
+            ("model", f"[blue]{settings.llm.model}[/]"),
+            ("mode", f"[green]{_BANNER_MODE_LABELS[permission_mode]}[/]"),
+            ("project", f"[dim]{_format_home_relative(settings.workspace)}[/]"),
         ]
-        if instruction_labels:
-            rows.append(("指令层", f"[dim]{' · '.join(instruction_labels)}[/]"))
-        label_width = max(cell_len(label) for label, _ in rows)
+        if skill_count:
+            fields.append(("skills", f"[dim]{skill_count} enabled[/]"))
+        fields.append(("status", "[green]ready[/]"))
 
-        grid = Table.grid(padding=(0, 2), expand=True)
-        grid.add_column(style="bold", no_wrap=True, width=label_width)
-        grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
-        for label, value in rows:
-            grid.add_row(label, value)
+        fields_grid = Table.grid(padding=(0, 2), expand=True)
+        fields_grid.add_column(style="bold", no_wrap=True, width=max(len(label) for label, _ in fields))
+        fields_grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
+        for label, value in fields:
+            fields_grid.add_row(label, value)
+        left = Group(
+            Text("◇ CYAN", style="bold cyan"),
+            Text("AI Coding Agent", style="dim"),
+            Text(""),
+            fields_grid,
+        )
+
+        tips_grid = Table.grid(padding=(0, 1), expand=True)
+        tips_grid.add_column(style="bold cyan", no_wrap=True)
+        tips_grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
+        tips_grid.add_row("/help", "[dim]show commands[/]")
+        tips_grid.add_row("Ctrl-C", "[dim]cancel task[/]")
+
+        whats_new_grid = Table.grid(padding=(0, 1), expand=True)
+        whats_new_grid.add_column(no_wrap=True, overflow="ellipsis", ratio=1)
+        whats_new_grid.add_row("[dim]· Skills (personal & project)[/]")
+        whats_new_grid.add_row("[dim]· @path references[/]")
+
+        right = Group(
+            Text("Welcome back!", style="bold"),
+            Text(""),
+            Text.from_markup("[bold cyan]Tips[/]"),
+            tips_grid,
+            Text(""),
+            Text.from_markup("[bold cyan]What's new[/]"),
+            whats_new_grid,
+        )
+
+        # Table 列分隔线才能画通高竖线；grid 中间塞 "│" 只会印在第一行。
+        layout = Table(
+            box=box.MINIMAL,
+            show_header=False,
+            show_edge=False,
+            padding=(0, 2),
+            expand=True,
+            pad_edge=False,
+            border_style="dim",
+        )
+        layout.add_column(ratio=2)
+        layout.add_column(ratio=3)
+        layout.add_row(left, right)
 
         self.console.print(
             Panel(
-                grid,
-                title="[bold cyan]Cyan[/]",
+                layout,
+                title=f"[bold cyan]◆ Cyan Agent v{__version__}[/]",
                 title_align="left",
-                subtitle="[dim]/help 查看命令 · Ctrl-C 中断当前任务[/]",
-                subtitle_align="left",
                 border_style="cyan",
-                box=box.HEAVY,
+                box=box.ROUNDED,
                 padding=(1, 2),
-                width=self.console.width,
+                width=min(self.console.width, 120),
             )
         )
-        logger.info("启动 模型=%s workspace=%s tools=%s", settings.llm.model, settings.workspace, ", ".join(tool_names))
+        logger.info("启动 模型=%s workspace=%s", settings.llm.model, settings.workspace)
 
     def notice(self, message: str, level: str = "info") -> None:
         style = {"error": "bold red", "warning": "yellow", "info": "dim"}.get(level, "dim")
@@ -415,8 +464,6 @@ class Renderer:
 
 
 def _stack(items: list[Any]) -> Any:
-    from rich.console import Group
-
     return Group(*items)
 
 

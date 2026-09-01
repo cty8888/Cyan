@@ -7,6 +7,7 @@ from pathlib import Path
 
 from rich.cells import cell_len
 from rich.console import Console
+from rich.text import Text
 
 from cyan.cli.renderer import (
     Renderer,
@@ -25,6 +26,11 @@ def _renderer() -> Renderer:
     return Renderer(Console(file=io.StringIO(), force_terminal=True, width=80))
 
 
+def _plain(text: str) -> str:
+    """去掉语法高亮插入的 ANSI，按可见字符断言。"""
+    return Text.from_ansi(text).plain
+
+
 def _render_banner(width: int, workspace: Path) -> str:
     """在给定终端宽度下渲染一次启动横幅，返回纯文本输出，供跨宽度对比。
 
@@ -39,7 +45,7 @@ def _render_banner(width: int, workspace: Path) -> str:
         workspace=workspace,
         llm=LLMSettings(model="deepseek-chat", api_key="x", base_url="http://x"),
     )
-    renderer.banner(settings, ["read_file", "write_file"], PermissionMode.DEFAULT)
+    renderer.banner(settings, PermissionMode.DEFAULT)
     return buf.getvalue()
 
 
@@ -261,14 +267,22 @@ def test_tool_finished_reports_cleared_checklist():
     assert "任务清单已清空" in renderer.console.file.getvalue()
 
 
+def test_banner_draws_full_height_divider_between_columns(tmp_path):
+    """左右栏之间的竖线要贯穿内容高度，不能只出现在第一行。"""
+    output = _render_banner(100, tmp_path)
+    divider_rows = [line for line in output.splitlines() if line.count("│") >= 3]
+    assert len(divider_rows) >= 4
+    assert any("Welcome back!" in line and "│" in line[1:-1] for line in divider_rows)
+
+
 def test_banner_width_spans_full_terminal_width(tmp_path):
-    """横幅横跨整个终端宽度：终端多宽横幅就多宽，不再是定死的常量。"""
+    """窄于上限时跟终端同宽；宽于 120 时封顶，避免超宽屏把两栏拉得太散。"""
     narrow = _render_banner(70, tmp_path)
     wide = _render_banner(220, tmp_path)
     narrow_widths = {cell_len(line) for line in narrow.splitlines() if line.strip()}
     wide_widths = {cell_len(line) for line in wide.splitlines() if line.strip()}
     assert narrow_widths == {70}
-    assert wide_widths == {220}
+    assert wide_widths == {120}
 
 
 def test_banner_truncates_long_workspace_path_instead_of_growing(tmp_path):
@@ -278,23 +292,91 @@ def test_banner_truncates_long_workspace_path_instead_of_growing(tmp_path):
         long_dir = long_dir / part
     long_dir.mkdir(parents=True)
 
-    output = _render_banner(200, long_dir)
+    output = _render_banner(100, long_dir)
     lines = [line for line in output.splitlines() if line.strip()]
     widths = {cell_len(line) for line in lines}
     assert len(widths) == 1  # 每一行（包括长路径那一行）打印宽度都跟横幅整体宽度一致
-    assert widths == {200}
+    assert widths == {100}
     assert "…" in output
     assert str(long_dir) not in output  # 完整路径太长，必须被截断，不能整段塞进去
 
 
 def test_banner_keeps_short_labels_intact_even_when_value_column_is_squeezed(tmp_path):
-    """标签列（模型/权限模式/工作目录/指令层）不该因为另一列内容太长被一起截断。"""
+    """标签列（model/mode/project/instructions/skills）不该因为另一列内容太长被一起截断。"""
     long_dir = tmp_path / ("x" * 200)
     long_dir.mkdir()
 
     output = _render_banner(80, long_dir)
-    for label in ("模型", "权限模式", "工作目录"):
+    for label in ("model", "mode", "project"):
         assert label in output
+
+
+def test_banner_uses_english_labels_and_short_mode_name(tmp_path):
+    """标签用小写英文；mode 只显示短名字（不带 /mode /status 那种中文括注）。"""
+    output = _render_banner(100, tmp_path)
+    assert "model" in output
+    assert "mode" in output
+    assert "project" in output
+    assert "Default" in output
+    assert "默认" not in output
+
+
+def test_banner_shows_home_relative_cwd(monkeypatch, tmp_path):
+    """工作目录在用户主目录下时，用 ``~`` 简写前缀，而不是打印完整绝对路径。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = home / "project"
+    workspace.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    output = _render_banner(100, workspace)
+
+    assert "~/project" in output
+    assert str(workspace) not in output
+
+
+def test_banner_shows_skill_count_line(tmp_path):
+    """启用中的 skill 数量单独一行显示，不逐条列名字。"""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=100, height=24, color_system=None)
+    renderer = Renderer(console)
+    settings = AgentSettings(
+        workspace=tmp_path,
+        llm=LLMSettings(model="deepseek-chat", api_key="x", base_url="http://x"),
+    )
+    renderer.banner(settings, PermissionMode.DEFAULT, skill_count=4)
+    output = buf.getvalue()
+    assert "skills" in output
+    assert "4 enabled" in output
+
+
+def test_banner_omits_skills_line_when_count_is_zero(tmp_path):
+    output = _render_banner(100, tmp_path)
+    assert "enabled" not in output
+
+
+def test_banner_shows_version_and_rounded_corners(tmp_path):
+    from cyan import __version__
+
+    output = _render_banner(100, tmp_path)
+    assert f"Cyan Agent v{__version__}" in output
+    assert "╭" in output and "╮" in output and "╰" in output and "╯" in output
+
+
+def test_banner_shows_status_ready_and_tips_and_whats_new(tmp_path):
+    """右栏有 Tips / What's new，左栏字段含 status。"""
+    output = _render_banner(100, tmp_path)
+    assert "status" in output
+    assert "ready" in output
+    assert "Tips" in output
+    assert "/help" in output
+    assert "Ctrl-C" in output
+    assert "What's new" in output
+
+
+def test_banner_greets_with_welcome_back(tmp_path):
+    output = _render_banner(100, tmp_path)
+    assert "Welcome back!" in output
 
 
 def test_tool_preview_panel_distinguishes_not_yet_arrived_from_empty_content():
@@ -321,7 +403,7 @@ def test_tool_finished_shows_code_preview_for_read_file():
         preview_start=1,
     )
     renderer.tool_finished("read_file", result, 0.1)
-    output = renderer.console.file.getvalue()
+    output = _plain(renderer.console.file.getvalue())
     assert "def add" in output
     assert "return a - b" in output
 

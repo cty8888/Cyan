@@ -214,6 +214,29 @@ def test_wire_includes_skill_layer_when_enabled(tmp_path):
     assert session.messages[0].text == "identity-only"
 
 
+def test_wire_includes_skill_when_named_in_skills_active(tmp_path):
+    """总开关关闭时，skills_active 里的名字仍会叠进 system。"""
+    home = tmp_path / "home"
+    workspace = tmp_path / "ws"
+    _write_commit_skill(workspace)
+    extra = workspace / ".cyan" / "skills" / "writing-tests"
+    extra.mkdir(parents=True)
+    (extra / "SKILL.md").write_text(
+        "---\nname: writing-tests\ndescription: 补测试时用\n---\n\n覆盖边界",
+        encoding="utf-8",
+    )
+    session = Session.create(workspace=workspace, system_prompt="identity-only")
+    stack = PromptStack(
+        workspace=workspace, home=home, skills_enabled=False, skills_active={"commit-message"}
+    )
+    payloads = ContextBuilder.from_policy(ContextPolicy()).build_messages(
+        session.messages, session.tool_history, stack=stack
+    )
+    system = payloads[0]["content"]
+    assert "Skill · commit-message（项目）" in system
+    assert "writing-tests" not in system
+
+
 def test_wire_includes_memory_index_not_type_files(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()

@@ -27,13 +27,14 @@ _FRONTMATTER_DELIM = "---"
 
 # Skills 的常驻自动注入默认关闭：跟 cyan.md/MEMORY.md 不同，Skill 正文往往偏长、
 # 数量也可能不少，默认全量塞进 system 对 token 开销不友好，所以改成显式 opt-in。
-# 关掉的只是"每轮自动叠层"这一条路径——发现（``/skills``）与手动指定单次强调
-# （``/skill <name>``）都不受影响，见 ``PromptStack.refresh_files()``。
+# ``CYAN_ENABLE_SKILLS=1`` 只决定**启动时**总开关是否打开；会话中途用 ``/skills on|off``
+# 或 ``/skills enable <name>`` 即可立刻改，不必重启。发现（``/skills``）与手动指定
+# 单次强调（``/skill <name>``）都不受启动默认值影响。
 ENV_ENABLE_SKILLS = "CYAN_ENABLE_SKILLS"
 
 
 def skills_layer_enabled() -> bool:
-    """是否把发现到的 Skills 自动叠进 system prompt；默认 False，需显式开启。"""
+    """启动时是否打开 Skills 总开关；默认 False。会话中途由 ``PromptStack.skills_enabled`` 接管。"""
     raw = os.environ.get(ENV_ENABLE_SKILLS, "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
@@ -122,15 +123,19 @@ def load_skill_layers(
     *,
     home: Path | None = None,
     max_chars: int = DEFAULT_TOOL_RESULT_CHARS,
+    only: set[str] | None = None,
 ) -> list[PromptLayer]:
     """把发现的 skill 转成可以直接塞进 ``PromptStack`` 的层。
 
     每层正文是「触发条件 + 完整正文」，超过 ``max_chars`` 按跟 cyan.md 相同的规则截断
     （截断标记算进上限）。被 ``/skills disable`` 关掉的 skill 不出现在返回结果里。
+    ``only`` 非空时只加载这些名字（仍尊重 per-skill 禁用）；``None`` 表示所有启用中的。
     """
     layers: list[PromptLayer] = []
     for meta in discover_skills(workspace, home=home):
         if not meta.enabled:
+            continue
+        if only is not None and meta.name not in only:
             continue
         text = f"触发条件：{meta.description}\n\n{meta.body}"
         truncated = False

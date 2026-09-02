@@ -22,6 +22,8 @@ class PromptStack:
     max_chars: int = DEFAULT_TOOL_RESULT_CHARS
     auto_memory: bool = False
     skills_enabled: bool = False
+    # 总开关关闭时，``/skills enable <name>`` 把名字放进这里，只注入这几个。
+    skills_active: set[str] = field(default_factory=set)
     identity: PromptLayer | None = None
     extra: list[PromptLayer] = field(default_factory=list)
 
@@ -39,9 +41,12 @@ class PromptStack:
         self.extra = load_instruction_layers(
             self.workspace, home=self.home, max_chars=self.max_chars
         )
-        if self.skills_enabled:
+        if self.skills_enabled or self.skills_active:
+            only = None if self.skills_enabled else self.skills_active
             self.extra.extend(
-                load_skill_layers(self.workspace, home=self.home, max_chars=self.max_chars)
+                load_skill_layers(
+                    self.workspace, home=self.home, max_chars=self.max_chars, only=only
+                )
             )
         if self.auto_memory and auto_memory_enabled():
             memory = load_memory_index_layer(self.workspace)

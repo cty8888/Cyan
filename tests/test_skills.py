@@ -141,6 +141,14 @@ def test_load_skill_layers_kind_and_title(tmp_path):
     assert not layer.truncated
 
 
+def test_load_skill_layers_only_keeps_named_skills(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "alpha")
+    _write_skill(workspace / ".cyan" / "skills", "beta")
+    layers = load_skill_layers(workspace, home=None, only={"beta"})
+    assert [layer.title for layer in layers] == ["Skill · beta（项目）"]
+
+
 def test_load_skill_layers_truncates_long_body(tmp_path):
     workspace = tmp_path / "ws"
     _write_skill(workspace / ".cyan" / "skills", "huge", body="x" * 100)

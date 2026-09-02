@@ -14,8 +14,8 @@
 | [`/permissions`](#permissions) | | `/permissions [allow\|ask\|deny\|remove] <规则>` | 列出或增删权限规则 |
 | [`/usage`](#usage) | | `/usage` | 显示本会话的 token 与调用统计 |
 | [`/stream`](#stream) | | `/stream [on\|off]` | 查看或切换流式输出 |
-| [`/instructions`](#instructions) | | `/instructions` | 列出已加载的指令层（cyan.md + Skills） |
-| [`/skills`](#skills) | | `/skills [enable\|disable <name>]` | 列出发现的 Skills；开关某个 skill 是否自动注入 |
+| [`/instructions`](#instructions) | | `/instructions` | 列出已加载的指令层（identity + cyan.md + Skills + MEMORY.md） |
+| [`/skills`](#skills) | | `/skills [on\|off\|enable\|disable <name>]` | 列出 Skills；本会话开关自动注入；开关单个 |
 | [`/skill`](#skill) | | `/skill [<name>\|clear]` | 为下一条任务手动指定/取消强调一个 Skill |
 | [`/memory`](#memory) | | `/memory` | 列出项目自动记忆文件 |
 | [`/compact`](#compact) | | `/compact [show\|set <字段> <值>]` | 压缩较早对话；查看/修改压缩策略 |
@@ -31,7 +31,7 @@
 | [`/resume`](#resume) | `/continue` | `/resume [<id 或前缀>]` | 切换到另一个会话 |
 | [`/new`](#new-clear) | | `/new` | 开始新会话（旧日志保留） |
 | [`/clear`](#new-clear) | | `/clear` | 同 `/new` |
-| [`/cwd`](#cwd) | | `/cwd` | 显示当前工作目录 |
+| [`/cwd`](#cwd) | | `/cwd` | 显示工作区根目录（沙箱边界，不是 bash 的 `$PWD`） |
 | [`/exit`](#exit) | `/quit` | `/exit` | 退出 |
 
 四个"运行时策略"命令（`/compact` `/loop` `/tools` `/context`）都遵循同一个模式：改的是
@@ -43,7 +43,8 @@
 
 输入框敲 `/` 后会自动弹出候选列表（随打字实时过滤，不用按 Tab，方向键选择、
 Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/completion.py` 的
-`SlashCommandCompleter` 实现，数据直接来自这份注册表，新增命令不需要再手动同步。
+`SlashCommandCompleter` 实现，数据直接来自命令注册表，新增命令不需要再手动同步。
+自然语言任务里的 `@path` 引用见下方，不是斜杠命令。
 
 ## `@` 文件引用
 
@@ -71,10 +72,10 @@ Enter/Tab 确认），出现空格进入参数阶段后不再干扰。由 `cli/c
 
 ## Skills
 
-跟 `cyan.md` 一样是磁盘上的文件，但**自动叠进 system prompt 这条路径默认是关闭的**：
-需要设置环境变量 `CYAN_ENABLE_SKILLS=1` 并重启进程才会生效（`/skills`、`/skill`
-命令本身不受影响，随时能用来查看/管理）。默认关闭是因为 Skill 正文往往不短、数量
-也可能不少，默认全量塞进 system 对 token 开销不友好，改成显式 opt-in 更稳妥。总开关
+跟 `cyan.md` 一样是磁盘上的文件，但**自动叠进 system prompt 这条路径启动时默认关闭**：
+会话里用 `/skills on` 打开全部，或 `/skills enable <name>` 只启用某一个，立刻生效、
+不必重启。环境变量 `CYAN_ENABLE_SKILLS=1` 只改**启动默认值**。默认关闭是因为 Skill
+正文往往不短、数量也可能不少，默认全量塞进 system 对 token 开销不友好。总开关
 打开之后，一个 Skill 是一个目录 + 一份 `SKILL.md`：
 
 ```
@@ -100,8 +101,8 @@ description: 遇到报错、测试失败、运行结果跟预期不一致时使�
 总开关打开后是"常驻自动注入"——每一轮请求都带着，模型自己判断用不用。如果想明确
 要求"这一次任务请优先照某个 skill 做"，用 `/skill <name>` 手动指定（不受总开关与
 per-skill 开关限制，见下）；如果想彻底关掉某个 skill 不让它进 system prompt，用
-`/skills disable <name>`。总开关、per-skill 开关、`/skill` 手动指定是三个独立的
-旋钮，详见下方 `/skills` 与 `/skill` 命令说明。
+`/skills disable <name>`。总开关（启动默认 / `/skills on|off`）、per-skill 开关、
+`/skill` 手动指定是三个独立的旋钮，详见下方 `/skills` 与 `/skill` 命令说明。
 
 ---
 
@@ -128,7 +129,7 @@ per-skill 开关限制，见下）；如果想彻底关掉某个 skill 不让它
 | 字段 | 说明 |
 | --- | --- |
 | `max_tool_output_chars` | `bash` 等工具回喂模型的输出上限 |
-| `max_file_read_chars` | `read_file` 单次读取上限（须 `<=` `/context` 的 `max_tool_result_chars`） |
+| `max_file_read_chars` | `read_file` 单次读取上限。建议不超过 `/context` 的 `max_tool_result_chars`，否则组窗还会再截一刀 |
 | `max_dir_entries` | `list_dir` 树形列表的条目上限 |
 | `max_glob_results` | `glob` 按 mtime 返回的文件上限 |
 | `max_file_bytes` | `read_file` / `write_file` 单次进内存上限 |
@@ -147,7 +148,7 @@ per-skill 开关限制，见下）；如果想彻底关掉某个 skill 不让它
 /mode accept_edits
 ```
 
-切换本会话的权限模式，立即写回 sidecar（`session.persist_head()`），下一次工具调用就按新模式判定：
+必须带参数；不带参数只打印用法。当前模式看 `/status`。切换后立即写回 sidecar（`session.persist_head()`），下一次工具调用就按新模式判定：
 
 - `plan`：只读规划，禁止写文件，`bash` 仅放行只读命令
 - `default`：写/执行都需要逐次确认
@@ -202,24 +203,30 @@ per-skill 开关限制，见下）；如果想彻底关掉某个 skill 不让它
 /instructions
 ```
 
-列出当前加载的 Prompt Layer（身份 system prompt + `cyan.md` 各层 + Skills 各层 +
-`MEMORY.md` 索引），显示每层的来源路径、字数，以及是否被截断；不打印全文。
+列出当前会叠进 system 的 Prompt Layer（身份 system prompt + `cyan.md` 各层 +
+本会话实际注入的 Skills + `MEMORY.md` 索引），显示每层的来源路径、字数，以及是否被截断；不打印全文。被 `/skills disable` 关掉、或总开关关闭且未单独 `enable` 的 skill 不会出现在这里。
 
 ---
 
 ## `/skills` {#skills}
 
 ```
-/skills                          # 列出发现的 skill（含启用/禁用状态）
-/skills disable <name>           # 关掉某个 skill，不再自动叠进 system prompt
-/skills enable <name>            # 重新打开
+/skills                          # 列出发现的 skill（含是否真正叠进 system）
+/skills on                       # 本会话打开自动注入：所有未 disable 的 skill 进 system
+/skills off                      # 本会话关掉自动注入（含刚才 enable 的单个）
+/skills enable <name>            # 启用某一个：立刻叠进本会话，并写入 skills.json
+/skills disable <name>           # 关掉某一个：立刻从本会话移除，并写入 skills.json
 ```
 
-列出模式下每条显示 name、层级（个人/项目）、启用状态、description 与来源路径；不打印
-正文——正文已经随 `PromptStack` 整篇进了 system（仅限总开关打开、且该 skill 本身
-启用中的），用 `/instructions` 能看到对应层的字数与是否被截断。若总开关
-（`CYAN_ENABLE_SKILLS`）当前关闭，列表顶部会额外提示一行，此时下面各 skill 的
-启用状态只是"预配置"，还没真正生效。
+列出模式下每条显示 name、层级（个人/项目）、**是否真正叠进 system**、description
+与来源路径；不打印正文。状态三档：`启用`（本会话会进 prompt，`/instructions` 能看到
+对应层）、`未注入`（没被 disable，但总开关关着且没单独 enable）、`已禁用`
+（`/skills disable` 单独关掉的）。
+
+`/skills on|off` 只改当前会话的 `PromptStack.skills_enabled`，进程重启后回到启动
+默认值（环境变量 `CYAN_ENABLE_SKILLS=1` 则为开，否则为关）。`enable`/`disable`
+还会写 `skills.json`，跨会话保留 per-skill 偏好；总开关关闭时 `enable <name>`
+仍会把这一个立刻叠进**本会话**（不必先 `/skills on`）。
 
 `disable`/`enable` 只是加/删一个开关标记，不动 `SKILL.md` 本身：开关状态写进跟该
 skill 同一层级的 `skills.json`——个人级 skill 写 `~/.cyan/skills.json`，项目级写
@@ -453,7 +460,7 @@ sidecar `meta.json`），`/rewind restore` 分叉新会话时会恢复到锚点�
 /cwd
 ```
 
-打印当前工作目录（即启动时 `-w/--workspace` 指定的路径，Agent 只能访问这个目录内的文件）。
+打印启动时 `-w/--workspace` 指定的工作区根目录（路径沙箱的边界，Agent 只能访问这个目录内的文件）。这不是 bash 工具当前的 `$PWD`：bash 在调用之间会延续 `cd`，越出工作区才会被拉回根；`/cwd` 始终显示工作区根。
 
 ---
 

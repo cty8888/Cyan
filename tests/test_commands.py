@@ -93,6 +93,12 @@ def _output(app: SimpleNamespace) -> str:
     return _plain(app.renderer.console.file.getvalue())
 
 
+def _reset_output(app: SimpleNamespace) -> None:
+    buf = app.renderer.console.file
+    buf.seek(0)
+    buf.truncate(0)
+
+
 def test_stream_no_args_only_reports_state():
     app = _fake_app(stream=True)
     assert _cmd_stream(app, []) is False
@@ -305,10 +311,14 @@ def _write_skill(root, name: str, description: str = "desc", body: str = "正文
     )
 
 
-def _fake_skills_app(workspace: Path, home: Path | None = None) -> SimpleNamespace:
+def _fake_skills_app(
+    workspace: Path, home: Path | None = None, *, skills_enabled: bool = False
+) -> SimpleNamespace:
     app = _fake_policy_app()
     app.settings.workspace = workspace
-    app.runtime.prompt_stack = SimpleNamespace(home=home, skills_enabled=False)
+    app.runtime.prompt_stack = SimpleNamespace(
+        home=home, skills_enabled=skills_enabled, skills_active=set()
+    )
     app._pending_skill_reminder = None
     return app
 
@@ -345,12 +355,25 @@ def test_skills_includes_personal_scope(tmp_path):
     assert "个人" in output
 
 
-def test_skills_listing_shows_enabled_status(tmp_path):
+def test_skills_listing_shows_not_injected_when_master_switch_off(tmp_path):
     workspace = tmp_path / "ws"
     _write_skill(workspace / ".cyan" / "skills", "commit-message")
     app = _fake_skills_app(workspace)
     _cmd_skills(app, [])
-    assert "启用" in _output(app)
+    output = _output(app)
+    assert "未注入" in output
+    assert "启用" not in output
+    assert "已禁用" not in output
+
+
+def test_skills_listing_shows_enabled_when_master_switch_on(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace, skills_enabled=True)
+    _cmd_skills(app, [])
+    output = _output(app)
+    assert "启用" in output
+    assert "未注入" not in output
 
 
 def test_skills_disable_writes_project_settings_and_updates_listing(tmp_path):
@@ -367,17 +390,73 @@ def test_skills_disable_writes_project_settings_and_updates_listing(tmp_path):
     assert "已禁用" in _output(app2)
 
 
-def test_skills_enable_reverts_disabled_state(tmp_path):
+def test_skills_enable_injects_only_that_skill_when_master_off(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    _write_skill(workspace / ".cyan" / "skills", "writing-tests")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["enable", "commit-message"])
+    assert "本会话已叠进 system" in _output(app)
+    assert "commit-message" in app.runtime.prompt_stack.skills_active
+
+    _reset_output(app)
+    _cmd_skills(app, [])
+    output = _output(app)
+    assert "commit-message" in output
+    assert "启用" in output
+    assert "writing-tests" in output
+    assert "未注入" in output
+
+
+def test_skills_on_injects_all_undisabled(tmp_path):
     workspace = tmp_path / "ws"
     _write_skill(workspace / ".cyan" / "skills", "commit-message")
     app = _fake_skills_app(workspace)
-    _cmd_skills(app, ["disable", "commit-message"])
-    _cmd_skills(app, ["enable", "commit-message"])
+    _cmd_skills(app, ["on"])
+    assert app.runtime.prompt_stack.skills_enabled is True
+    assert "已打开" in _output(app)
+    _reset_output(app)
+    _cmd_skills(app, [])
+    assert "启用" in _output(app)
+    assert "未注入" not in _output(app)
 
-    app2 = _fake_skills_app(workspace)
+
+def test_skills_off_clears_active_and_stops_injection(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["enable", "commit-message"])
+    _cmd_skills(app, ["off"])
+    assert app.runtime.prompt_stack.skills_enabled is False
+    assert app.runtime.prompt_stack.skills_active == set()
+    _reset_output(app)
+    _cmd_skills(app, [])
+    output = _output(app)
+    assert "未注入" in output
+    assert "启用" not in output
+
+
+def test_skills_disable_still_shows_disabled_when_master_switch_on(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace, skills_enabled=True)
+    _cmd_skills(app, ["disable", "commit-message"])
+    app2 = _fake_skills_app(workspace, skills_enabled=True)
     _cmd_skills(app2, [])
     output = _output(app2)
-    assert "已禁用" not in output
+    assert "已禁用" in output
+    assert "启用" not in output
+
+
+def test_skills_enable_notes_injected_this_session(tmp_path):
+    workspace = tmp_path / "ws"
+    _write_skill(workspace / ".cyan" / "skills", "commit-message")
+    app = _fake_skills_app(workspace)
+    _cmd_skills(app, ["enable", "commit-message"])
+    output = _output(app)
+    assert "已启用" in output
+    assert "本会话已叠进 system" in output
+    assert "只注入了这一个" in output
 
 
 def test_skills_disable_unknown_name_reports_error(tmp_path):

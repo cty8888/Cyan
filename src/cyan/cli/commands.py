@@ -258,29 +258,37 @@ def _cmd_instructions(app: App, args: list[str]) -> bool:
 
 
 def _cmd_skills(app: App, args: list[str]) -> bool:
-    """``/skills``：列出发现的 Skills（个人级 ``~/.cyan/skills/`` + 项目级
-    ``.cyan/skills/``），显示 name/层级/启用状态/description/来源路径，不打印正文——
-    正文已经随 ``PromptStack`` 整篇进了 system（仅对启用中的 skill，且总开关需开启，
-    见下）。
+    """``/skills``：列出发现的 Skills；``on``/``off`` 切换本会话总开关；
+    ``enable``/``disable <name>`` 开关单个 skill（立刻影响本会话组窗，并写入 skills.json）。
 
-    ``/skills disable <name>`` / ``/skills enable <name>``：开关一个 skill 是否
-    自动叠进 system prompt。开关状态写进跟这个 skill 同一层级的 ``skills.json``
-    （个人级 skill 写 ``~/.cyan/skills.json``，项目级写 ``{workspace}/.cyan/skills.json``），
-    不影响 `SKILL.md` 本身；关掉之后 `/skills` 里仍能看到它（标成"已禁用"），方便随时
-    再开回来。
-
-    这里的启用/禁用是"per-skill"的细粒度开关，独立于全局总开关：Skills 自动注入
-    默认整体关闭（``CYAN_ENABLE_SKILLS`` 未设置时），需要显式设置该环境变量再重启
-    才会真正叠进 system；总开关关闭时这里仍按原样列出发现到的 skill 供预览/管理。
+    启动默认关闭（``CYAN_ENABLE_SKILLS=1`` 可改启动默认值）。总开关打开时注入所有
+    未被 disable 的 skill；总开关关闭时 ``enable <name>`` 只把这一个叠进本会话。
     """
     from ..prompt.skills import ENV_ENABLE_SKILLS, discover_skills, set_skill_enabled, skill_settings_path
 
-    home = app.runtime.prompt_stack.home
+    stack = app.runtime.prompt_stack
+    home = stack.home
     workspace = app.settings.workspace
+    console = app.renderer.console
+
+    if args and args[0].lower() in ("on", "off"):
+        if len(args) != 1:
+            console.print("[yellow]用法：/skills on|off[/]")
+            return False
+        turning_on = args[0].lower() == "on"
+        stack.skills_enabled = turning_on
+        if not turning_on:
+            stack.skills_active.clear()
+        if turning_on:
+            console.print("[green]已打开 Skills 自动注入（本会话）。未单独关掉的 skill 将叠进 system。[/]")
+        else:
+            console.print("[dim]已关闭 Skills 自动注入（本会话）。[/]")
+        logger.info("skills_enabled=%s", turning_on)
+        return False
 
     if args and args[0] in ("enable", "disable"):
         if len(args) < 2:
-            app.renderer.console.print("用法：/skills enable|disable <name>")
+            console.print("用法：/skills enable|disable <name>")
             return False
         enabled = args[0] == "enable"
         name = args[1]
@@ -288,34 +296,61 @@ def _cmd_skills(app: App, args: list[str]) -> bool:
         meta = next((item for item in skills if item.name == name), None)
         if meta is None:
             names = "、".join(item.name for item in skills) or "（无）"
-            app.renderer.console.print(f"[yellow]未找到 skill「{name}」，可用：{names}[/]")
+            console.print(f"[yellow]未找到 skill「{name}」，可用：{names}[/]")
             return False
         path = skill_settings_path(meta.scope, workspace, home=home)
         if path is None:
-            app.renderer.console.print("[yellow]个人级 skill 但当前没有可写入的主目录，无法保存开关状态[/]")
+            console.print("[yellow]个人级 skill 但当前没有可写入的主目录，无法保存开关状态[/]")
             return False
         set_skill_enabled(path, name, enabled)
-        state = "启用" if enabled else "禁用"
-        app.renderer.console.print(f"[green]已{state}「{name}」（写入 {path}）[/]")
+        if enabled:
+            stack.skills_active.add(name)
+            console.print(f"[green]已启用「{name}」（写入 {path}），本会话已叠进 system[/]")
+            if not stack.skills_enabled:
+                console.print("[dim]只注入了这一个。/skills on 可打开全部未禁用的 skill。[/]")
+        else:
+            stack.skills_active.discard(name)
+            console.print(f"[green]已禁用「{name}」（写入 {path}），已从本会话 system 中移除[/]")
         return False
 
-    if not app.runtime.prompt_stack.skills_enabled:
-        app.renderer.console.print(
-            f"[yellow]Skills 自动注入总开关当前关闭（默认关闭），设置环境变量 "
-            f"{ENV_ENABLE_SKILLS}=1 后重启才会生效；下面各 skill 的启用状态不受影响[/]"
-        )
+    if args:
+        console.print("[yellow]用法：/skills | /skills on|off | /skills enable|disable <name>[/]")
+        return False
+
+    if not stack.skills_enabled:
+        if stack.skills_active:
+            console.print(
+                "[dim]自动注入未全开，仅标「启用」的会进 system。"
+                " /skills on 打开全部，/skills off 全部关掉。[/]"
+            )
+        else:
+            console.print(
+                "[yellow]Skills 自动注入当前关闭（启动默认）。"
+                f" /skills on 打开全部，或 /skills enable <name> 只注入某一个；"
+                f"{ENV_ENABLE_SKILLS}=1 可改启动默认值。[/]"
+            )
     skills = discover_skills(workspace, home=home)
     if not skills:
-        app.renderer.console.print("[dim]当前没有发现任何 skill（个人级 ~/.cyan/skills/，项目级 .cyan/skills/）[/]")
+        console.print("[dim]当前没有发现任何 skill（个人级 ~/.cyan/skills/，项目级 .cyan/skills/）[/]")
         return False
     for meta in skills:
-        status = "[green]启用[/]" if meta.enabled else "[red]已禁用[/]"
-        app.renderer.console.print(
-            f"  [bold]{meta.name}[/]  [dim]({meta.scope_label})[/]  {status}  {meta.description}"
+        console.print(
+            f"  [bold]{meta.name}[/]  [dim]({meta.scope_label})[/]  "
+            f"{_skill_injection_status(meta.name, meta.enabled, stack)}  {meta.description}"
         )
-        app.renderer.console.print(f"    [dim]{meta.path}[/]")
-    app.renderer.console.print("[dim]用 /skills disable|enable <name> 切换是否自动注入[/]")
+        console.print(f"    [dim]{meta.path}[/]")
+    console.print("[dim]/skills on|off 开关全部；/skills enable|disable <name> 切换单个[/]")
     return False
+
+
+def _skill_injection_status(name: str, per_skill_enabled: bool, stack: Any) -> str:
+    """列表状态跟会不会进 system 对齐：禁用 > 本会话未注入 > 真正启用。"""
+    if not per_skill_enabled:
+        return "[red]已禁用[/]"
+    injected = bool(stack.skills_enabled or name in stack.skills_active)
+    if injected:
+        return "[green]启用[/]"
+    return "[dim]未注入[/]"
 
 
 def _cmd_skill(app: App, args: list[str]) -> bool:
@@ -710,7 +745,14 @@ def build_default_commands() -> CommandRegistry:
     registry.register(SlashCommand("/usage", "/usage", "显示本会话的 token 与调用统计", _cmd_usage))
     registry.register(SlashCommand("/stream", "/stream [on|off]", "查看或切换流式输出", _cmd_stream))
     registry.register(SlashCommand("/instructions", "/instructions", "列出已加载的指令层（cyan.md）", _cmd_instructions))
-    registry.register(SlashCommand("/skills", "/skills", "列出发现的 Skills（个人级/项目级）", _cmd_skills))
+    registry.register(
+        SlashCommand(
+            "/skills",
+            "/skills [on|off|enable|disable <name>]",
+            "列出 Skills；on/off 本会话开关自动注入；enable/disable 单个",
+            _cmd_skills,
+        )
+    )
     registry.register(SlashCommand("/skill", "/skill", "为下一条任务手动指定一个 Skill（/skill <name>｜clear）", _cmd_skill))
     registry.register(SlashCommand("/memory", "/memory", "列出项目自动记忆文件", _cmd_memory))
     registry.register(
